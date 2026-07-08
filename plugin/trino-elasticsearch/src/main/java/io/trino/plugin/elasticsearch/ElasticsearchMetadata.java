@@ -530,7 +530,7 @@ public class ElasticsearchMetadata
                 .map(ElasticsearchColumnHandle::predicateName)
                 .collect(toImmutableSet());
 
-        JsonNode query = buildSearchQuery(handle.constraint().transformKeys(ElasticsearchColumnHandle.class::cast), handle.query(), handle.regexes(), handle.prefixes());
+        JsonNode query = buildSearchQuery(handle.constraint().transformKeys(ElasticsearchColumnHandle.class::cast), handle.query(), handle.regexes(), handle.prefixes(), handle.matchPhrasePrefixes());
         IndexStatistics indexStatistics = client.getIndexStatistics(handle.index(), query, fields, rangeFields);
 
         long rowCount = indexStatistics.documentCount();
@@ -591,7 +591,10 @@ public class ElasticsearchMetadata
         ColumnStatistics.Builder columnStatistics = ColumnStatistics.builder();
         statistics.cardinality().ifPresent(distinct -> columnStatistics.setDistinctValuesCount(Estimate.of(distinct)));
         if (rowCount > 0) {
-            statistics.valueCount().ifPresent(valueCount -> columnStatistics.setNullsFraction(Estimate.of((double) (rowCount - valueCount) / rowCount)));
+            // value_count counts every value, so a multi-valued field can report more values than documents; clamp to
+            // avoid a negative nullsFraction (which ColumnStatistics rejects)
+            statistics.valueCount().ifPresent(valueCount ->
+                    columnStatistics.setNullsFraction(Estimate.of(valueCount >= rowCount ? 0.0 : (double) (rowCount - valueCount) / rowCount)));
         }
         if (statistics.min().isPresent() && statistics.max().isPresent()) {
             double min = statistics.min().getAsDouble();
@@ -631,6 +634,7 @@ public class ElasticsearchMetadata
                 handle.constraint(),
                 handle.regexes(),
                 handle.prefixes(),
+                handle.matchPhrasePrefixes(),
                 handle.query(),
                 OptionalLong.of(limit),
                 handle.sortOrder(),
@@ -749,6 +753,7 @@ public class ElasticsearchMetadata
                 handle.constraint(),
                 handle.regexes(),
                 handle.prefixes(),
+                handle.matchPhrasePrefixes(),
                 handle.query(),
                 OptionalLong.empty(),
                 ImmutableList.of(),
@@ -795,7 +800,9 @@ public class ElasticsearchMetadata
     private static Optional<ElasticsearchAggregate> countAggregate(String outputName, Function function, List<ConnectorExpression> arguments, Map<String, ColumnHandle> assignments, Type outputType)
     {
         Optional<ElasticsearchColumnHandle> column = aggregateColumn(arguments, assignments);
-        if (column.isEmpty() || !isAggregatable(column.get().elasticsearchType())) {
+        // Reject array columns: value_count/cardinality aggregate individual array elements, not rows (the same
+        // exclusion statisticsColumns applies)
+        if (column.isEmpty() || column.get().type() instanceof ArrayType || !isAggregatable(column.get().elasticsearchType())) {
             return Optional.empty();
         }
         return Optional.of(new ElasticsearchAggregate(outputName, function, Optional.of(column.get().predicateName()), outputType));
@@ -804,7 +811,7 @@ public class ElasticsearchMetadata
     private static Optional<ElasticsearchAggregate> numericAggregate(String outputName, Function function, List<ConnectorExpression> arguments, Map<String, ColumnHandle> assignments, Type outputType)
     {
         Optional<ElasticsearchColumnHandle> column = aggregateColumn(arguments, assignments);
-        if (column.isEmpty() || !isNumericType(column.get().type())) {
+        if (column.isEmpty() || !supportsNumericAggregate(function, column.get().type())) {
             return Optional.empty();
         }
         return Optional.of(new ElasticsearchAggregate(outputName, function, Optional.of(column.get().predicateName()), outputType));
@@ -825,6 +832,18 @@ public class ElasticsearchMetadata
     private static boolean isNumericType(Type type)
     {
         return type.equals(TINYINT) || type.equals(SMALLINT) || type.equals(INTEGER) || type.equals(BIGINT) || type.equals(REAL) || type.equals(DOUBLE);
+    }
+
+    private static boolean supportsNumericAggregate(Function function, Type type)
+    {
+        // Elasticsearch computes metric aggregations in double precision, so pushdown is only exact within a double's
+        // 2^53 integer range. sum/avg accumulate and must stay on floating-point columns; min/max return an actual
+        // value, so only a 64-bit bigint can exceed the exact range.
+        return switch (function) {
+            case SUM, AVG -> type.equals(DOUBLE) || type.equals(REAL);
+            case MIN, MAX -> isNumericType(type) && !type.equals(BIGINT);
+            default -> false;
+        };
     }
 
     private static boolean isSupportedGroupingType(Type type)
@@ -896,6 +915,7 @@ public class ElasticsearchMetadata
         ConnectorExpression oldExpression = constraint.getExpression();
         Map<String, String> newRegexes = new HashMap<>(handle.regexes());
         Map<String, String> newPrefixes = new HashMap<>(handle.prefixes());
+        Map<String, String> newMatchPhrasePrefixes = new HashMap<>(handle.matchPhrasePrefixes());
         List<ConnectorExpression> expressions = ConnectorExpressions.extractConjuncts(constraint.getExpression());
         List<ConnectorExpression> notHandledExpressions = new ArrayList<>();
         for (ConnectorExpression expression : expressions) {
@@ -915,17 +935,28 @@ public class ElasticsearchMetadata
                     boolean fullTextLike = !exactLike && fullTextMode != FullTextPushdownMode.DISABLED && column.type() instanceof VarcharType;
                     if (pattern instanceof Slice slice && (exactLike || fullTextLike)) {
                         String predicateName = column.predicateName();
-                        if (!newRegexes.containsKey(predicateName) && !newPrefixes.containsKey(predicateName)) {
+                        if (!newRegexes.containsKey(predicateName) && !newPrefixes.containsKey(predicateName) && !newMatchPhrasePrefixes.containsKey(predicateName)) {
                             Optional<String> prefix = likePrefix(slice, escape);
-                            if (prefix.isPresent()) {
-                                // A pure prefix pattern (literal%) maps to a fast Elasticsearch prefix query
+                            boolean pushed = true;
+                            if (prefix.isPresent() && exactLike) {
+                                // A pure prefix pattern (literal%) on a keyword field maps to a fast, exact prefix query
                                 newPrefixes.put(predicateName, prefix.get());
                             }
-                            else {
+                            else if (prefix.isPresent()) {
+                                // On analyzed text a match_phrase_prefix keeps a multi-token prefix as a phrase, which a
+                                // per-token prefix query cannot match
+                                newMatchPhrasePrefixes.put(predicateName, prefix.get());
+                            }
+                            else if (exactLike || !patternSpansTokens(pattern)) {
+                                // Exact keyword, or a single-token full-text pattern a per-token regexp can still match
                                 newRegexes.put(predicateName, likeToRegexp(slice, escape));
                             }
+                            else {
+                                // A multi-token full-text contains pattern would match nothing per token; leave it to the engine
+                                pushed = false;
+                            }
                             // Exact (keyword) or UNSAFE full text is authoritative; SAFE full text keeps the exact residual
-                            if (exactLike || fullTextMode == FullTextPushdownMode.UNSAFE) {
+                            if (pushed && (exactLike || fullTextMode == FullTextPushdownMode.UNSAFE)) {
                                 continue;
                             }
                         }
@@ -942,7 +973,9 @@ public class ElasticsearchMetadata
                         if (column != null && column.type() instanceof VarcharType) {
                             String predicateName = column.predicateName();
                             if (!newRegexes.containsKey(predicateName) && !newPrefixes.containsKey(predicateName)) {
-                                newRegexes.put(predicateName, regexp.toStringUtf8());
+                                // Trino regexp_like is an unanchored (substring) match, but an Elasticsearch regexp query is
+                                // anchored to the whole term, so wrap the pattern to keep the pushed query a superset
+                                newRegexes.put(predicateName, ".*(" + regexp.toStringUtf8() + ").*");
                                 if (fullTextMode == FullTextPushdownMode.UNSAFE) {
                                     continue;
                                 }
@@ -965,7 +998,8 @@ public class ElasticsearchMetadata
 
         ConnectorExpression newExpression = ConnectorExpressions.and(notHandledExpressions);
         if (oldDomain.equals(newDomain) && oldExpression.equals(newExpression)
-                && handle.regexes().equals(newRegexes) && handle.prefixes().equals(newPrefixes)) {
+                && handle.regexes().equals(newRegexes) && handle.prefixes().equals(newPrefixes)
+                && handle.matchPhrasePrefixes().equals(newMatchPhrasePrefixes)) {
             return Optional.empty();
         }
 
@@ -976,6 +1010,7 @@ public class ElasticsearchMetadata
                 newDomain,
                 newRegexes,
                 newPrefixes,
+                newMatchPhrasePrefixes,
                 handle.query(),
                 handle.limit(),
                 handle.sortOrder(),
@@ -1293,6 +1328,13 @@ public class ElasticsearchMetadata
             case VarcharType _ when type instanceof PrimitiveType primitiveType && (primitiveType.name().toLowerCase(ENGLISH).equals("keyword") || primitiveType.keyword().isPresent()) -> true;
             default -> false;
         };
+    }
+
+    private static boolean patternSpansTokens(Object pattern)
+    {
+        // Whitespace in a LIKE pattern almost always crosses an analyzer token boundary, where a per-token
+        // prefix/regexp query cannot match; used to keep full-text LIKE pushdown from silently dropping rows
+        return pattern instanceof Slice slice && slice.toStringUtf8().codePoints().anyMatch(Character::isWhitespace);
     }
 
     private static boolean supportsLikePushdown(ElasticsearchColumnHandle column)

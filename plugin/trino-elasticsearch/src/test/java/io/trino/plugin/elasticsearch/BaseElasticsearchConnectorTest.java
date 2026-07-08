@@ -123,12 +123,107 @@ public abstract class BaseElasticsearchConnectorTest
 
         // Pushdown: the plan is fully pushed for supported aggregates
         assertThat(query("SELECT count(*) FROM nation")).isFullyPushedDown();
-        assertThat(query("SELECT sum(nationkey), min(nationkey), max(nationkey), avg(nationkey) FROM nation")).isFullyPushedDown();
-        assertThat(query("SELECT regionkey, max(nationkey) FROM nation GROUP BY regionkey")).isFullyPushedDown();
+        // sum/min/max/avg push down on floating-point columns (Elasticsearch computes metric aggregations in double)
+        assertThat(query("SELECT sum(totalprice), min(totalprice), max(totalprice), avg(totalprice) FROM orders")).isFullyPushedDown();
         assertThat(query("SELECT regionkey, count(*) FROM nation WHERE nationkey < 10 GROUP BY regionkey")).isFullyPushedDown();
+        // sum/min/max/avg on a 64-bit bigint column are NOT pushed down: Elasticsearch metric aggregations are computed
+        // in double precision and lose accuracy above 2^53
+        assertThat(query("SELECT sum(nationkey), min(nationkey), max(nationkey), avg(nationkey) FROM nation"))
+                .isNotFullyPushedDown(io.trino.sql.planner.plan.AggregationNode.class);
 
         // count(DISTINCT) is exact and must NOT be pushed down as an approximate cardinality
         assertThat(query("SELECT count(DISTINCT regionkey) FROM nation")).isNotFullyPushedDown(io.trino.sql.planner.plan.AggregationNode.class);
+    }
+
+    @Test
+    public void testAggregationPushdownEdgeCases()
+            throws IOException
+    {
+        String indexName = "agg_edge_cases";
+        @Language("JSON")
+        String properties =
+                """
+                {
+                  "properties": {
+                    "group_key": { "type": "keyword" },
+                    "amount": { "type": "double" },
+                    "tags": { "type": "keyword" },
+                    "scalar_multi": { "type": "keyword" }
+                  },
+                  "_meta": { "trino": { "tags": { "isArray": true } } }
+                }
+                """;
+        createIndex(indexName, properties);
+        index(indexName, ImmutableMap.<String, Object>builder()
+                .put("group_key", "a")
+                .put("amount", 1.0)
+                .put("tags", ImmutableList.of("x", "y"))
+                .put("scalar_multi", ImmutableList.of("p", "q", "r"))
+                .buildOrThrow());
+        // group_key is missing on this document, so it belongs to the SQL NULL group
+        index(indexName, ImmutableMap.<String, Object>builder()
+                .put("amount", 2.0)
+                .put("tags", ImmutableList.of("z"))
+                .buildOrThrow());
+
+        // A composite aggregation must keep the NULL group (missing_bucket) instead of dropping the document
+        assertThat(query("SELECT group_key, count(*) FROM " + indexName + " GROUP BY group_key"))
+                .matches("VALUES (VARCHAR 'a', BIGINT '1'), (CAST(NULL AS varchar), BIGINT '1')")
+                .isFullyPushedDown();
+
+        // count/approx_distinct over an array column are NOT pushed down (they would aggregate array elements, not rows)
+        assertThat(query("SELECT count(tags) FROM " + indexName))
+                .matches("VALUES BIGINT '2'")
+                .isNotFullyPushedDown(io.trino.sql.planner.plan.AggregationNode.class);
+        assertThat(query("SELECT approx_distinct(tags) FROM " + indexName))
+                .isNotFullyPushedDown(io.trino.sql.planner.plan.AggregationNode.class);
+
+        // Statistics on a scalar-typed column that actually holds arrays must not fail planning (nullsFraction is clamped)
+        assertQuerySucceeds("SHOW STATS FOR " + indexName);
+
+        deleteIndex(indexName);
+    }
+
+    @Test
+    public void testNormalizedKeywordNotPushedDown()
+            throws IOException
+    {
+        String indexName = "normalized_keyword";
+        // A keyword field with a normalizer stores a rewritten (lowercased) value, so it is not exact for pushdown
+        @Language("JSON")
+        String body =
+                """
+                {
+                  "settings": {
+                    "analysis": { "normalizer": { "lower": { "type": "custom", "filter": ["lowercase"] } } }
+                  },
+                  "mappings": {
+                    "properties": {
+                      "city": { "type": "keyword", "normalizer": "lower" },
+                      "id": { "type": "keyword" }
+                    }
+                  }
+                }
+                """;
+        Request request = new Request("PUT", "/" + indexName);
+        request.setJsonEntity(body);
+        client.performRequest(request);
+
+        index(indexName, ImmutableMap.of("city", "Paris", "id", "1"));
+        index(indexName, ImmutableMap.of("city", "LONDON", "id", "2"));
+
+        // An exact predicate on a normalized keyword must be evaluated by the engine: a pushed term query would
+        // lowercase-match and wrongly return the row for 'paris'
+        assertThat(query("SELECT id FROM " + indexName + " WHERE city = 'paris'"))
+                .isNotFullyPushedDown(io.trino.sql.planner.plan.FilterNode.class);
+        assertQueryReturnsEmptyResult("SELECT id FROM " + indexName + " WHERE city = 'paris'");
+        assertThat(query("SELECT id FROM " + indexName + " WHERE city = 'Paris'")).matches("VALUES VARCHAR '1'");
+
+        // ORDER BY on a normalized keyword must not be pushed (Elasticsearch would sort by the lowercased value)
+        assertThat(query("SELECT id FROM " + indexName + " ORDER BY city LIMIT 1"))
+                .isNotFullyPushedDown(io.trino.sql.planner.plan.TopNNode.class);
+
+        deleteIndex(indexName);
     }
 
     /**
@@ -1207,6 +1302,14 @@ public abstract class BaseElasticsearchConnectorTest
         assertThat(query(unsafeFullText, "SELECT text_column FROM " + indexName + " WHERE regexp_like(text_column, 'soome')"))
                 .isFullyPushedDown();
         assertThat(query(safeFullText, "SELECT text_column FROM " + indexName + " WHERE regexp_like(text_column, 'soome')"))
+                .isNotFullyPushedDown(io.trino.sql.planner.plan.FilterNode.class);
+
+        // A multi-token LIKE prefix is pushed as a match_phrase_prefix pre-filter; the engine keeps the exact prefix
+        // range as a residual, so the result stays correct (only "soome tex\t" starts with "soome te")
+        assertThat(query(unsafeFullText, "SELECT text_column FROM " + indexName + " WHERE text_column LIKE 'soome te%'"))
+                .matches("VALUES VARCHAR 'soome tex\\t'");
+        // A multi-token contains pattern has no usable prefix and would match nothing per token, so it is left to the engine
+        assertThat(query(unsafeFullText, "SELECT text_column FROM " + indexName + " WHERE text_column LIKE '%soo me%'"))
                 .isNotFullyPushedDown(io.trino.sql.planner.plan.FilterNode.class);
 
         assertThat(query(
