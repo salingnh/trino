@@ -532,6 +532,11 @@ public class ElasticsearchClient
                     if (type.equals("text")) {
                         primitiveType = new IndexMetadata.PrimitiveType(type, keywordSubfield(value, keywordSubfieldPushdownWithIgnoreAbove));
                     }
+                    else if (type.equals("keyword") && value.get("normalizer") != null) {
+                        // A keyword field with a normalizer stores a rewritten (for example lowercased) value, not the
+                        // verbatim source, so it is not exact for predicate/sort/aggregation pushdown; treat it as analyzed text
+                        primitiveType = new IndexMetadata.PrimitiveType("text");
+                    }
                     else {
                         primitiveType = new IndexMetadata.PrimitiveType(type);
                     }
@@ -555,6 +560,11 @@ public class ElasticsearchClient
             JsonNode subfieldNode = subfield.getValue();
             JsonNode type = subfieldNode.get("type");
             if (type == null || !"keyword".equals(type.asText())) {
+                continue;
+            }
+            // A normalizer rewrites the value (for example lowercasing), so the sub-field is not a verbatim copy of the
+            // source and is unsafe for exact predicate/sort/aggregation pushdown
+            if (subfieldNode.get("normalizer") != null) {
                 continue;
             }
             // A keyword sub-field without ignore_above indexes every value and is always safe for pushdown, so prefer it

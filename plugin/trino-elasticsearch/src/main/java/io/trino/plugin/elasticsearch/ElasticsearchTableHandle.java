@@ -36,6 +36,7 @@ public record ElasticsearchTableHandle(
         TupleDomain<ColumnHandle> constraint,
         Map<String, String> regexes,
         Map<String, String> prefixes,
+        Map<String, String> matchPhrasePrefixes,
         Optional<String> query,
         OptionalLong limit,
         List<ElasticsearchColumnSort> sortOrder,
@@ -56,6 +57,7 @@ public record ElasticsearchTableHandle(
                 TupleDomain.all(),
                 ImmutableMap.of(),
                 ImmutableMap.of(),
+                ImmutableMap.of(),
                 query,
                 OptionalLong.empty(),
                 ImmutableList.of(),
@@ -72,6 +74,7 @@ public record ElasticsearchTableHandle(
                 constraint,
                 regexes,
                 prefixes,
+                matchPhrasePrefixes,
                 query,
                 limit,
                 sortOrder,
@@ -88,6 +91,7 @@ public record ElasticsearchTableHandle(
                 constraint,
                 regexes,
                 prefixes,
+                matchPhrasePrefixes,
                 query,
                 limit,
                 sortOrder,
@@ -104,6 +108,7 @@ public record ElasticsearchTableHandle(
                 constraint,
                 regexes,
                 prefixes,
+                matchPhrasePrefixes,
                 query,
                 OptionalLong.of(limit),
                 sortOrder,
@@ -119,6 +124,7 @@ public record ElasticsearchTableHandle(
         requireNonNull(constraint, "constraint is null");
         regexes = ImmutableMap.copyOf(regexes);
         prefixes = ImmutableMap.copyOf(prefixes);
+        matchPhrasePrefixes = ImmutableMap.copyOf(matchPhrasePrefixes);
         columns = ImmutableSet.copyOf(columns);
         sortOrder = ImmutableList.copyOf(sortOrder);
         requireNonNull(query, "query is null");
@@ -143,6 +149,13 @@ public record ElasticsearchTableHandle(
         if (!prefixes.isEmpty()) {
             attributes.append("prefixes=[");
             attributes.append(prefixes.entrySet().stream()
+                    .map(prefix -> prefix.getKey() + ":" + prefix.getValue())
+                    .collect(Collectors.joining(", ")));
+            attributes.append("]");
+        }
+        if (!matchPhrasePrefixes.isEmpty()) {
+            attributes.append("matchPhrasePrefixes=[");
+            attributes.append(matchPhrasePrefixes.entrySet().stream()
                     .map(prefix -> prefix.getKey() + ":" + prefix.getValue())
                     .collect(Collectors.joining(", ")));
             attributes.append("]");

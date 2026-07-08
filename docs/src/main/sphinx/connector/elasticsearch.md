@@ -559,18 +559,27 @@ because a `text` field is tokenized and does not preserve exact string values.
 The `elasticsearch.full-text-pushdown` configuration property, or the
 `full_text_pushdown_mode` session property, opts in to pushing these predicates
 down as Elasticsearch full-text queries. Equality and `IN` predicates become a
-`match_phrase` query; `LIKE` and `regexp_like` become a `regexp` query, which
-Elasticsearch evaluates per token using Lucene regular expression syntax. Because
-tokenization, lowercasing, and stemming apply, results can differ from exact SQL
-semantics. Three modes are available:
+`match_phrase` query, a `LIKE` prefix pattern (`abc%`) becomes a
+`match_phrase_prefix` query, and other `LIKE` patterns and `regexp_like` become a
+`regexp` query, which Elasticsearch evaluates per token using Lucene regular
+expression syntax. Because tokenization, lowercasing, and stemming apply, results
+can differ from exact SQL semantics. Three modes are available:
 
 - `DISABLED`, the default: text predicates are evaluated by the engine only.
-- `SAFE`: push a `match_phrase` pre-filter but re-apply the exact predicate in
-  the engine. This removes false positives, but a value that analyzes to nothing,
-  such as a stop word, can still be dropped.
-- `UNSAFE`: push the `match_phrase` query and trust the Elasticsearch result.
-  Fully pushed down and fastest, but results follow Elasticsearch analysis
-  semantics.
+- `SAFE`: push a full-text pre-filter but re-apply the exact predicate in the
+  engine, which removes false positives. This is *not* lossless: because the
+  pre-filter is not a guaranteed superset, rows can still be dropped — for
+  example a value that analyzes to nothing, such as a stop word, or a
+  `regexp_like` pattern that matches across analyzer token boundaries, because
+  Elasticsearch matches per token rather than across the whole string. A
+  multi-token `LIKE` prefix is pushed as a `match_phrase_prefix` pre-filter while
+  the engine keeps the exact prefix range, so its result stays correct; a
+  multi-token contains pattern is left to the engine.
+- `UNSAFE`: push the full-text query and trust the Elasticsearch result. Fully
+  pushed down and fastest, but results follow Elasticsearch analysis semantics.
+
+Both `SAFE` and `UNSAFE` are therefore approximate on analyzed `text`; only a
+predicate on a field with an exact-match `keyword` sub-field is exact.
 
 Dynamic filters on `text` join keys are always safe to push, because the join
 re-checks the key. They are pushed as `match_phrase` pre-filters whenever the

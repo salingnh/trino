@@ -72,7 +72,8 @@ class AggregationQueryPageSource
                 table.constraint().transformKeys(ElasticsearchColumnHandle.class::cast),
                 table.query(),
                 table.regexes(),
-                table.prefixes());
+                table.prefixes(),
+                table.matchPhrasePrefixes());
         ElasticsearchAggregation aggregation = table.aggregation().orElseThrow(() -> new IllegalArgumentException("table handle has no aggregation"));
         this.groupingColumns = aggregation.groupingColumns();
         this.aggregates = aggregation.aggregates();

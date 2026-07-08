@@ -55,7 +55,7 @@ public final class ElasticsearchQueryBuilder
 
     private ElasticsearchQueryBuilder() {}
 
-    public static JsonNode buildSearchQuery(TupleDomain<ElasticsearchColumnHandle> constraint, Optional<String> query, Map<String, String> regexes, Map<String, String> prefixes)
+    public static JsonNode buildSearchQuery(TupleDomain<ElasticsearchColumnHandle> constraint, Optional<String> query, Map<String, String> regexes, Map<String, String> prefixes, Map<String, String> matchPhrasePrefixes)
     {
         ArrayNode filterClauses = JSON.arrayNode();
         ArrayNode mustNotClauses = JSON.arrayNode();
@@ -81,6 +81,9 @@ public final class ElasticsearchQueryBuilder
                         boolQuery().set("must", JSON.arrayNode().add(regexpQuery(name, value))))));
 
         prefixes.forEach((name, value) -> filterClauses.add(prefixQuery(name, value)));
+
+        // On an analyzed text field a match_phrase_prefix keeps the multi-token prefix as a phrase (unlike a per-token prefix query)
+        matchPhrasePrefixes.forEach((name, value) -> filterClauses.add(matchPhrasePrefixQuery(name, value)));
 
         query.ifPresent(q -> mustClauses.add(queryStringQuery(q)));
 
@@ -157,7 +160,9 @@ public final class ElasticsearchQueryBuilder
         // Grouped aggregation: a composite aggregation paginates deterministically over the grouping keys
         ArrayNode sources = JSON.arrayNode();
         for (int i = 0; i < groupingColumns.size(); i++) {
-            ObjectNode terms = JSON.objectNode().set("terms", JSON.objectNode().put("field", groupingColumns.get(i).predicateName()));
+            // missing_bucket:true keeps documents whose grouping field is null/missing, so the SQL NULL group is not dropped
+            ObjectNode termsSource = JSON.objectNode().put("field", groupingColumns.get(i).predicateName()).put("missing_bucket", true);
+            ObjectNode terms = JSON.objectNode().set("terms", termsSource);
             sources.add(JSON.objectNode().set("g" + i, terms));
         }
         ObjectNode composite = JSON.objectNode();
@@ -340,6 +345,13 @@ public final class ElasticsearchQueryBuilder
     {
         return JSON.objectNode().set(
                 "prefix",
+                JSON.objectNode().put(field, value));
+    }
+
+    private static ObjectNode matchPhrasePrefixQuery(String field, String value)
+    {
+        return JSON.objectNode().set(
+                "match_phrase_prefix",
                 JSON.objectNode().put(field, value));
     }
 
