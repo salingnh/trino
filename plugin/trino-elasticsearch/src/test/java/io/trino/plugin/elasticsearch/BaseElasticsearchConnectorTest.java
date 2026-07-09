@@ -226,6 +226,42 @@ public abstract class BaseElasticsearchConnectorTest
         deleteIndex(indexName);
     }
 
+    @Test
+    public void testKeywordSubfieldPushdownSessionProperty()
+            throws IOException
+    {
+        String indexName = "keyword_ignore_above";
+        @Language("JSON")
+        String properties =
+                """
+                {
+                  "properties": {
+                    "text_bounded": { "type": "text", "fields": { "keyword": { "type": "keyword", "ignore_above": 256 } } },
+                    "id": { "type": "keyword" }
+                  }
+                }
+                """;
+        createIndex(indexName, properties);
+        index(indexName, ImmutableMap.of("text_bounded", "hello", "id", "1"));
+
+        String catalogName = getSession().getCatalog().orElseThrow();
+        Session withBounded = Session.builder(getSession())
+                .setCatalogSessionProperty(catalogName, "keyword_subfield_pushdown_with_ignore_above", "true").build();
+        Session withoutBounded = Session.builder(getSession())
+                .setCatalogSessionProperty(catalogName, "keyword_subfield_pushdown_with_ignore_above", "false").build();
+
+        // Default off: a keyword sub-field with ignore_above is not used, so the text predicate is left to the engine
+        assertThat(query(withoutBounded, "SELECT id FROM " + indexName + " WHERE text_bounded = 'hello'"))
+                .matches("VALUES VARCHAR '1'")
+                .isNotFullyPushedDown(io.trino.sql.planner.plan.FilterNode.class);
+        // Session opt-in: the predicate is pushed down exactly on the keyword sub-field
+        assertThat(query(withBounded, "SELECT id FROM " + indexName + " WHERE text_bounded = 'hello'"))
+                .matches("VALUES VARCHAR '1'")
+                .isFullyPushedDown();
+
+        deleteIndex(indexName);
+    }
+
     /**
      * This method overrides the default values used for the data provider
      * of the test {@link AbstractTestQueries#testLargeIn()} by taking
