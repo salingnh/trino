@@ -128,6 +128,7 @@ import static io.trino.plugin.base.projection.ApplyProjectionUtil.extractSupport
 import static io.trino.plugin.base.projection.ApplyProjectionUtil.replaceWithNewVariables;
 import static io.trino.plugin.elasticsearch.ElasticsearchQueryBuilder.buildSearchQuery;
 import static io.trino.plugin.elasticsearch.ElasticsearchSessionProperties.getFullTextPushdownMode;
+import static io.trino.plugin.elasticsearch.ElasticsearchSessionProperties.getKeywordSubfieldPushdownWithIgnoreAbove;
 import static io.trino.plugin.elasticsearch.ElasticsearchSessionProperties.isAggregationPushdownEnabled;
 import static io.trino.plugin.elasticsearch.ElasticsearchTableHandle.Type.QUERY;
 import static io.trino.plugin.elasticsearch.ElasticsearchTableHandle.Type.SCAN;
@@ -240,19 +241,19 @@ public class ElasticsearchMetadata
 
     private ConnectorTableMetadata getTableMetadata(String schemaName, String tableName)
     {
-        InternalTableMetadata internalTableMetadata = makeInternalTableMetadata(schemaName, tableName);
+        InternalTableMetadata internalTableMetadata = makeInternalTableMetadata(schemaName, tableName, client.isKeywordSubfieldPushdownWithIgnoreAbove());
         return new ConnectorTableMetadata(new SchemaTableName(schemaName, tableName), internalTableMetadata.columnMetadata());
     }
 
-    private InternalTableMetadata makeInternalTableMetadata(ConnectorTableHandle table)
+    private InternalTableMetadata makeInternalTableMetadata(ConnectorTableHandle table, boolean useBoundedKeyword)
     {
         ElasticsearchTableHandle handle = (ElasticsearchTableHandle) table;
-        return makeInternalTableMetadata(handle.schema(), handle.index());
+        return makeInternalTableMetadata(handle.schema(), handle.index(), useBoundedKeyword);
     }
 
-    private InternalTableMetadata makeInternalTableMetadata(String schema, String tableName)
+    private InternalTableMetadata makeInternalTableMetadata(String schema, String tableName, boolean useBoundedKeyword)
     {
-        IndexMetadata metadata = client.getIndexMetadata(tableName);
+        IndexMetadata metadata = client.getIndexMetadata(tableName, useBoundedKeyword);
         List<IndexMetadata.Field> fields = getColumnFields(metadata);
         return new InternalTableMetadata(new SchemaTableName(schema, tableName), makeColumnMetadata(fields), makeColumnHandles(fields));
     }
@@ -423,7 +424,7 @@ public class ElasticsearchMetadata
             return PASSTHROUGH_QUERY_COLUMNS;
         }
 
-        InternalTableMetadata tableMetadata = makeInternalTableMetadata(tableHandle);
+        InternalTableMetadata tableMetadata = makeInternalTableMetadata(tableHandle, getKeywordSubfieldPushdownWithIgnoreAbove(session));
         return tableMetadata.columnHandles();
     }
 
@@ -519,7 +520,7 @@ public class ElasticsearchMetadata
         }
 
         // Even when no column is aggregatable the row count is still valuable to the cost-based optimizer
-        List<ElasticsearchColumnHandle> columns = statisticsColumns(handle);
+        List<ElasticsearchColumnHandle> columns = statisticsColumns(handle, getKeywordSubfieldPushdownWithIgnoreAbove(session));
 
         // Text fields with a safe keyword sub-field are aggregated on the sub-field, so use the predicate field name
         List<String> fields = columns.stream()
@@ -545,11 +546,11 @@ public class ElasticsearchMetadata
         return tableStatistics.build();
     }
 
-    private List<ElasticsearchColumnHandle> statisticsColumns(ElasticsearchTableHandle handle)
+    private List<ElasticsearchColumnHandle> statisticsColumns(ElasticsearchTableHandle handle, boolean useBoundedKeyword)
     {
         Collection<ElasticsearchColumnHandle> columns;
         if (handle.columns().isEmpty()) {
-            columns = makeInternalTableMetadata(handle.schema(), handle.index()).columnHandles().values().stream()
+            columns = makeInternalTableMetadata(handle.schema(), handle.index(), useBoundedKeyword).columnHandles().values().stream()
                     .map(ElasticsearchColumnHandle.class::cast)
                     .collect(toImmutableList());
         }

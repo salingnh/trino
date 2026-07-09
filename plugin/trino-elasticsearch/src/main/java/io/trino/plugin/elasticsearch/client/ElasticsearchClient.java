@@ -444,7 +444,17 @@ public class ElasticsearchClient
         });
     }
 
+    public boolean isKeywordSubfieldPushdownWithIgnoreAbove()
+    {
+        return keywordSubfieldPushdownWithIgnoreAbove;
+    }
+
     public IndexMetadata getIndexMetadata(String index)
+    {
+        return getIndexMetadata(index, keywordSubfieldPushdownWithIgnoreAbove);
+    }
+
+    public IndexMetadata getIndexMetadata(String index, boolean useBoundedKeyword)
     {
         String path = format("/%s/_mappings", index);
 
@@ -477,7 +487,7 @@ public class ElasticsearchClient
                     metaProperties = nullSafeNode(metaNode, "presto");
                 }
 
-                return new IndexMetadata(parseType(mappings.get("properties"), metaProperties));
+                return new IndexMetadata(parseType(mappings.get("properties"), metaProperties, useBoundedKeyword));
             }
             catch (IOException e) {
                 throw new TrinoException(ELASTICSEARCH_INVALID_RESPONSE, e);
@@ -485,7 +495,7 @@ public class ElasticsearchClient
         });
     }
 
-    private IndexMetadata.ObjectType parseType(JsonNode properties, JsonNode metaProperties)
+    private IndexMetadata.ObjectType parseType(JsonNode properties, JsonNode metaProperties, boolean useBoundedKeyword)
     {
         ImmutableList.Builder<IndexMetadata.Field> result = ImmutableList.builder();
         for (Entry<String, JsonNode> field : properties.properties()) {
@@ -521,7 +531,7 @@ public class ElasticsearchClient
                 case "scaled_float" -> result.add(new IndexMetadata.Field(asRawJson, isArray, name, new IndexMetadata.ScaledFloatType(value.get("scaling_factor").asDouble())));
                 case "nested", "object" -> {
                     if (value.has("properties")) {
-                        result.add(new IndexMetadata.Field(asRawJson, isArray, name, parseType(value.get("properties"), metaNode)));
+                        result.add(new IndexMetadata.Field(asRawJson, isArray, name, parseType(value.get("properties"), metaNode, useBoundedKeyword)));
                     }
                     else {
                         LOG.debug("Ignoring empty object field: %s", name);
@@ -530,7 +540,7 @@ public class ElasticsearchClient
                 default -> {
                     IndexMetadata.PrimitiveType primitiveType;
                     if (type.equals("text")) {
-                        primitiveType = new IndexMetadata.PrimitiveType(type, keywordSubfield(value, keywordSubfieldPushdownWithIgnoreAbove));
+                        primitiveType = new IndexMetadata.PrimitiveType(type, keywordSubfield(value, useBoundedKeyword));
                     }
                     else if (type.equals("keyword") && value.get("normalizer") != null) {
                         // A keyword field with a normalizer stores a rewritten (for example lowercased) value, not the

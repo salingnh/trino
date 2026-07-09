@@ -98,7 +98,8 @@ The following table details all general configuration properties:
     disabled by default because `ignore_above` omits longer values from the
     sub-field index, so pushed-down predicates could return incomplete results.
     Enable it only when all indexed string values are shorter than the
-    `ignore_above` limit.
+    `ignore_above` limit. Can be overridden per query with the
+    `keyword_subfield_pushdown_with_ignore_above` session property.
   - `false`
 * - `elasticsearch.aggregation-pushdown.enabled`
   - Enable pushing down aggregations to Elasticsearch. Can be overridden per

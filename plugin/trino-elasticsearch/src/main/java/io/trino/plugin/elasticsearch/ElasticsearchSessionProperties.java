@@ -32,6 +32,7 @@ public final class ElasticsearchSessionProperties
     public static final String DYNAMIC_FILTERING_WAIT_TIMEOUT = "dynamic_filtering_wait_timeout";
     public static final String AGGREGATION_PUSHDOWN_ENABLED = "aggregation_pushdown_enabled";
     public static final String FULL_TEXT_PUSHDOWN_MODE = "full_text_pushdown_mode";
+    public static final String KEYWORD_SUBFIELD_PUSHDOWN_WITH_IGNORE_ABOVE = "keyword_subfield_pushdown_with_ignore_above";
 
     private final List<PropertyMetadata<?>> sessionProperties;
 
@@ -55,6 +56,11 @@ public final class ElasticsearchSessionProperties
                         FullTextPushdownMode.class,
                         config.getFullTextPushdownMode(),
                         false))
+                .add(booleanProperty(
+                        KEYWORD_SUBFIELD_PUSHDOWN_WITH_IGNORE_ABOVE,
+                        "Use a text field's keyword sub-field that has an ignore_above limit for predicate, sort, and aggregation pushdown",
+                        config.isKeywordSubfieldPushdownWithIgnoreAbove(),
+                        false))
                 .build();
     }
 
@@ -77,5 +83,10 @@ public final class ElasticsearchSessionProperties
     public static FullTextPushdownMode getFullTextPushdownMode(ConnectorSession session)
     {
         return session.getProperty(FULL_TEXT_PUSHDOWN_MODE, FullTextPushdownMode.class);
+    }
+
+    public static boolean getKeywordSubfieldPushdownWithIgnoreAbove(ConnectorSession session)
+    {
+        return session.getProperty(KEYWORD_SUBFIELD_PUSHDOWN_WITH_IGNORE_ABOVE, Boolean.class);
     }
 }
