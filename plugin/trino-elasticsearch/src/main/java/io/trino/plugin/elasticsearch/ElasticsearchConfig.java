@@ -79,6 +79,9 @@ public class ElasticsearchConfig
 
     private Security security;
     private boolean statisticsEnabled = true;
+    private long statisticsMaxIndexDocuments = 20_000_000;
+    private int statisticsMaxColumns = 32;
+    private Duration statisticsRequestTimeout = new Duration(5, SECONDS);
     private Duration dynamicFilteringWaitTimeout = new Duration(5, SECONDS);
     private boolean keywordSubfieldPushdownWithIgnoreAbove;
     private boolean aggregationPushdownEnabled = true;
@@ -371,6 +374,48 @@ public class ElasticsearchConfig
     public ElasticsearchConfig setStatisticsEnabled(boolean statisticsEnabled)
     {
         this.statisticsEnabled = statisticsEnabled;
+        return this;
+    }
+
+    @Min(0)
+    public long getStatisticsMaxIndexDocuments()
+    {
+        return statisticsMaxIndexDocuments;
+    }
+
+    @Config("elasticsearch.statistics.max-index-documents")
+    @ConfigDescription("Collect per-column statistics only for indices with at most this many documents; the row count is always collected")
+    public ElasticsearchConfig setStatisticsMaxIndexDocuments(long statisticsMaxIndexDocuments)
+    {
+        this.statisticsMaxIndexDocuments = statisticsMaxIndexDocuments;
+        return this;
+    }
+
+    @Min(1)
+    public int getStatisticsMaxColumns()
+    {
+        return statisticsMaxColumns;
+    }
+
+    @Config("elasticsearch.statistics.max-statistics-columns")
+    @ConfigDescription("Maximum number of columns to collect per-column statistics for; columns referenced by the query (filters, group by, sort) are prioritized")
+    public ElasticsearchConfig setStatisticsMaxColumns(int statisticsMaxColumns)
+    {
+        this.statisticsMaxColumns = statisticsMaxColumns;
+        return this;
+    }
+
+    @NotNull
+    public Duration getStatisticsRequestTimeout()
+    {
+        return statisticsRequestTimeout;
+    }
+
+    @Config("elasticsearch.statistics.request-timeout")
+    @ConfigDescription("Socket timeout for a single per-column statistics request; a slow aggregation fails fast (no retry) and falls back to the row count instead of blocking query planning")
+    public ElasticsearchConfig setStatisticsRequestTimeout(Duration statisticsRequestTimeout)
+    {
+        this.statisticsRequestTimeout = statisticsRequestTimeout;
         return this;
     }
 

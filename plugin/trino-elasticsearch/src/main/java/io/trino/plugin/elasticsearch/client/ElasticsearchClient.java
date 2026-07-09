@@ -120,6 +120,7 @@ public class ElasticsearchClient
     private final BackpressureRestClient client;
     private final int scrollSize;
     private final Duration scrollTimeout;
+    private final int statisticsRequestTimeoutMillis;
 
     private final AtomicReference<Set<ElasticsearchNode>> nodes = new AtomicReference<>(ImmutableSet.of());
     private final ScheduledExecutorService executor = newSingleThreadScheduledExecutor(daemonThreadsNamed("NodeRefresher"));
@@ -145,6 +146,7 @@ public class ElasticsearchClient
         this.ignorePublishAddress = config.isIgnorePublishAddress();
         this.scrollSize = config.getScrollSize();
         this.scrollTimeout = config.getScrollTimeout();
+        this.statisticsRequestTimeoutMillis = toIntExact(config.getStatisticsRequestTimeout().toMillis());
         this.refreshInterval = config.getNodeRefreshInterval();
         this.tlsEnabled = config.isTlsEnabled();
         this.keywordSubfieldPushdownWithIgnoreAbove = config.isKeywordSubfieldPushdownWithIgnoreAbove();
@@ -759,7 +761,7 @@ public class ElasticsearchClient
         }
     }
 
-    public IndexStatistics getIndexStatistics(String index, JsonNode query, List<String> fields, Set<String> rangeFields)
+    public IndexStatistics getIndexStatistics(String index, JsonNode query, List<String> fields, Set<String> rangeFields, boolean includeCardinality)
     {
         ObjectNode body = JSON.objectNode();
         body.put("size", 0);
@@ -770,7 +772,10 @@ public class ElasticsearchClient
         for (int i = 0; i < fields.size(); i++) {
             String field = fields.get(i);
             String name = "f" + i;
-            aggregations.set(name + "_card", fieldAggregation("cardinality", field));
+            // cardinality (HyperLogLog) is the expensive per-document aggregation; skip it on large indices
+            if (includeCardinality) {
+                aggregations.set(name + "_card", fieldAggregation("cardinality", field));
+            }
             aggregations.set(name + "_count", fieldAggregation("value_count", field));
             if (rangeFields.contains(field)) {
                 aggregations.set(name + "_min", fieldAggregation("min", field));
@@ -783,11 +788,12 @@ public class ElasticsearchClient
 
         Response response;
         try {
-            response = client.performRequest(
+            response = client.performRequestWithTimeout(
                     "POST",
                     format("/%s/_search", index),
                     ImmutableMap.of(),
                     new StringEntity(body.toString(), UTF_8),
+                    statisticsRequestTimeoutMillis,
                     new BasicHeader("Content-Type", "application/json"));
         }
         catch (ResponseException e) {

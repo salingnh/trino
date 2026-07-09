@@ -20,7 +20,9 @@ package io.trino.plugin.elasticsearch;
  */
 public enum FullTextPushdownMode
 {
-    /** Strict, default. Predicates on analyzed {@code text} fields are left to the engine (exact SQL semantics). */
+    /**
+     * Strict, default. Predicates on analyzed {@code text} fields are left to the engine (exact SQL semantics).
+     */
     DISABLED,
     /**
      * Push a full-text query as a pre-filter but keep the exact predicate as a residual filter, so the engine

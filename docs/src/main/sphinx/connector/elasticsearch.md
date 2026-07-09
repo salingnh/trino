@@ -85,6 +85,21 @@ The following table details all general configuration properties:
     (document count, distinct values, null fractions, and min/max ranges) so the
     cost-based optimizer can better plan joins and other operations.
   - `true`
+* - `elasticsearch.statistics.max-index-documents`
+  - Collect per-column statistics only for indices with at most this many
+    documents. Larger indices report the row count only, avoiding a per-column
+    aggregation over every document that can time out during planning.
+  - `20000000`
+* - `elasticsearch.statistics.max-statistics-columns`
+  - Maximum number of columns to collect per-column statistics for. Statistics are
+    collected only for columns the query references (filter, `GROUP BY`, and sort
+    columns); this bounds that set.
+  - `32`
+* - `elasticsearch.statistics.request-timeout`
+  - Socket timeout for a single per-column statistics request. A slow aggregation
+    fails fast, with no retry, and falls back to the row count instead of blocking
+    query planning.
+  - `5s`
 * - `elasticsearch.dynamic-filtering.wait-timeout`
   - Maximum [duration](prop-type-duration) to wait for the collection of dynamic
     filters, such as join keys, before generating splits. Dynamic filters are
@@ -616,6 +631,32 @@ aggregations: row count, number of distinct values, null fraction, and value
 ranges for numeric and date columns. The cost-based optimizer uses these
 statistics to choose more efficient query plans, such as the join distribution
 type and join order.
+
+The row count is always collected with a cheap request. The per-column statistics
+(distinct values, null fractions, and ranges) require an aggregation that scans
+every document, so the connector limits that work in three ways. Any statistics it
+skips only affect plan quality, never correctness:
+
+- It collects per-column statistics only for the columns a query references in a
+  `WHERE`, `GROUP BY`, or `ORDER BY` clause — the columns the optimizer actually
+  consults. Columns that appear only in the `SELECT` list, and join keys (joins are
+  not pushed to the connector), are not aggregated.
+  `elasticsearch.statistics.max-statistics-columns` caps how many referenced columns
+  are collected.
+- It computes the expensive distinct-count (cardinality) only for indices with at
+  most `elasticsearch.statistics.max-index-documents` documents. Larger indices still
+  get null fractions and ranges, and always the row count.
+- Each statistics request uses a short timeout,
+  `elasticsearch.statistics.request-timeout`, with no retry, so a slow aggregation
+  falls back to the row count in seconds instead of blocking query planning.
+
+Statistics collection is therefore automatic — you generally do not need to change
+your queries. For very large or slow indices, lower
+`elasticsearch.statistics.max-index-documents` or
+`elasticsearch.statistics.request-timeout` to skip expensive aggregations sooner,
+raise `elasticsearch.statistics.max-statistics-columns` if queries filter or group by
+many columns, or set `elasticsearch.statistics.enabled` to `false` to disable
+statistics collection entirely.
 
 ### Dynamic filtering
 

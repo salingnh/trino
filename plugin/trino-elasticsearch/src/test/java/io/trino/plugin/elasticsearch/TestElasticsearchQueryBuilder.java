@@ -140,7 +140,8 @@ public class TestElasticsearchQueryBuilder
         // A full-text LIKE prefix on analyzed text is translated to a match_phrase_prefix query
         JsonNode actual = buildSearchQuery(TupleDomain.all(), Optional.empty(), Map.of(), Map.of(), Map.of("text_column", "soome te"));
         assertThat(JSON_MAPPER.readTree(actual.toString()))
-                .isEqualTo(JSON_MAPPER.readTree("""
+                .isEqualTo(JSON_MAPPER.readTree(
+                        """
                         {"bool":{"filter":[{"match_phrase_prefix":{"text_column":"soome te"}}]}}"""));
     }
 

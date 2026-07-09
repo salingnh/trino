@@ -31,7 +31,8 @@ public class TestKeywordSubfield
     public void testNoSubfields()
             throws IOException
     {
-        JsonNode field = field("""
+        JsonNode field = field(
+                """
                 { "type": "text" }
                 """);
         assertThat(keywordSubfield(field, false)).isEmpty();
@@ -43,7 +44,8 @@ public class TestKeywordSubfield
             throws IOException
     {
         // A keyword sub-field without ignore_above indexes all values, so it is safe regardless of the flag
-        JsonNode field = field("""
+        JsonNode field = field(
+                """
                 { "type": "text", "fields": { "raw": { "type": "keyword" } } }
                 """);
         assertThat(keywordSubfield(field, false)).contains("raw");
@@ -55,7 +57,8 @@ public class TestKeywordSubfield
             throws IOException
     {
         // ignore_above may drop long values from the index, so the sub-field is only used when the operator opts in
-        JsonNode field = field("""
+        JsonNode field = field(
+                """
                 { "type": "text", "fields": { "keyword": { "type": "keyword", "ignore_above": 256 } } }
                 """);
         assertThat(keywordSubfield(field, false)).isEmpty();
@@ -67,7 +70,8 @@ public class TestKeywordSubfield
             throws IOException
     {
         // With the flag off a bounded sub-field is skipped, but an unbounded one is still found
-        JsonNode field = field("""
+        JsonNode field = field(
+                """
                 { "type": "text", "fields": {
                     "bounded": { "type": "keyword", "ignore_above": 256 },
                     "raw": { "type": "keyword" } } }
@@ -82,7 +86,8 @@ public class TestKeywordSubfield
             throws IOException
     {
         // Sub-fields that are not keyword (for example a different analyzer) cannot be used for exact-match pushdown
-        JsonNode field = field("""
+        JsonNode field = field(
+                """
                 { "type": "text", "fields": { "english": { "type": "text", "analyzer": "english" } } }
                 """);
         assertThat(keywordSubfield(field, false)).isEmpty();

@@ -22,6 +22,7 @@ import io.airlift.slice.Slice;
 import io.trino.plugin.base.expression.ConnectorExpressions;
 import io.trino.plugin.base.projection.ApplyProjectionUtil;
 import io.trino.plugin.base.projection.ApplyProjectionUtil.ProjectedColumnRepresentation;
+import io.trino.plugin.elasticsearch.ElasticsearchAggregate.Function;
 import io.trino.plugin.elasticsearch.client.ElasticsearchClient;
 import io.trino.plugin.elasticsearch.client.FieldStatistics;
 import io.trino.plugin.elasticsearch.client.IndexMetadata;
@@ -30,7 +31,6 @@ import io.trino.plugin.elasticsearch.client.IndexMetadata.ObjectType;
 import io.trino.plugin.elasticsearch.client.IndexMetadata.PrimitiveType;
 import io.trino.plugin.elasticsearch.client.IndexMetadata.ScaledFloatType;
 import io.trino.plugin.elasticsearch.client.IndexStatistics;
-import io.trino.plugin.elasticsearch.ElasticsearchAggregate.Function;
 import io.trino.plugin.elasticsearch.decoders.ArrayDecoder;
 import io.trino.plugin.elasticsearch.decoders.BigintDecoder;
 import io.trino.plugin.elasticsearch.decoders.BooleanDecoder;
@@ -101,7 +101,6 @@ import io.trino.spi.type.VarcharType;
 import org.elasticsearch.client.ResponseException;
 
 import java.util.ArrayList;
-import java.util.Collection;
 import java.util.HashMap;
 import java.util.Iterator;
 import java.util.List;
@@ -185,6 +184,8 @@ public class ElasticsearchMetadata
     private final ElasticsearchClient client;
     private final String schemaName;
     private final boolean statisticsEnabled;
+    private final long statisticsMaxIndexDocuments;
+    private final int statisticsMaxColumns;
 
     @Inject
     public ElasticsearchMetadata(TypeManager typeManager, ElasticsearchClient client, ElasticsearchConfig config)
@@ -193,6 +194,8 @@ public class ElasticsearchMetadata
         this.client = requireNonNull(client, "client is null");
         this.schemaName = config.getDefaultSchema();
         this.statisticsEnabled = config.isStatisticsEnabled();
+        this.statisticsMaxIndexDocuments = config.getStatisticsMaxIndexDocuments();
+        this.statisticsMaxColumns = config.getStatisticsMaxColumns();
     }
 
     @Override
@@ -519,28 +522,46 @@ public class ElasticsearchMetadata
             return TableStatistics.empty();
         }
 
-        // Even when no column is aggregatable the row count is still valuable to the cost-based optimizer
-        List<ElasticsearchColumnHandle> columns = statisticsColumns(handle, getKeywordSubfieldPushdownWithIgnoreAbove(session));
-
-        // Text fields with a safe keyword sub-field are aggregated on the sub-field, so use the predicate field name
-        List<String> fields = columns.stream()
-                .map(ElasticsearchColumnHandle::predicateName)
-                .collect(toImmutableList());
-        Set<String> rangeFields = columns.stream()
-                .filter(column -> hasRange(column.type()))
-                .map(ElasticsearchColumnHandle::predicateName)
-                .collect(toImmutableSet());
-
         JsonNode query = buildSearchQuery(handle.constraint().transformKeys(ElasticsearchColumnHandle.class::cast), handle.query(), handle.regexes(), handle.prefixes(), handle.matchPhrasePrefixes());
-        IndexStatistics indexStatistics = client.getIndexStatistics(handle.index(), query, fields, rangeFields);
 
-        long rowCount = indexStatistics.documentCount();
+        // The row count is cheap (no aggregations) and always valuable to the optimizer; fetch it first, and fall back to
+        // no statistics if even that fails rather than failing query planning.
+        long rowCount;
+        try {
+            rowCount = client.getIndexStatistics(handle.index(), query, ImmutableList.of(), ImmutableSet.of(), false).documentCount();
+        }
+        catch (RuntimeException e) {
+            return TableStatistics.empty();
+        }
         TableStatistics.Builder tableStatistics = TableStatistics.builder()
                 .setRowCount(Estimate.of(rowCount));
-        for (ElasticsearchColumnHandle column : columns) {
-            FieldStatistics fieldStatistics = indexStatistics.fields().get(column.predicateName());
-            if (fieldStatistics != null) {
-                tableStatistics.setColumnStatistics(column, columnStatistics(column.type(), rowCount, fieldStatistics));
+
+        // Per-column statistics scan every document. value_count (null fraction) and min/max (range) are relatively cheap
+        // and always attempted; the expensive cardinality (distinct count) is included only under the document threshold.
+        // The request has a short timeout and no retries, so a slow aggregation degrades to the row count instead of
+        // blocking planning for minutes.
+        List<ElasticsearchColumnHandle> columns = statisticsColumns(handle, getKeywordSubfieldPushdownWithIgnoreAbove(session));
+        if (!columns.isEmpty()) {
+            // Text fields with a safe keyword sub-field are aggregated on the sub-field, so use the predicate field name
+            List<String> fields = columns.stream()
+                    .map(ElasticsearchColumnHandle::predicateName)
+                    .collect(toImmutableList());
+            Set<String> rangeFields = columns.stream()
+                    .filter(column -> hasRange(column.type()))
+                    .map(ElasticsearchColumnHandle::predicateName)
+                    .collect(toImmutableSet());
+            boolean includeCardinality = rowCount <= statisticsMaxIndexDocuments;
+            try {
+                IndexStatistics indexStatistics = client.getIndexStatistics(handle.index(), query, fields, rangeFields, includeCardinality);
+                for (ElasticsearchColumnHandle column : columns) {
+                    FieldStatistics fieldStatistics = indexStatistics.fields().get(column.predicateName());
+                    if (fieldStatistics != null) {
+                        tableStatistics.setColumnStatistics(column, columnStatistics(column.type(), rowCount, fieldStatistics));
+                    }
+                }
+            }
+            catch (RuntimeException e) {
+                // Per-column statistics unavailable (e.g. the aggregation timed out) — the row count is still reported
             }
         }
         return tableStatistics.build();
@@ -548,22 +569,45 @@ public class ElasticsearchMetadata
 
     private List<ElasticsearchColumnHandle> statisticsColumns(ElasticsearchTableHandle handle, boolean useBoundedKeyword)
     {
-        Collection<ElasticsearchColumnHandle> columns;
-        if (handle.columns().isEmpty()) {
-            columns = makeInternalTableMetadata(handle.schema(), handle.index(), useBoundedKeyword).columnHandles().values().stream()
-                    .map(ElasticsearchColumnHandle.class::cast)
-                    .collect(toImmutableList());
+        // Only collect per-column statistics for columns the query references (filters, GROUP BY, sort). Those are the
+        // columns whose distinct-count / null-fraction / range the optimizer actually consults; output-only columns
+        // (e.g. from SELECT *) have those statistics ignored, so aggregating them is wasted work. Join keys are absent
+        // here — joins are not pushed to the connector. When nothing is referenced only the row count is collected.
+        Set<String> referenced = queryReferencedFields(handle);
+        if (referenced.isEmpty()) {
+            return ImmutableList.of();
         }
-        else {
-            columns = handle.columns();
-        }
-        return columns.stream()
+        return makeInternalTableMetadata(handle.schema(), handle.index(), useBoundedKeyword).columnHandles().values().stream()
+                .map(ElasticsearchColumnHandle.class::cast)
                 .filter(column -> column.path().size() == 1)
                 // Array columns are excluded: value_count aggregates every array element and can exceed the row count
                 .filter(column -> !(column.type() instanceof ArrayType))
                 .filter(column -> !BuiltinColumns.isBuiltinColumn(column.name()))
                 .filter(column -> isAggregatable(column.elasticsearchType()))
+                .filter(column -> referenced.contains(column.name()) || referenced.contains(column.predicateName()))
+                .limit(statisticsMaxColumns)
                 .collect(toImmutableList());
+    }
+
+    // Fields the query references directly — the columns whose per-column statistics the optimizer is most likely to use.
+    // Join keys are intentionally absent: joins are not pushed to the connector, so the join column is unknown at plan time.
+    private static Set<String> queryReferencedFields(ElasticsearchTableHandle handle)
+    {
+        ImmutableSet.Builder<String> fields = ImmutableSet.builder();
+        handle.constraint().getDomains().ifPresent(domains -> domains.keySet().forEach(column -> {
+            ElasticsearchColumnHandle columnHandle = (ElasticsearchColumnHandle) column;
+            fields.add(columnHandle.name());
+            fields.add(columnHandle.predicateName());
+        }));
+        handle.aggregation().ifPresent(aggregation -> aggregation.groupingColumns().forEach(column -> {
+            fields.add(column.name());
+            fields.add(column.predicateName());
+        }));
+        fields.addAll(handle.regexes().keySet());
+        fields.addAll(handle.prefixes().keySet());
+        fields.addAll(handle.matchPhrasePrefixes().keySet());
+        handle.sortOrder().forEach(sort -> fields.add(sort.field()));
+        return fields.build();
     }
 
     private static boolean isAggregatable(IndexMetadata.Type type)
@@ -777,25 +821,17 @@ public class ElasticsearchMetadata
         }
         Type outputType = aggregate.getOutputType();
         List<ConnectorExpression> arguments = aggregate.getArguments();
-        switch (aggregate.getFunctionName()) {
-            case "count":
-                if (arguments.isEmpty()) {
-                    return Optional.of(new ElasticsearchAggregate(outputName, Function.COUNT_ALL, Optional.empty(), outputType));
-                }
-                return countAggregate(outputName, Function.COUNT, arguments, assignments, outputType);
-            case "approx_distinct":
-                return countAggregate(outputName, Function.COUNT_DISTINCT, arguments, assignments, outputType);
-            case "sum":
-                return numericAggregate(outputName, Function.SUM, arguments, assignments, outputType);
-            case "avg":
-                return numericAggregate(outputName, Function.AVG, arguments, assignments, outputType);
-            case "min":
-                return numericAggregate(outputName, Function.MIN, arguments, assignments, outputType);
-            case "max":
-                return numericAggregate(outputName, Function.MAX, arguments, assignments, outputType);
-            default:
-                return Optional.empty();
-        }
+        return switch (aggregate.getFunctionName()) {
+            case "count" -> arguments.isEmpty()
+                    ? Optional.of(new ElasticsearchAggregate(outputName, Function.COUNT_ALL, Optional.empty(), outputType))
+                    : countAggregate(outputName, Function.COUNT, arguments, assignments, outputType);
+            case "approx_distinct" -> countAggregate(outputName, Function.COUNT_DISTINCT, arguments, assignments, outputType);
+            case "sum" -> numericAggregate(outputName, Function.SUM, arguments, assignments, outputType);
+            case "avg" -> numericAggregate(outputName, Function.AVG, arguments, assignments, outputType);
+            case "min" -> numericAggregate(outputName, Function.MIN, arguments, assignments, outputType);
+            case "max" -> numericAggregate(outputName, Function.MAX, arguments, assignments, outputType);
+            default -> Optional.empty();
+        };
     }
 
     private static Optional<ElasticsearchAggregate> countAggregate(String outputName, Function function, List<ConnectorExpression> arguments, Map<String, ColumnHandle> assignments, Type outputType)
