@@ -25,11 +25,15 @@ AGGREGATE_LEGACY_SUITES = (
     "Suite7NonGeneric",
 )
 
+# Use this when coverage is removed from an aggregate legacy suite that still
+# exists for unrelated tests.
+LEGACY_COVERAGE_REMOVED = ()
+
 BUCKETS = [
     ("jdbc-core", [
         ("SuiteMysql", ("SuiteMysql",)),
-        ("SuitePostgresql", AGGREGATE_LEGACY_SUITES),
-        ("SuiteSqlServer", AGGREGATE_LEGACY_SUITES),
+        ("SuitePostgresql", LEGACY_COVERAGE_REMOVED),
+        ("SuiteSqlServer", LEGACY_COVERAGE_REMOVED),
         ("SuiteFunctions", ("SuiteFunctions",)),
         ("SuiteTpch", ("SuiteTpch",)),
         ("SuiteTpcds", ("SuiteTpcds",)),
@@ -39,14 +43,14 @@ BUCKETS = [
         ("SuiteSnowflake", ("SuiteSnowflake",)),
     ]),
     ("connector-smoke", [
-        ("SuiteCassandra", ("SuiteCassandra",)),
-        ("SuiteClickhouse", ("SuiteClickhouse",)),
-        ("SuiteBlackHole", ("SuiteAllConnectorsSmoke",)),
+        ("SuiteCassandra", LEGACY_COVERAGE_REMOVED),
+        ("SuiteClickhouse", LEGACY_COVERAGE_REMOVED),
+        ("SuiteBlackHole", LEGACY_COVERAGE_REMOVED),
         ("SuiteAllConnectorsSmoke", ("SuiteAllConnectorsSmoke",)),
         ("SuiteIgnite", ("SuiteIgnite",)),
     ]),
     ("auth-and-clients", [
-        ("SuiteKafka", ("SuiteKafka",)),
+        ("SuiteKafka", LEGACY_COVERAGE_REMOVED),
         ("SuiteLdap", ("SuiteLdap",)),
         ("SuiteOauth2", ("SuiteOauth2",)),
         ("SuiteClients", ("SuiteClients",)),
