@@ -17,8 +17,8 @@ import com.google.common.collect.ImmutableList;
 import com.google.common.collect.ImmutableMap;
 import com.google.common.collect.ImmutableSet;
 import io.airlift.slice.Slices;
-import io.trino.json.JsonDateTimeTemplate;
-import io.trino.json.XQueryRegex;
+import io.trino.jsonpath.JsonDateTimeTemplate;
+import io.trino.jsonpath.XQueryRegex;
 import io.trino.metadata.Metadata;
 import io.trino.metadata.OperatorNotFoundException;
 import io.trino.operator.scalar.JoniRegexpCasts;
@@ -120,6 +120,23 @@ public class JsonPathAnalyzer
         PathNode root = PathParser.withFixedErrorLocation(new Location(location.getLineNumber(), location.getColumnNumber())).parseJsonPath(path);
         new Visitor(ImmutableMap.of(), new StringLiteral(path)).process(root);
         return new JsonPathAnalysis((JsonPath) root, types, jsonParameters, datetimeTemplates);
+    }
+
+    /// Analyzes a pre-built [JsonPath] tree, skipping the parse step.
+    ///
+    /// Used by SQL:2023 §6.36 simplified-accessor desugaring, which builds
+    /// the path tree directly from the surface AST chain rather than
+    /// synthesizing a path string and re-parsing it.
+    ///
+    /// @param path the pre-built JSON path tree.
+    /// @param location source location to use for diagnostics raised by
+    ///         the type-inference visitor.
+    /// @return the path analysis carrying the inferred type for every
+    ///         visited [io.trino.sql.jsonpath.tree.PathNode].
+    public JsonPathAnalysis analyzeJsonPath(JsonPath path, NodeLocation location)
+    {
+        new Visitor(ImmutableMap.of(), new StringLiteral(location, "")).process(path);
+        return new JsonPathAnalysis(path, types, jsonParameters, datetimeTemplates);
     }
 
     /**
