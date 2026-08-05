@@ -20,7 +20,6 @@ import com.google.common.collect.AbstractSequentialIterator;
 import com.google.common.collect.ImmutableMap;
 import com.google.common.collect.ImmutableSet;
 import com.google.common.collect.Iterables;
-import com.google.common.collect.Maps;
 import com.google.inject.Inject;
 import io.airlift.log.Logger;
 import io.trino.cache.NonEvictableLoadingCache;
@@ -80,7 +79,6 @@ import static io.trino.spi.type.VarcharType.VARCHAR;
 import static java.lang.Long.parseLong;
 import static java.util.Objects.requireNonNull;
 import static java.util.function.Function.identity;
-import static java.util.stream.Collectors.toMap;
 import static java.util.stream.Collectors.toUnmodifiableMap;
 import static org.apache.iceberg.IcebergManifestUtils.liveEntries;
 
@@ -136,7 +134,7 @@ public final class TableStatisticsReader
                     .setRowCount(Estimate.of(0))
                     .build();
         }
-        long snapshotId = snapshot.getAsLong();
+        long snapshotId = snapshot.orElseThrow();
 
         // Including both enforced and unenforced constraint matches how Splits will eventually be generated and allows
         // us to provide more accurate estimates. Stats will be estimated again by FilterStatsCalculator based on the
@@ -221,7 +219,7 @@ public final class TableStatisticsReader
                 columnIds);
 
         Map<Integer, org.apache.iceberg.types.Type> idToType = columns.stream()
-                .map(column -> Maps.immutableEntry(column.fieldId(), column.type()))
+                .map(column -> Map.entry(column.fieldId(), column.type()))
                 .collect(toUnmodifiableMap(Map.Entry::getKey, Map.Entry::getValue));
 
         ImmutableMap.Builder<ColumnHandle, ColumnStatistics> columnHandleBuilder = ImmutableMap.builder();
@@ -314,7 +312,7 @@ public final class TableStatisticsReader
         }
 
         Map<Long, StatisticsFile> statsFileBySnapshot = icebergTable.statisticsFiles().stream()
-                .collect(toMap(
+                .collect(toImmutableMap(
                         StatisticsFile::snapshotId,
                         identity(),
                         (file1, file2) -> {

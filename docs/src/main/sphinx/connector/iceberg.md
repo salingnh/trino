@@ -271,6 +271,45 @@ implementation is used:
   - Enable bucket-aware execution. This allows the engine to use physical
     bucketing information to optimize queries by reducing data exchanges.
   - `true`
+* - `iceberg.encryption.kms-type`
+  - Key Management Service type for
+    [Iceberg table encryption](https://iceberg.apache.org/docs/latest/encryption/).
+    Possible values are `AWS`, `AZURE`, and `GCP`. Required to read encrypted tables.
+    Writing to encrypted tables is not supported.
+  -
+* - `iceberg.encryption.plaintext-files-allowed-for-encrypted-tables`
+  - Allow reading unencrypted files in tables with encryption enabled. When set
+    to `false`, an error is raised if a file with encryption key metadata is not
+    actually encrypted. The equivalent catalog session property is
+    `plaintext_files_allowed_for_encrypted_tables`.
+  - `false`
+* - `aws.kms.region`
+  - AWS region for KMS. Required when `iceberg.encryption.kms-type` is `AWS`
+    and the region cannot be determined from the environment.
+  -
+* - `aws.kms.endpoint`
+  - KMS API endpoint URL. Use to override the default AWS KMS endpoint.
+  -
+* - `aws.kms.sts.region`
+  - AWS STS signing region for KMS authentication.
+  -
+* - `aws.kms.sts.endpoint`
+  - AWS STS endpoint for KMS authentication.
+  -
+* - `aws.kms.iam-role`
+  - ARN of an IAM role to assume when connecting to KMS.
+  -
+* - `aws.kms.external-id`
+  - External ID for the IAM role trust policy when connecting to KMS.
+  -
+* - `aws.kms.access-key`
+  - AWS access key for KMS authentication. When set,
+    `aws.kms.secret-key` must also be set.
+  -
+* - `aws.kms.secret-key`
+  - AWS secret key for KMS authentication. When set,
+    `aws.kms.access-key` must also be set.
+  -
 :::
 
 (iceberg-fte-support)=
@@ -1214,6 +1253,16 @@ the table name:
 SELECT * FROM "test_table$properties";
 ```
 
+The same metadata tables are also available for a materialized view (see
+{ref}`iceberg-materialized-views`) by appending the metadata table name to the
+materialized view name. The query resolves against the materialized view's
+storage table:
+
+```sql
+SELECT * FROM "test_materialized_view$files";
+```
+
+
 ##### `$properties` table
 
 The `$properties` table provides access to general information about Iceberg
@@ -2085,6 +2134,27 @@ CREATE TABLE example_table (
 
 When trying to insert/update data in the table, the query fails if trying to set
 `NULL` value on a column having the `NOT NULL` constraint.
+
+(iceberg-views)=
+### Views
+
+The Iceberg connector supports {ref}`sql-view-management`.
+
+View properties supply or set metadata for the underlying views. View properties
+are passed to the connector using a `WITH` clause in {doc}`/sql/create-view`
+statements.
+
+:::{list-table} Iceberg view properties
+:width: 100%
+:widths: 40, 60
+:header-rows: 1
+
+* - Property name
+  - Description
+* - `location`
+  - Optionally specifies the file system location URI for the view metadata
+    files.
+:::
 
 (iceberg-materialized-views)=
 ### Materialized views
