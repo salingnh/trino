@@ -206,3 +206,16 @@
 * {{breaking}} Change the block null representation to bit-packed validity bitmaps
   instead of boolean null arrays. Plugins that construct blocks directly instead
   of through the block builder API must be updated. ({issue}`30185`)
+
+## Elasticsearch connector
+
+* Add support for [table statistics](/optimizer/statistics). ({issue}`XXXXX`)
+* Add support for [dynamic filtering](/admin/dynamic-filtering). ({issue}`XXXXX`)
+* Improve performance of aggregation queries, including queries with `GROUP BY`,
+  by pushing `count`, `sum`, `min`, `max`, `avg`, and `approx_distinct` down to
+  Elasticsearch. ({issue}`XXXXX`)
+* Improve performance of queries with predicates or aggregations on `text`
+  fields that have a `keyword` sub-field. ({issue}`XXXXX`)
+* Add an opt-in full-text pushdown mode that pushes predicates and dynamic
+  filters on analyzed `text` fields to Elasticsearch as `match_phrase`
+  queries. ({issue}`XXXXX`)
