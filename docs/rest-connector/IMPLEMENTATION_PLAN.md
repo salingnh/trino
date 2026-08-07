@@ -6,8 +6,106 @@ The implementation specification is split into focused work-item documents under
 
 1. Read [`EPIC.md`](EPIC.md).
 2. Read [`implementation/00-README.md`](implementation/00-README.md).
-3. Implement one work item at a time in the order below.
+3. Implement one work item at a time in the priority and dependency order below.
 4. Follow [`implementation/20-luna-execution-protocol.md`](implementation/20-luna-execution-protocol.md) for task decomposition, validation and reporting.
+
+## Current implementation priority
+
+**Start with Work Item 01 only.** Do not give Luna multiple work items in one implementation cycle.
+
+Recommended execution priority:
+
+| Priority | Work items | Objective |
+|---|---|---|
+| **P0 — Foundation and contract lock** | 01–03 | Establish a compilable plugin, compliant configuration model, and stable immutable compiled-contract format |
+| **P1 — Coordinator model and metadata** | 04–08 | Load/verify contracts, compile types and metadata, create stable handles, and infer capabilities conservatively |
+| **P2 — Optimizer and request planning** | 09–13 | Implement pushdown correctness, pure request planning, pagination, bounded split planning, and dynamic filtering |
+| **P3 — Production-safe worker runtime** | 14–17 | Add HTTP/auth/security, resilience and budgets, streaming PageSource, errors and observability |
+| **P4 — Release candidate and control-plane contract** | 18–19 | Complete QueryRunner/CI/security coverage and finalize Contract Registry/preview interoperability |
+
+The dependency order inside each priority is mandatory. In particular:
+
+```text
+01 module foundation
+  -> 02 configuration
+  -> 03 contract schema
+  -> 04 registry/cache
+  -> 05 compiler/validation
+  -> 06 type codecs
+  -> 07 metadata/handles
+  -> 08 capability inference
+  -> 09 filter pushdown
+  -> 10 limit/projection/Top-N
+  -> 11 request planner
+  -> 12 pagination
+  -> 13 split planning/dynamic filtering
+  -> 14 HTTP/auth/security
+  -> 15 resilience/budgets/cancellation
+  -> 16 streaming PageSource
+  -> 17 errors/observability
+  -> 18 QueryRunner/CI
+  -> 19 registry/preview interoperability
+```
+
+Do not implement `RestPageSource` before the request planner, pagination state machines, HTTP security policy, and query budgets are defined. The page source must execute a normalized request plan rather than reimplement planning decisions in the worker data path.
+
+## Priority checkpoints
+
+### Checkpoint P0.1 — after Work Item 01
+
+Before starting Work Item 02, prove all of the following:
+
+- `plugin/trino-rest` exists and is registered in the repository build;
+- `RestPlugin` is discoverable through the plugin service mechanism;
+- `RestConnectorFactory` exposes connector name `rest`;
+- connector bootstrap and lifecycle compile against the exact branch SPI;
+- focused module/bootstrap tests pass;
+- no placeholder implementation silently claims unsupported functionality.
+
+### Checkpoint P0.2 — after Work Item 03
+
+Before starting registry work, prove:
+
+- compiled-contract JSON deserializes into immutable models;
+- serialization is deterministic;
+- fingerprint calculation is deterministic and covers semantic contract content;
+- unsupported contract versions fail explicitly;
+- no credential or secret field exists in the compiled-contract model;
+- round-trip and fingerprint tests pass.
+
+### Checkpoint P1 — after Work Item 08
+
+Before optimizer implementation, prove:
+
+- coordinator loads and verifies an immutable contract snapshot;
+- normal metadata access does not call the registry repeatedly;
+- schemas, tables, columns and hidden inputs are deterministic;
+- table/column handles and splits are JSON-serializable and equality-stable;
+- inference output includes evidence/reasons and conservative warnings;
+- ambiguous semantics are not promoted to exact pushdown capability.
+
+### Checkpoint P2 — after Work Item 13
+
+Before worker HTTP execution, prove:
+
+- exact filters become enforced constraints while unsupported/approximate predicates remain residual;
+- repeated optimizer calls converge and return `Optional.empty()` when no semantic state changes;
+- limit guarantee is correct for the final handle state;
+- request planning is pure and shared by runtime and dry-run preview;
+- page/offset/cursor/next-link state machines have loop and budget guards;
+- split generation avoids default Cartesian expansion and remains bounded.
+
+### Checkpoint P3 — after Work Item 17
+
+Before release-candidate work, prove:
+
+- every outgoing URI passes scheme/host/origin validation;
+- credentials are not forwarded across unapproved origins;
+- retry policy is method/error aware and bounded;
+- request/page/row/byte/concurrency budgets fail rather than truncate silently;
+- query cancellation closes active HTTP and parser resources;
+- streaming PageSource can emit data without buffering the full response;
+- connector errors and metrics contain no secrets or unbounded-cardinality labels.
 
 ## Work items
 
