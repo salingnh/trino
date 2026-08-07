@@ -15,6 +15,37 @@ Read these files before changing Java code:
 
 Do not infer requirements from filenames or parameter names. The connector is mapping-driven. OpenAPI support is optional assisted discovery and is not the runtime execution model.
 
+## Immediate next task
+
+The next implementation task is **Work Item 01 — `01-module-foundation.md`**.
+
+A Luna implementation cycle must execute only this work item, produce focused test evidence, stop for review, and only then continue to Work Item 02.
+
+Do not bundle Work Items 01–03 into one implementation run.
+
+## Priority bands
+
+| Priority | Work items | Gate |
+|---|---|---|
+| **P0** | 01–03 | Compilable connector skeleton and locked contract model |
+| **P1** | 04–08 | Stable coordinator metadata/planning model and capability inference |
+| **P2** | 09–13 | Correct optimizer hooks, request planning, pagination and splits |
+| **P3** | 14–17 | Production-safe HTTP worker execution and observability |
+| **P4** | 18–19 | Release-candidate test coverage and control-plane interoperability |
+
+The order inside a priority band is not interchangeable. A later work item may depend on immutable models, invariants, or policies established by an earlier work item.
+
+## Review checkpoints
+
+- **After 01:** plugin/module bootstrap works and focused tests pass.
+- **After 03:** contract JSON round-trip and fingerprint are deterministic; secrets are absent from the model.
+- **After 08:** coordinator model, handles and capability inference are stable and conservative.
+- **After 13:** optimizer/request planning converges and all pagination/split decisions are bounded.
+- **After 17:** security, budgets, cancellation, streaming and diagnostics are production-safe.
+- **After 19:** QueryRunner/CI and registry interoperability satisfy the MVP Definition of Done.
+
+Do not start the next priority band until the previous checkpoint has independent review evidence.
+
 ## Fixed architectural decisions
 
 - Module: `plugin/trino-rest`.
