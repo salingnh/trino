@@ -528,9 +528,13 @@ public class ElasticsearchClient
                     if (value.has("format")) {
                         formats = Arrays.asList(value.get("format").asText().split("\\|\\|"));
                     }
-                    result.add(new IndexMetadata.Field(asRawJson, isArray, name, new IndexMetadata.DateTimeType(formats)));
+                    boolean aggregatable = !value.has("doc_values") || value.get("doc_values").asBoolean();
+                    result.add(new IndexMetadata.Field(asRawJson, isArray, name, new IndexMetadata.DateTimeType(formats, aggregatable)));
                 }
-                case "scaled_float" -> result.add(new IndexMetadata.Field(asRawJson, isArray, name, new IndexMetadata.ScaledFloatType(value.get("scaling_factor").asDouble())));
+                case "scaled_float" -> {
+                    boolean aggregatable = !value.has("doc_values") || value.get("doc_values").asBoolean();
+                    result.add(new IndexMetadata.Field(asRawJson, isArray, name, new IndexMetadata.ScaledFloatType(value.get("scaling_factor").asDouble(), aggregatable)));
+                }
                 case "nested", "object" -> {
                     if (value.has("properties")) {
                         result.add(new IndexMetadata.Field(asRawJson, isArray, name, parseType(value.get("properties"), metaNode, useBoundedKeyword)));
@@ -540,17 +544,19 @@ public class ElasticsearchClient
                     }
                 }
                 default -> {
+                    boolean aggregatable = !value.has("doc_values") || value.get("doc_values").asBoolean();
                     IndexMetadata.PrimitiveType primitiveType;
                     if (type.equals("text")) {
-                        primitiveType = new IndexMetadata.PrimitiveType(type, keywordSubfield(value, useBoundedKeyword));
+                        Optional<String> keyword = keywordSubfield(value, useBoundedKeyword);
+                        primitiveType = new IndexMetadata.PrimitiveType(type, keyword, aggregatable && keyword.isPresent());
                     }
                     else if (type.equals("keyword") && value.get("normalizer") != null) {
                         // A keyword field with a normalizer stores a rewritten (for example lowercased) value, not the
                         // verbatim source, so it is not exact for predicate/sort/aggregation pushdown; treat it as analyzed text
-                        primitiveType = new IndexMetadata.PrimitiveType("text");
+                        primitiveType = new IndexMetadata.PrimitiveType("text", Optional.empty(), false);
                     }
                     else {
-                        primitiveType = new IndexMetadata.PrimitiveType(type);
+                        primitiveType = new IndexMetadata.PrimitiveType(type, Optional.empty(), aggregatable && IndexMetadata.PrimitiveType.isDocValueType(type));
                     }
                     result.add(new IndexMetadata.Field(asRawJson, isArray, name, primitiveType));
                 }
@@ -577,6 +583,9 @@ public class ElasticsearchClient
             // A normalizer rewrites the value (for example lowercasing), so the sub-field is not a verbatim copy of the
             // source and is unsafe for exact predicate/sort/aggregation pushdown
             if (subfieldNode.get("normalizer") != null) {
+                continue;
+            }
+            if (subfieldNode.has("doc_values") && !subfieldNode.get("doc_values").asBoolean()) {
                 continue;
             }
             // A keyword sub-field without ignore_above indexes every value and is always safe for pushdown, so prefer it
@@ -748,8 +757,8 @@ public class ElasticsearchClient
                 throw new TrinoException(ELASTICSEARCH_CONNECTION_ERROR, e);
             }
 
-            try {
-                return COUNT_RESPONSE_CODEC.fromJson(response.getEntity().getContent())
+            try (InputStream input = response.getEntity().getContent()) {
+                return COUNT_RESPONSE_CODEC.fromJson(input)
                         .getCount();
             }
             catch (IOException e) {
@@ -803,8 +812,8 @@ public class ElasticsearchClient
             throw new TrinoException(ELASTICSEARCH_CONNECTION_ERROR, e);
         }
 
-        try {
-            JsonNode root = JSON_MAPPER.readTree(response.getEntity().getContent());
+        try (InputStream input = response.getEntity().getContent()) {
+            JsonNode root = JSON_MAPPER.readTree(input);
             long documentCount = root.path("hits").path("total").path("value").asLong();
 
             JsonNode aggregationResults = root.path("aggregations");
@@ -842,8 +851,8 @@ public class ElasticsearchClient
             throw new TrinoException(ELASTICSEARCH_CONNECTION_ERROR, e);
         }
 
-        try {
-            return JSON_MAPPER.readTree(response.getEntity().getContent());
+        try (InputStream input = response.getEntity().getContent()) {
+            return JSON_MAPPER.readTree(input);
         }
         catch (IOException e) {
             throw new TrinoException(ELASTICSEARCH_INVALID_RESPONSE, e);

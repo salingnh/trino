@@ -94,6 +94,34 @@ public class TestKeywordSubfield
         assertThat(keywordSubfield(field, true)).isEmpty();
     }
 
+    @Test
+    public void testNonAggregatableKeywordSubfieldIgnored()
+            throws IOException
+    {
+        // A keyword sub-field with doc_values: false cannot be used for aggregations/sorting/exact-match
+        JsonNode field = field(
+                """
+                { "type": "text", "fields": { "raw": { "type": "keyword", "doc_values": false } } }
+                """);
+        assertThat(keywordSubfield(field, false)).isEmpty();
+        assertThat(keywordSubfield(field, true)).isEmpty();
+    }
+
+    @Test
+    public void testFallbackWhenUnboundedNonAggregatable()
+            throws IOException
+    {
+        // An unbounded keyword sub-field with doc_values: false is ignored, falling back to a bounded keyword sub-field
+        JsonNode field = field(
+                """
+                { "type": "text", "fields": {
+                    "unbounded_no_doc_values": { "type": "keyword", "doc_values": false },
+                    "bounded": { "type": "keyword", "ignore_above": 256 } } }
+                """);
+        assertThat(keywordSubfield(field, false)).isEmpty();
+        assertThat(keywordSubfield(field, true)).contains("bounded");
+    }
+
     private static JsonNode field(String mapping)
             throws IOException
     {

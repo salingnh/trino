@@ -1340,6 +1340,9 @@ public abstract class BaseElasticsearchConnectorTest
         assertThat(query(safeFullText, "SELECT text_column FROM " + indexName + " WHERE regexp_like(text_column, 'soome')"))
                 .isNotFullyPushedDown(io.trino.sql.planner.plan.FilterNode.class);
 
+        assertThat(query(unsafeFullText, "SELECT text_column FROM " + indexName + " WHERE regexp_like(text_column, '\\d+')"))
+                .isFullyPushedDown();
+
         // A multi-token LIKE prefix is pushed as a match_phrase_prefix pre-filter; the engine keeps the exact prefix
         // range as a residual, so the result stays correct (only "soome tex\t" starts with "soome te")
         assertThat(query(unsafeFullText, "SELECT text_column FROM " + indexName + " WHERE text_column LIKE 'soome te%'"))

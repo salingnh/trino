@@ -613,16 +613,15 @@ public class ElasticsearchMetadata
     private static boolean isAggregatable(IndexMetadata.Type type)
     {
         if (type instanceof PrimitiveType primitiveType) {
-            // A text field with a safe keyword sub-field is aggregated on that sub-field (see ElasticsearchColumnHandle#predicateName)
-            if (primitiveType.keyword().isPresent()) {
-                return true;
-            }
-            return switch (primitiveType.name()) {
-                case "byte", "short", "integer", "long", "float", "double", "keyword", "boolean", "ip" -> true;
-                default -> false;
-            };
+            return primitiveType.aggregatable();
         }
-        return type instanceof ScaledFloatType || type instanceof DateTimeType;
+        if (type instanceof DateTimeType dateTimeType) {
+            return dateTimeType.aggregatable();
+        }
+        if (type instanceof ScaledFloatType scaledFloatType) {
+            return scaledFloatType.aggregatable();
+        }
+        return false;
     }
 
     private static boolean hasRange(Type type)
@@ -649,7 +648,9 @@ public class ElasticsearchMetadata
                 min *= MICROSECONDS_PER_MILLISECOND;
                 max *= MICROSECONDS_PER_MILLISECOND;
             }
-            columnStatistics.setRange(new DoubleRange(min, max));
+            if (Double.isFinite(min) && Double.isFinite(max) && min <= max) {
+                columnStatistics.setRange(new DoubleRange(min, max));
+            }
         }
         return columnStatistics.build();
     }
@@ -683,7 +684,7 @@ public class ElasticsearchMetadata
                 handle.query(),
                 OptionalLong.of(limit),
                 handle.sortOrder(),
-                ImmutableSet.of(),
+                handle.columns(),
                 handle.aggregation());
 
         return Optional.of(new LimitApplicationResult<>(handle, false, false));
@@ -709,8 +710,7 @@ public class ElasticsearchMetadata
         ImmutableList.Builder<ElasticsearchColumnSort> sortOrder = ImmutableList.builder();
         for (SortItem sortItem : sortItems) {
             ElasticsearchColumnHandle column = (ElasticsearchColumnHandle) assignments.get(sortItem.getName());
-            // Only columns backed by doc_values (the same gate as aggregation) can be sorted by Elasticsearch
-            if (BuiltinColumns.isBuiltinColumn(column.name()) || !isAggregatable(column.elasticsearchType())) {
+            if (column == null || BuiltinColumns.isBuiltinColumn(column.name()) || !isAggregatable(column.elasticsearchType())) {
                 return Optional.empty();
             }
             SortOrder order = sortItem.getSortOrder();
@@ -815,8 +815,8 @@ public class ElasticsearchMetadata
 
     private static Optional<ElasticsearchAggregate> toElasticsearchAggregate(AggregateFunction aggregate, Map<String, ColumnHandle> assignments, String outputName)
     {
-        if (aggregate.isDistinct()) {
-            // Exact DISTINCT aggregates cannot be represented by Elasticsearch's approximate cardinality
+        if (aggregate.isDistinct() || aggregate.getFilter().isPresent() || !aggregate.getSortItems().isEmpty()) {
+            // Exact DISTINCT aggregates, filtered aggregates, or ordered aggregates cannot be pushed down
             return Optional.empty();
         }
         Type outputType = aggregate.getOutputType();
@@ -848,7 +848,7 @@ public class ElasticsearchMetadata
     private static Optional<ElasticsearchAggregate> numericAggregate(String outputName, Function function, List<ConnectorExpression> arguments, Map<String, ColumnHandle> assignments, Type outputType)
     {
         Optional<ElasticsearchColumnHandle> column = aggregateColumn(arguments, assignments);
-        if (column.isEmpty() || !supportsNumericAggregate(function, column.get().type())) {
+        if (column.isEmpty() || !isAggregatable(column.get().elasticsearchType()) || !supportsNumericAggregate(function, column.get().type())) {
             return Optional.empty();
         }
         return Optional.of(new ElasticsearchAggregate(outputName, function, Optional.of(column.get().predicateName()), outputType));
@@ -1051,7 +1051,7 @@ public class ElasticsearchMetadata
                 handle.query(),
                 handle.limit(),
                 handle.sortOrder(),
-                ImmutableSet.of(),
+                handle.columns(),
                 handle.aggregation());
 
         return Optional.of(new ConstraintApplicationResult<>(handle, TupleDomain.withColumnDomains(unsupported), newExpression, false));
@@ -1186,7 +1186,10 @@ public class ElasticsearchMetadata
                         regex.append(escaped ? "_" : ".");
                         escaped = false;
                     }
-                    case '\\' -> regex.append("\\\\");
+                    case '\\' -> {
+                        regex.append("\\\\");
+                        escaped = false;
+                    }
                     default -> {
                         // escape special regex characters
                         if (REGEXP_RESERVED_CHARACTERS.contains(currentChar)) {
