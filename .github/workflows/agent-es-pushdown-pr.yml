@@ -1,0 +1,307 @@
+name: Elasticsearch pushdown PR follow-up
+
+on:
+  pull_request:
+    branches:
+      - master
+
+permissions:
+  contents: write
+
+jobs:
+  patch-and-test:
+    if: github.head_ref == 'fix/es-pushdown-fixes' && github.actor != 'github-actions[bot]'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: fix/es-pushdown-fixes
+          fetch-depth: 0
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '25'
+
+      - name: Apply correctness fixes and regression tests
+        shell: bash
+        run: |
+          python3 - <<'PY'
+          from pathlib import Path
+
+          def replace(path, old, new, count=1):
+              p = Path(path)
+              text = p.read_text()
+              if old not in text:
+                  raise SystemExit(f"Expected source fragment not found in {path}: {old[:120]!r}")
+              p.write_text(text.replace(old, new, count))
+
+          client = "plugin/trino-elasticsearch/src/main/java/io/trino/plugin/elasticsearch/client/ElasticsearchClient.java"
+          replace(client,
+          '''                    if (type.equals("text")) {
+                          Optional<String> keyword = keywordSubfield(value, useBoundedKeyword);
+                          primitiveType = new IndexMetadata.PrimitiveType(type, keyword, aggregatable && keyword.isPresent());
+                      }
+          ''',
+          '''                    if (type.equals("text")) {
+                          Optional<String> keyword = keywordSubfield(value, useBoundedKeyword);
+                          boolean keywordAggregatable = keyword
+                                  .map(name -> value.path("fields").path(name))
+                                  .map(ElasticsearchClient::hasDocValues)
+                                  .orElse(false);
+                          primitiveType = new IndexMetadata.PrimitiveType(type, keyword, keywordAggregatable);
+                      }
+          ''')
+
+          replace(client,
+          '''            if (subfieldNode.has("doc_values") && !subfieldNode.get("doc_values").asBoolean()) {
+                          continue;
+                      }
+          ''',
+          '''            // Exact term/prefix predicates use the inverted index and do not require doc values.
+                      // A keyword sub-field remains usable for exact predicates when doc_values=false, but it is
+                      // marked non-aggregatable below so sort/aggregation/statistics stay disabled.
+                      boolean indexed = !subfieldNode.has("index") || subfieldNode.get("index").asBoolean();
+                      boolean docValues = hasDocValues(subfieldNode);
+                      if (!indexed && !docValues) {
+                          continue;
+                      }
+          ''')
+
+          replace(client,
+          '''        if (pushDownWithIgnoreAbove) {
+                      return boundedSubfield;
+                  }
+                  return Optional.empty();
+              }
+
+              private JsonNode nullSafeNode''',
+          '''        if (pushDownWithIgnoreAbove) {
+                      return boundedSubfield;
+                  }
+                  return Optional.empty();
+              }
+
+              @VisibleForTesting
+              static boolean hasDocValues(JsonNode fieldNode)
+              {
+                  return !fieldNode.has("doc_values") || fieldNode.get("doc_values").asBoolean();
+              }
+
+              private JsonNode nullSafeNode''')
+
+          page_source = "plugin/trino-elasticsearch/src/main/java/io/trino/plugin/elasticsearch/AggregationQueryPageSource.java"
+          replace(page_source,
+          '''        else if (value.isNumber()) {
+                      type.writeBoolean(builder, value.asLong() != 0);
+                  }
+          ''',
+          '''        else if (value.isNumber()) {
+                      double numeric = value.asDouble();
+                      if (numeric == 1.0) {
+                          type.writeBoolean(builder, true);
+                      }
+                      else if (numeric == 0.0) {
+                          type.writeBoolean(builder, false);
+                      }
+                      else {
+                          throw new TrinoException(TYPE_MISMATCH, format("Cannot parse value for field as BOOLEAN: %s", value));
+                      }
+                  }
+          ''')
+
+          keyword_test = "plugin/trino-elasticsearch/src/test/java/io/trino/plugin/elasticsearch/client/TestKeywordSubfield.java"
+          replace(keyword_test,
+          '''import static io.trino.plugin.elasticsearch.client.ElasticsearchClient.keywordSubfield;
+          ''',
+          '''import static io.trino.plugin.elasticsearch.client.ElasticsearchClient.hasDocValues;
+          import static io.trino.plugin.elasticsearch.client.ElasticsearchClient.keywordSubfield;
+          ''')
+
+          replace(keyword_test,
+          '''    public void testNonAggregatableKeywordSubfieldIgnored()
+                      throws IOException
+              {
+                  // A keyword sub-field with doc_values: false cannot be used for aggregations/sorting/exact-match
+                  JsonNode field = field(
+                          """
+                          { "type": "text", "fields": { "raw": { "type": "keyword", "doc_values": false } } }
+                          """);
+                  assertThat(keywordSubfield(field, false)).isEmpty();
+                  assertThat(keywordSubfield(field, true)).isEmpty();
+              }
+
+              @Test
+              public void testFallbackWhenUnboundedNonAggregatable()
+                      throws IOException
+              {
+                  // An unbounded keyword sub-field with doc_values: false is ignored, falling back to a bounded keyword sub-field
+                  JsonNode field = field(
+                          """
+                          { "type": "text", "fields": {
+                              "unbounded_no_doc_values": { "type": "keyword", "doc_values": false },
+                              "bounded": { "type": "keyword", "ignore_above": 256 } } }
+                          """);
+                  assertThat(keywordSubfield(field, false)).isEmpty();
+                  assertThat(keywordSubfield(field, true)).contains("bounded");
+              }
+          ''',
+          '''    public void testKeywordSubfieldWithoutDocValuesStillSupportsExactPredicates()
+                      throws IOException
+              {
+                  JsonNode field = field(
+                          """
+                          { "type": "text", "fields": { "raw": { "type": "keyword", "doc_values": false } } }
+                          """);
+                  assertThat(keywordSubfield(field, false)).contains("raw");
+                  assertThat(keywordSubfield(field, true)).contains("raw");
+                  assertThat(hasDocValues(field.path("fields").path("raw"))).isFalse();
+              }
+
+              @Test
+              public void testUnboundedExactPredicateSubfieldPreferredEvenWithoutDocValues()
+                      throws IOException
+              {
+                  JsonNode field = field(
+                          """
+                          { "type": "text", "fields": {
+                              "unbounded_no_doc_values": { "type": "keyword", "doc_values": false },
+                              "bounded": { "type": "keyword", "ignore_above": 256 } } }
+                          """);
+                  assertThat(keywordSubfield(field, false)).contains("unbounded_no_doc_values");
+                  assertThat(keywordSubfield(field, true)).contains("unbounded_no_doc_values");
+              }
+
+              @Test
+              public void testKeywordSubfieldWithoutIndexOrDocValuesIsIgnored()
+                      throws IOException
+              {
+                  JsonNode field = field(
+                          """
+                          { "type": "text", "fields": { "raw": { "type": "keyword", "index": false, "doc_values": false } } }
+                          """);
+                  assertThat(keywordSubfield(field, false)).isEmpty();
+                  assertThat(keywordSubfield(field, true)).isEmpty();
+              }
+          ''')
+
+          boolean_test = "plugin/trino-elasticsearch/src/test/java/io/trino/plugin/elasticsearch/TestAggregationQueryPageSource.java"
+          replace(boolean_test,
+          '''import com.fasterxml.jackson.databind.node.BooleanNode;
+          import com.fasterxml.jackson.databind.node.IntNode;
+          ''',
+          '''import com.fasterxml.jackson.databind.node.BooleanNode;
+          import com.fasterxml.jackson.databind.node.DoubleNode;
+          import com.fasterxml.jackson.databind.node.IntNode;
+          ''')
+
+          replace(boolean_test,
+          '''        assertThat(decodeBoolean(new IntNode(1))).isTrue();
+                  assertThat(decodeBoolean(new IntNode(0))).isFalse();
+                  assertThat(decodeBoolean(new IntNode(5))).isTrue();
+          ''',
+          '''        assertThat(decodeBoolean(new IntNode(1))).isTrue();
+                  assertThat(decodeBoolean(new IntNode(0))).isFalse();
+                  assertThat(decodeBoolean(new DoubleNode(1.0))).isTrue();
+                  assertThat(decodeBoolean(new DoubleNode(0.0))).isFalse();
+                  assertInvalidBoolean(new IntNode(5));
+                  assertInvalidBoolean(new IntNode(-1));
+                  assertInvalidBoolean(new DoubleNode(0.5));
+          ''')
+
+          replace(boolean_test,
+          '''    private static boolean decodeBoolean(JsonNode jsonNode)
+              {
+          ''',
+          '''    private static void assertInvalidBoolean(JsonNode jsonNode)
+              {
+                  assertThatThrownBy(() -> decodeBoolean(jsonNode))
+                          .isInstanceOf(TrinoException.class)
+                          .hasMessageContaining("Cannot parse value for field as BOOLEAN")
+                          .extracting(e -> ((TrinoException) e).getErrorCode())
+                          .isEqualTo(TYPE_MISMATCH.toErrorCode());
+              }
+
+              private static boolean decodeBoolean(JsonNode jsonNode)
+              {
+          ''')
+
+          connector_test = "plugin/trino-elasticsearch/src/test/java/io/trino/plugin/elasticsearch/BaseElasticsearchConnectorTest.java"
+          marker = '''    @Test
+              public void testLike()
+          '''
+          addition = '''    @Test
+              public void testKeywordSubfieldWithoutDocValuesSupportsExactFilter()
+                      throws IOException
+              {
+                  String indexName = "keyword_no_doc_values";
+                  @Language("JSON")
+                  String mapping =
+                          """
+                          {
+                            "properties": {
+                              "text_column": {
+                                "type": "text",
+                                "fields": {
+                                  "raw": { "type": "keyword", "doc_values": false }
+                                }
+                              }
+                            }
+                          }
+                          """;
+                  createIndex(indexName, mapping);
+                  index(indexName, ImmutableMap.of("text_column", "exact"));
+                  index(indexName, ImmutableMap.of("text_column", "other"));
+
+                  assertThat(query("SELECT text_column FROM " + indexName + " WHERE text_column = 'exact'"))
+                          .matches("VALUES VARCHAR 'exact'")
+                          .isFullyPushedDown();
+
+                  assertThat(query("SELECT text_column FROM " + indexName + " ORDER BY text_column LIMIT 1"))
+                          .isNotFullyPushedDown(io.trino.sql.planner.plan.TopNNode.class);
+              }
+
+              @Test
+              public void testFilteredAggregateIsNotPushedDown()
+                      throws IOException
+              {
+                  String indexName = "filtered_aggregate_test";
+                  @Language("JSON")
+                  String mapping =
+                          """
+                          {
+                            "properties": {
+                              "enabled": { "type": "boolean" }
+                            }
+                          }
+                          """;
+                  createIndex(indexName, mapping);
+                  index(indexName, ImmutableMap.of("enabled", true));
+                  index(indexName, ImmutableMap.of("enabled", false));
+
+                  assertThat(query("SELECT count(*) FILTER (WHERE enabled) FROM " + indexName))
+                          .matches("VALUES BIGINT '1'")
+                          .isNotFullyPushedDown(io.trino.sql.planner.plan.AggregationNode.class);
+              }
+
+          '''
+          p = Path(connector_test)
+          text = p.read_text()
+          if marker not in text:
+              raise SystemExit("testLike marker not found")
+          p.write_text(text.replace(marker, addition + marker, 1))
+          PY
+
+      - name: Run focused Elasticsearch tests
+        run: ./mvnw -pl plugin/trino-elasticsearch -am -Dtest=TestKeywordSubfield,TestAggregationQueryPageSource -Dsurefire.failIfNoSpecifiedTests=false -Dair.check.skip-all test
+
+      - name: Replace temporary commits with verified follow-up
+        shell: bash
+        run: |
+          rm .github/workflows/agent-es-pushdown-followup.yml .github/workflows/agent-es-pushdown-pr.yml
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add -A
+          git reset --soft 1a9e0147c0aa92626dbaf43ad32f7d5e8c087b60
+          git commit -m "fix(elasticsearch): separate exact predicates from doc-value capabilities"
+          git push --force-with-lease origin HEAD:fix/es-pushdown-fixes
