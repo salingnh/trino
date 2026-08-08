@@ -15,6 +15,7 @@ package io.trino.plugin.elasticsearch;
 
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.node.BooleanNode;
+import com.fasterxml.jackson.databind.node.DoubleNode;
 import com.fasterxml.jackson.databind.node.IntNode;
 import com.fasterxml.jackson.databind.node.TextNode;
 import io.trino.spi.TrinoException;
@@ -32,16 +33,17 @@ public class TestAggregationQueryPageSource
     @Test
     public void testBooleanDecoding()
     {
-        // Boolean node
         assertThat(decodeBoolean(BooleanNode.TRUE)).isTrue();
         assertThat(decodeBoolean(BooleanNode.FALSE)).isFalse();
 
-        // Numeric node
         assertThat(decodeBoolean(new IntNode(1))).isTrue();
         assertThat(decodeBoolean(new IntNode(0))).isFalse();
-        assertThat(decodeBoolean(new IntNode(5))).isTrue();
+        assertThat(decodeBoolean(new DoubleNode(1.0))).isTrue();
+        assertThat(decodeBoolean(new DoubleNode(0.0))).isFalse();
+        assertInvalidBoolean(new IntNode(5));
+        assertInvalidBoolean(new IntNode(-1));
+        assertInvalidBoolean(new DoubleNode(0.5));
 
-        // Textual node - valid
         assertThat(decodeBoolean(new TextNode("true"))).isTrue();
         assertThat(decodeBoolean(new TextNode("TRUE"))).isTrue();
         assertThat(decodeBoolean(new TextNode("1"))).isTrue();
@@ -50,8 +52,12 @@ public class TestAggregationQueryPageSource
         assertThat(decodeBoolean(new TextNode("0"))).isFalse();
         assertThat(decodeBoolean(new TextNode(""))).isFalse();
 
-        // Textual node - invalid
-        assertThatThrownBy(() -> decodeBoolean(new TextNode("invalid")))
+        assertInvalidBoolean(new TextNode("invalid"));
+    }
+
+    private static void assertInvalidBoolean(JsonNode jsonNode)
+    {
+        assertThatThrownBy(() -> decodeBoolean(jsonNode))
                 .isInstanceOf(TrinoException.class)
                 .hasMessageContaining("Cannot parse value for field as BOOLEAN")
                 .extracting(e -> ((TrinoException) e).getErrorCode())

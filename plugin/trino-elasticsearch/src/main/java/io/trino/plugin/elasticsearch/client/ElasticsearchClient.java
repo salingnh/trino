@@ -548,7 +548,11 @@ public class ElasticsearchClient
                     IndexMetadata.PrimitiveType primitiveType;
                     if (type.equals("text")) {
                         Optional<String> keyword = keywordSubfield(value, useBoundedKeyword);
-                        primitiveType = new IndexMetadata.PrimitiveType(type, keyword, aggregatable && keyword.isPresent());
+                        boolean keywordAggregatable = keyword
+                                .map(name -> value.path("fields").path(name))
+                                .map(ElasticsearchClient::hasDocValues)
+                                .orElse(false);
+                        primitiveType = new IndexMetadata.PrimitiveType(type, keyword, keywordAggregatable);
                     }
                     else if (type.equals("keyword") && value.get("normalizer") != null) {
                         // A keyword field with a normalizer stores a rewritten (for example lowercased) value, not the
@@ -585,7 +589,11 @@ public class ElasticsearchClient
             if (subfieldNode.get("normalizer") != null) {
                 continue;
             }
-            if (subfieldNode.has("doc_values") && !subfieldNode.get("doc_values").asBoolean()) {
+            // Exact term/prefix predicates use the inverted index and do not require doc values. A keyword field with
+            // index=false is still queryable through doc values, so keep the sub-field if either access path is available.
+            boolean indexed = !subfieldNode.has("index") || subfieldNode.get("index").asBoolean();
+            boolean docValues = hasDocValues(subfieldNode);
+            if (!indexed && !docValues) {
                 continue;
             }
             // A keyword sub-field without ignore_above indexes every value and is always safe for pushdown, so prefer it
@@ -602,6 +610,12 @@ public class ElasticsearchClient
             return boundedSubfield;
         }
         return Optional.empty();
+    }
+
+    @VisibleForTesting
+    static boolean hasDocValues(JsonNode fieldNode)
+    {
+        return !fieldNode.has("doc_values") || fieldNode.get("doc_values").asBoolean();
     }
 
     private JsonNode nullSafeNode(JsonNode jsonNode, String name)

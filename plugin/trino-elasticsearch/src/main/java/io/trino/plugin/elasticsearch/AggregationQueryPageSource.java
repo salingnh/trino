@@ -207,7 +207,16 @@ class AggregationQueryPageSource
                 type.writeBoolean(builder, value.asBoolean());
             }
             else if (value.isNumber()) {
-                type.writeBoolean(builder, value.asLong() != 0);
+                double numeric = value.asDouble();
+                if (numeric == 1.0) {
+                    type.writeBoolean(builder, true);
+                }
+                else if (numeric == 0.0) {
+                    type.writeBoolean(builder, false);
+                }
+                else {
+                    throw new TrinoException(TYPE_MISMATCH, format("Cannot parse value for field as BOOLEAN: %s", value));
+                }
             }
             else if (value.isTextual()) {
                 String text = value.asText().trim();
