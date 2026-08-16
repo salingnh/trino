@@ -23,8 +23,6 @@ import io.trino.spi.type.TypeManager;
 
 import java.util.Map;
 
-import static java.util.Locale.ENGLISH;
-
 /**
  * Exposes Trino-normalized column identifiers while preserving the original Elasticsearch field path in the
  * {@link ElasticsearchColumnHandle}. Trino clients can therefore use the lowercase column names returned by metadata,
@@ -48,7 +46,9 @@ public class CasePreservingElasticsearchMetadata
     static Map<String, ColumnHandle> normalizeColumnHandles(Map<String, ColumnHandle> handles)
     {
         ImmutableMap.Builder<String, ColumnHandle> normalized = ImmutableMap.builder();
-        handles.forEach((name, handle) -> normalized.put(name.toLowerCase(ENGLISH), handle));
+        handles.values().stream()
+                .map(ElasticsearchColumnHandle.class::cast)
+                .forEach(handle -> normalized.put(handle.logicalName(), handle));
         return normalized.buildOrThrow();
     }
 }
