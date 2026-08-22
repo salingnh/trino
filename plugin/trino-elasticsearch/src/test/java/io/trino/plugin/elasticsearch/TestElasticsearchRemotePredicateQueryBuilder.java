@@ -20,6 +20,8 @@ import org.junit.jupiter.api.Test;
 import java.util.Optional;
 
 import static io.trino.plugin.elasticsearch.ElasticsearchRemotePredicateQueryBuilder.build;
+import static io.trino.plugin.elasticsearch.expression.ElasticsearchRemotePredicate.Enforcement.EXACT;
+import static io.trino.plugin.elasticsearch.expression.ElasticsearchRemotePredicate.Enforcement.PREFILTER;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
@@ -75,6 +77,18 @@ public class TestElasticsearchRemotePredicateQueryBuilder
     }
 
     @Test
+    public void testEnforcementMetadataDoesNotChangeDsl()
+    {
+        ElasticsearchRemotePredicate predicate = new ElasticsearchRemotePredicate.Enforced(
+                new ElasticsearchRemotePredicate.MatchPhrase("name", "apache trino"),
+                PREFILTER);
+
+        assertThat(predicate.enforcement()).isEqualTo(PREFILTER);
+        assertThat(build(predicate).toString())
+                .isEqualTo("{\"match_phrase\":{\"name\":\"apache trino\"}}");
+    }
+
+    @Test
     public void testExistsAndBooleanComposition()
     {
         ElasticsearchRemotePredicate predicate = new ElasticsearchRemotePredicate.And(ImmutableList.of(
@@ -103,5 +117,10 @@ public class TestElasticsearchRemotePredicateQueryBuilder
         assertThatThrownBy(() -> ElasticsearchRemotePredicate.Value.of(new Object()))
                 .isInstanceOf(IllegalArgumentException.class)
                 .hasMessageContaining("Unsupported remote predicate value type");
+        assertThatThrownBy(() -> new ElasticsearchRemotePredicate.Enforced(
+                new ElasticsearchRemotePredicate.Term("id", 1L),
+                EXACT))
+                .isInstanceOf(IllegalArgumentException.class)
+                .hasMessageContaining("EXACT predicates do not require an enforcement wrapper");
     }
 }
