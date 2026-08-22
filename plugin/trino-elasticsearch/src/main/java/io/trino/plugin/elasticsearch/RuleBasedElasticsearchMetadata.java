@@ -83,13 +83,10 @@ public class RuleBasedElasticsearchMetadata
             Constraint constraint)
     {
         ElasticsearchTableHandle input = (ElasticsearchTableHandle) table;
-        RemoteExpressionRewrite arrayRewrite = rewriteExactArrayPredicates(constraint);
-        Constraint preparedConstraint = arrayRewrite.constraint();
-        if (getFullTextPushdownMode(session) == UNSAFE) {
-            preparedConstraint = rewriteUnsafeFullTextConstraint(session, preparedConstraint);
-        }
+        RemoteExpressionRewrite expressionRewrite = rewriteRemoteExpressions(session, constraint, getFullTextPushdownMode(session) == UNSAFE);
+        Constraint preparedConstraint = expressionRewrite.constraint();
 
-        Optional<ElasticsearchRemotePredicate> inheritedPredicate = combine(input.remotePredicate(), arrayRewrite.remotePredicate());
+        Optional<ElasticsearchRemotePredicate> inheritedPredicate = combine(input.remotePredicate(), expressionRewrite.remotePredicate());
         Optional<ConstraintApplicationResult<ConnectorTableHandle>> legacyResult = super.applyFilter(session, table, preparedConstraint);
 
         if (legacyResult.isPresent()) {
@@ -97,7 +94,7 @@ public class RuleBasedElasticsearchMetadata
             return legacyResult.map(result -> result.transform(handle -> canonicalize((ElasticsearchTableHandle) handle, finalInheritedPredicate)));
         }
 
-        if (arrayRewrite.remotePredicate().isEmpty()) {
+        if (expressionRewrite.remotePredicate().isEmpty()) {
             return Optional.empty();
         }
 
@@ -138,31 +135,49 @@ public class RuleBasedElasticsearchMetadata
                         result.isPrecalculateStatistics()));
     }
 
-    private static RemoteExpressionRewrite rewriteExactArrayPredicates(Constraint constraint)
+    private static RemoteExpressionRewrite rewriteRemoteExpressions(ConnectorSession session, Constraint constraint, boolean unsafeFullText)
     {
+        Constraint expressionConstraint = unsafeFullText ? removeSyntheticPrefixLikeDomains(constraint) : constraint;
         List<ConnectorExpression> remainingExpressions = new ArrayList<>();
         List<ElasticsearchRemotePredicate> remotePredicates = new ArrayList<>();
-        for (ConnectorExpression expression : ConnectorExpressions.extractConjuncts(constraint.getExpression())) {
-            Optional<ElasticsearchRemotePredicate> remotePredicate = ElasticsearchArrayPredicateTranslator.translate(expression, constraint.getAssignments());
-            if (remotePredicate.isPresent()) {
-                remotePredicates.add(remotePredicate.orElseThrow());
+
+        for (ConnectorExpression expression : ConnectorExpressions.extractConjuncts(expressionConstraint.getExpression())) {
+            Optional<ElasticsearchRemotePredicate> arrayPredicate = ElasticsearchArrayPredicateTranslator.translate(expression, expressionConstraint.getAssignments());
+            if (arrayPredicate.isPresent()) {
+                remotePredicates.add(arrayPredicate.orElseThrow());
+                continue;
             }
-            else {
-                remainingExpressions.add(expression);
+
+            if (unsafeFullText) {
+                Optional<ElasticsearchExpressionRewrite> rewrite = EXPRESSION_TRANSLATOR.rewrite(session, expression, expressionConstraint.getAssignments());
+                if (rewrite.isPresent()) {
+                    ElasticsearchExpressionRewrite translated = rewrite.orElseThrow();
+                    switch (translated.queryType()) {
+                        case MATCH_PHRASE -> remotePredicates.add(new ElasticsearchRemotePredicate.MatchPhrase(
+                                translated.column().remoteName(),
+                                translated.value()));
+                    }
+                    continue;
+                }
             }
+            remainingExpressions.add(expression);
         }
 
-        if (remotePredicates.isEmpty()) {
+        if (remotePredicates.isEmpty() && expressionConstraint == constraint) {
             return new RemoteExpressionRewrite(constraint, Optional.empty());
         }
         return new RemoteExpressionRewrite(
                 new Constraint(
-                        constraint.getSummary(),
+                        expressionConstraint.getSummary(),
                         ConnectorExpressions.and(remainingExpressions),
-                        constraint.getAssignments()),
+                        expressionConstraint.getAssignments()),
                 conjunction(remotePredicates));
     }
 
+    /**
+     * Compatibility helper retained for focused regression tests of the old lowering bridge. Runtime lowering now
+     * targets {@link ElasticsearchRemotePredicate} directly and no longer encodes a MATCH_PHRASE as a synthetic domain.
+     */
     static Constraint rewriteUnsafeFullTextConstraint(ConnectorSession session, Constraint constraint)
     {
         if (constraint.getSummary().isNone()) {
@@ -196,8 +211,6 @@ public class RuleBasedElasticsearchMetadata
             ElasticsearchExpressionRewrite rewrite = translation.orElseThrow();
             ElasticsearchColumnHandle column = rewrite.column();
 
-            // Compatibility bridge for the existing analyzed-text LIKE rule. Once lowered, the legacy domain is
-            // immediately canonicalized to the remote IR by applyFilter above.
             if (originalDomains.containsKey(column) || translationsPerColumn.getOrDefault(column, 0) != 1) {
                 remainingExpressions.add(expression);
                 continue;
@@ -317,8 +330,6 @@ public class RuleBasedElasticsearchMetadata
 
     static Optional<Domain> createLikePrefixDomain(VarcharType type, Slice prefix)
     {
-        // Keep this byte-for-byte compatible in semantics with DomainTranslator#createRangeDomain. In particular,
-        // DomainTranslator increments only ASCII code points so the UTF-8 byte length cannot change.
         int lastIncrementable = -1;
         for (int position = 0; position < prefix.length(); position += lengthOfCodePoint(prefix, position)) {
             if (getCodePointAt(prefix, position) < 127) {
