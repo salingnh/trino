@@ -240,7 +240,7 @@ final class ElasticsearchPredicatePushdownPlanner
             Optional<String> prefix = ElasticsearchMetadata.likePrefix(pattern, escape);
             ElasticsearchRemotePredicate predicate = prefix
                     .<ElasticsearchRemotePredicate>map(value -> new ElasticsearchRemotePredicate.Prefix(column.predicateName(), value))
-                    .orElseGet(() -> new ElasticsearchRemotePredicate.Regexp(column.predicateName(), ElasticsearchMetadata.likeToRegexp(pattern, escape)));
+                    .orElse(new ElasticsearchRemotePredicate.Regexp(column.predicateName(), ElasticsearchMetadata.likeToRegexp(pattern, escape)));
             return Optional.of(new ExpressionPushdown(predicate, false));
         }
 
