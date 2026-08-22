@@ -16,6 +16,7 @@ package io.trino.plugin.elasticsearch;
 import com.fasterxml.jackson.databind.json.JsonMapper;
 import com.google.common.collect.ImmutableList;
 import com.google.common.collect.ImmutableMap;
+import io.trino.Session;
 import io.trino.sql.planner.plan.FilterNode;
 import org.elasticsearch.client.Request;
 import org.elasticsearch.client.RestClient;
@@ -23,6 +24,7 @@ import org.intellij.lang.annotations.Language;
 import org.junit.jupiter.api.Test;
 
 import java.io.IOException;
+import java.util.List;
 import java.util.Map;
 import java.util.stream.IntStream;
 
@@ -41,6 +43,31 @@ public abstract class BaseElasticsearchP0PredicatePushdownTest
     {
         super(server);
         this.client = server.getClient();
+    }
+
+    @Override
+    protected List<Integer> largeInValuesCountData()
+    {
+        // P0 native terms pushdown removes the old bool-clause ceiling. Exercise both sides of Elasticsearch's
+        // traditional 1024-clause default in the generic connector test suite.
+        return ImmutableList.of(1, 10, 1_000, 2_000);
+    }
+
+    @Override
+    @Test
+    public void testRegexpLikeIsNotPushedDown()
+    {
+        // BaseElasticsearchConnectorTest predates the explicit full-text safety modes and asserts that regexp_like is
+        // always residual. P0 changes that contract: UNSAFE explicitly accepts Lucene/Joni semantic differences and
+        // makes a successfully translated regexp authoritative.
+        String catalogName = getSession().getCatalog().orElseThrow();
+        Session unsafe = Session.builder(getSession())
+                .setCatalogSessionProperty(catalogName, "full_text_pushdown_mode", "UNSAFE")
+                .build();
+        String sql = "SELECT count(*) FROM orders WHERE regexp_like(orderstatus, '^O$')";
+
+        assertQuery(unsafe, sql);
+        assertThat(query(unsafe, sql)).isFullyPushedDown();
     }
 
     @Test
@@ -176,7 +203,7 @@ public abstract class BaseElasticsearchP0PredicatePushdownTest
             index(indexName, ImmutableMap.of("value", "alpha", "id", "2"));
 
             String catalogName = getSession().getCatalog().orElseThrow();
-            io.trino.Session unsafe = io.trino.Session.builder(getSession())
+            Session unsafe = Session.builder(getSession())
                     .setCatalogSessionProperty(catalogName, "full_text_pushdown_mode", "UNSAFE")
                     .build();
 
