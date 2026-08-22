@@ -23,6 +23,8 @@ import io.trino.spi.predicate.TupleDomain;
 import io.trino.spi.type.Type;
 import io.trino.spi.type.VarcharType;
 
+import java.net.InetAddress;
+import java.net.UnknownHostException;
 import java.time.Instant;
 import java.time.ZoneOffset;
 import java.util.ArrayList;
@@ -245,6 +247,14 @@ final class ElasticsearchRemotePredicateTranslator
                     .atZone(ZoneOffset.UTC)
                     .toLocalDateTime()
                     .format(ISO_DATE_TIME);
+        }
+        if (type.getBaseName().equalsIgnoreCase("ipaddress") && value instanceof Slice slice) {
+            try {
+                return InetAddress.getByAddress(slice.getBytes()).getHostAddress();
+            }
+            catch (UnknownHostException e) {
+                throw new IllegalArgumentException("Invalid IP address value", e);
+            }
         }
         throw new IllegalArgumentException("Unhandled remote predicate type: " + type);
     }
