@@ -44,13 +44,18 @@ public class ElasticsearchPageSourceProvider
 {
     private final ElasticsearchClient client;
     private final TypeManager typeManager;
-    private final ElasticsearchDynamicFilterPlanner dynamicFilterPlanner = new ElasticsearchDynamicFilterPlanner();
+    private final ElasticsearchDynamicFilterPlanner dynamicFilterPlanner;
 
     @Inject
-    public ElasticsearchPageSourceProvider(ElasticsearchClient client, TypeManager typeManager)
+    public ElasticsearchPageSourceProvider(ElasticsearchClient client, TypeManager typeManager, ElasticsearchConfig config)
     {
         this.client = requireNonNull(client, "client is null");
         this.typeManager = requireNonNull(typeManager, "typeManager is null");
+        requireNonNull(config, "config is null");
+        this.dynamicFilterPlanner = new ElasticsearchDynamicFilterPlanner(
+                config.getDynamicFilteringMaxValues(),
+                config.getDynamicFilteringTermsBatchSize(),
+                config.getDynamicFilteringMaxQueryBytes());
     }
 
     @Override
