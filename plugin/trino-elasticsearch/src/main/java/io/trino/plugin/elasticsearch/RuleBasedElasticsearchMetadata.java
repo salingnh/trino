@@ -20,11 +20,15 @@ import io.trino.plugin.elasticsearch.client.ElasticsearchClient;
 import io.trino.plugin.elasticsearch.client.IndexMetadata.PrimitiveType;
 import io.trino.plugin.elasticsearch.expression.ElasticsearchExpressionRewrite;
 import io.trino.plugin.elasticsearch.expression.ElasticsearchExpressionTranslator;
+import io.trino.plugin.elasticsearch.expression.ElasticsearchRemotePredicate;
+import io.trino.spi.connector.AggregateFunction;
+import io.trino.spi.connector.AggregationApplicationResult;
 import io.trino.spi.connector.ColumnHandle;
 import io.trino.spi.connector.ConnectorSession;
 import io.trino.spi.connector.ConnectorTableHandle;
 import io.trino.spi.connector.Constraint;
 import io.trino.spi.connector.ConstraintApplicationResult;
+import io.trino.spi.connector.LimitApplicationResult;
 import io.trino.spi.expression.Call;
 import io.trino.spi.expression.ConnectorExpression;
 import io.trino.spi.expression.Constant;
@@ -46,22 +50,20 @@ import static io.airlift.slice.SliceUtf8.getCodePointAt;
 import static io.airlift.slice.SliceUtf8.lengthOfCodePoint;
 import static io.airlift.slice.SliceUtf8.setCodePointAt;
 import static io.airlift.slice.Slices.utf8Slice;
+import static io.trino.plugin.elasticsearch.ElasticsearchRemotePredicateTranslator.canonicalize;
+import static io.trino.plugin.elasticsearch.ElasticsearchRemotePredicateTranslator.combine;
+import static io.trino.plugin.elasticsearch.ElasticsearchRemotePredicateTranslator.conjunction;
+import static io.trino.plugin.elasticsearch.ElasticsearchRemotePredicateTranslator.withRemotePredicate;
 import static io.trino.plugin.elasticsearch.ElasticsearchSessionProperties.getFullTextPushdownMode;
 import static io.trino.plugin.elasticsearch.FullTextPushdownMode.UNSAFE;
 
 /**
- * Adds rule-based expression translation before the legacy metadata pushdown implementation.
+ * Rule-based Elasticsearch metadata facade.
  *
- * <p>The translator is intentionally separated from table-handle mutation. New SQL expression conversions can be
- * implemented as {@code ConnectorExpressionRule}s without growing {@link ElasticsearchMetadata#applyFilter} into a
- * large function-specific conditional. Rewrites are lowered to the existing Elasticsearch table-handle primitives in
- * this class.</p>
- *
- * <p>The rule layer currently runs only in {@link FullTextPushdownMode#UNSAFE}. A successful translation is therefore
- * authoritative: the translated conjunct is removed from the Trino residual expression. Unsupported expressions stay
- * in the residual. The current MATCH_PHRASE lowering uses a synthetic single-value {@link Domain}; consequently, two
- * independent remote predicates on the same field cannot yet be represented. In that case this class deliberately
- * keeps the original expressions until the table handle has a proper multi-predicate remote IR.</p>
+ * <p>The legacy metadata implementation still performs proven SQL-expression recognition, but its connector-owned
+ * output is immediately normalized into {@link ElasticsearchRemotePredicate}. New predicates are added directly to
+ * the IR, which removes the one-domain-per-column limitation of {@link TupleDomain} and provides a single execution
+ * representation for static and dynamic pushdown.</p>
  */
 public class RuleBasedElasticsearchMetadata
         extends CasePreservingElasticsearchMetadata
@@ -80,11 +82,85 @@ public class RuleBasedElasticsearchMetadata
             ConnectorTableHandle table,
             Constraint constraint)
     {
-        if (getFullTextPushdownMode(session) != UNSAFE) {
-            return super.applyFilter(session, table, constraint);
+        ElasticsearchTableHandle input = (ElasticsearchTableHandle) table;
+        RemoteExpressionRewrite arrayRewrite = rewriteExactArrayPredicates(constraint);
+        Constraint preparedConstraint = arrayRewrite.constraint();
+        if (getFullTextPushdownMode(session) == UNSAFE) {
+            preparedConstraint = rewriteUnsafeFullTextConstraint(session, preparedConstraint);
         }
 
-        return super.applyFilter(session, table, rewriteUnsafeFullTextConstraint(session, constraint));
+        Optional<ElasticsearchRemotePredicate> inheritedPredicate = combine(input.remotePredicate(), arrayRewrite.remotePredicate());
+        Optional<ConstraintApplicationResult<ConnectorTableHandle>> legacyResult = super.applyFilter(session, table, preparedConstraint);
+
+        if (legacyResult.isPresent()) {
+            Optional<ElasticsearchRemotePredicate> finalInheritedPredicate = inheritedPredicate;
+            return legacyResult.map(result -> result.transform(handle -> canonicalize((ElasticsearchTableHandle) handle, finalInheritedPredicate)));
+        }
+
+        if (arrayRewrite.remotePredicate().isEmpty()) {
+            return Optional.empty();
+        }
+
+        ElasticsearchTableHandle rewrittenHandle = withRemotePredicate(input, inheritedPredicate);
+        return Optional.of(new ConstraintApplicationResult<>(
+                rewrittenHandle,
+                preparedConstraint.getSummary(),
+                preparedConstraint.getExpression(),
+                false));
+    }
+
+    @Override
+    public Optional<LimitApplicationResult<ConnectorTableHandle>> applyLimit(ConnectorSession session, ConnectorTableHandle table, long limit)
+    {
+        ElasticsearchTableHandle input = (ElasticsearchTableHandle) table;
+        return super.applyLimit(session, table, limit)
+                .map(result -> new LimitApplicationResult<>(
+                        withRemotePredicate((ElasticsearchTableHandle) result.getHandle(), input.remotePredicate()),
+                        result.isLimitGuaranteed(),
+                        result.isPrecalculateStatistics()));
+    }
+
+    @Override
+    public Optional<AggregationApplicationResult<ConnectorTableHandle>> applyAggregation(
+            ConnectorSession session,
+            ConnectorTableHandle table,
+            List<AggregateFunction> aggregates,
+            Map<String, ColumnHandle> assignments,
+            List<List<ColumnHandle>> groupingSets)
+    {
+        ElasticsearchTableHandle input = (ElasticsearchTableHandle) table;
+        return super.applyAggregation(session, table, aggregates, assignments, groupingSets)
+                .map(result -> new AggregationApplicationResult<>(
+                        withRemotePredicate((ElasticsearchTableHandle) result.getHandle(), input.remotePredicate()),
+                        result.getProjections(),
+                        result.getAssignments(),
+                        result.getGroupingColumnMapping(),
+                        result.isPrecalculateStatistics()));
+    }
+
+    private static RemoteExpressionRewrite rewriteExactArrayPredicates(Constraint constraint)
+    {
+        List<ConnectorExpression> remainingExpressions = new ArrayList<>();
+        List<ElasticsearchRemotePredicate> remotePredicates = new ArrayList<>();
+        for (ConnectorExpression expression : ConnectorExpressions.extractConjuncts(constraint.getExpression())) {
+            Optional<ElasticsearchRemotePredicate> remotePredicate = ElasticsearchArrayPredicateTranslator.translate(expression, constraint.getAssignments());
+            if (remotePredicate.isPresent()) {
+                remotePredicates.add(remotePredicate.orElseThrow());
+            }
+            else {
+                remainingExpressions.add(expression);
+            }
+        }
+
+        if (remotePredicates.isEmpty()) {
+            return new RemoteExpressionRewrite(constraint, Optional.empty());
+        }
+        return new RemoteExpressionRewrite(
+                new Constraint(
+                        constraint.getSummary(),
+                        ConnectorExpressions.and(remainingExpressions),
+                        constraint.getAssignments()),
+                conjunction(remotePredicates));
     }
 
     static Constraint rewriteUnsafeFullTextConstraint(ConnectorSession session, Constraint constraint)
@@ -120,9 +196,8 @@ public class RuleBasedElasticsearchMetadata
             ElasticsearchExpressionRewrite rewrite = translation.orElseThrow();
             ElasticsearchColumnHandle column = rewrite.column();
 
-            // TupleDomain can hold only one domain per column. Do not encode one translated full-text conjunct when
-            // another predicate already targets the same column, because that would corrupt A AND B into a single
-            // equality-shaped domain. This is a representation limitation, not a request for exact SQL semantics.
+            // Compatibility bridge for the existing analyzed-text LIKE rule. Once lowered, the legacy domain is
+            // immediately canonicalized to the remote IR by applyFilter above.
             if (originalDomains.containsKey(column) || translationsPerColumn.getOrDefault(column, 0) != 1) {
                 remainingExpressions.add(expression);
                 continue;
@@ -152,12 +227,6 @@ public class RuleBasedElasticsearchMetadata
      * legacy Elasticsearch pushdown recognizes the LIKE expression independently and, in UNSAFE mode, replaces it
      * with {@code match_phrase_prefix}. Leaving the synthetic range in the remaining TupleDomain would therefore add
      * a redundant Trino FilterNode and prevent full pushdown.
-     *
-     * <p>Only remove a domain when it exactly matches the range DomainTranslator generates for this prefix. Also keep
-     * it when another visible connector-expression conjunct references the same column. TupleDomain does not retain
-     * predicate provenance, so a predicate that the optimizer has completely absorbed into the same range cannot be
-     * distinguished here. Full provenance would require an engine-level representation rather than a connector-only
-     * heuristic.</p>
      */
     private static Constraint removeSyntheticPrefixLikeDomains(Constraint constraint)
     {
@@ -272,4 +341,6 @@ public class RuleBasedElasticsearchMetadata
                 ValueSet.ofRanges(Range.range(type, lowerBound, true, upperBound, false)),
                 false));
     }
+
+    private record RemoteExpressionRewrite(Constraint constraint, Optional<ElasticsearchRemotePredicate> remotePredicate) {}
 }
