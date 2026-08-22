@@ -17,7 +17,10 @@ import com.fasterxml.jackson.databind.json.JsonMapper;
 import com.google.common.collect.ImmutableList;
 import com.google.common.collect.ImmutableMap;
 import io.trino.Session;
+import io.trino.execution.QueryStats;
 import io.trino.sql.planner.plan.FilterNode;
+import io.trino.testing.QueryRunner;
+import io.trino.testing.QueryRunner.MaterializedResultWithPlan;
 import org.elasticsearch.client.Request;
 import org.elasticsearch.client.RestClient;
 import org.intellij.lang.annotations.Language;
@@ -29,6 +32,10 @@ import java.util.List;
 import java.util.Map;
 import java.util.stream.IntStream;
 
+import static io.trino.SystemSessionProperties.JOIN_DISTRIBUTION_TYPE;
+import static io.trino.SystemSessionProperties.JOIN_REORDERING_STRATEGY;
+import static io.trino.sql.planner.OptimizerConfig.JoinDistributionType.BROADCAST;
+import static io.trino.sql.planner.OptimizerConfig.JoinReorderingStrategy.NONE;
 import static io.trino.testing.TestingNames.randomNameSuffix;
 import static java.lang.String.format;
 import static java.util.stream.Collectors.joining;
@@ -81,6 +88,36 @@ public abstract class BaseElasticsearchP0PredicatePushdownTest
         // This used to fail once the generated bool.should exceeded Elasticsearch's default max clause count.
         // QueryBuilder now emits a single native terms query, while assertQuery verifies connector/reference equality.
         assertQuery("SELECT count(*) FROM orders WHERE orderkey IN (" + values + ")");
+    }
+
+    @Test
+    public void testDynamicFilterReducesElasticsearchProbeInput()
+    {
+        Session dynamicFilteringSession = Session.builder(getSession())
+                .setSystemProperty(JOIN_REORDERING_STRATEGY, NONE.name())
+                .setSystemProperty(JOIN_DISTRIBUTION_TYPE, BROADCAST.name())
+                .build();
+        String sql = "SELECT count(*) FROM orders o JOIN customer c ON o.custkey = c.custkey WHERE c.name = 'Customer#000000001'";
+
+        // The right side is intentionally the small build side. Its value is not statically known from the name
+        // predicate, so reducing the orders scan requires the runtime join dynamic filter.
+        assertQuery(dynamicFilteringSession, sql);
+
+        QueryRunner runner = getQueryRunner();
+        MaterializedResultWithPlan filtered = runner.executeWithPlan(dynamicFilteringSession, sql);
+        QueryStats filteredStats = queryStats(runner, filtered);
+
+        Session dynamicFilteringDisabled = Session.builder(dynamicFilteringSession)
+                .setSystemProperty("enable_dynamic_filtering", "false")
+                .build();
+        MaterializedResultWithPlan unfiltered = runner.executeWithPlan(dynamicFilteringDisabled, sql);
+        QueryStats unfilteredStats = queryStats(runner, unfiltered);
+
+        assertThat(filteredStats.getDynamicFiltersStats().getTotalDynamicFilters()).isGreaterThan(0);
+        assertThat(filteredStats.getDynamicFiltersStats().getDynamicFiltersCompleted()).isGreaterThan(0);
+        assertThat(filteredStats.getPhysicalInputPositions())
+                .as("Elasticsearch physical input positions with dynamic filtering")
+                .isLessThan(unfilteredStats.getPhysicalInputPositions());
     }
 
     @Test
@@ -227,6 +264,14 @@ public abstract class BaseElasticsearchP0PredicatePushdownTest
         finally {
             deleteIndex(indexName);
         }
+    }
+
+    private static QueryStats queryStats(QueryRunner runner, MaterializedResultWithPlan result)
+    {
+        return runner.getCoordinator()
+                .getQueryManager()
+                .getFullQueryInfo(result.queryId())
+                .getQueryStats();
     }
 
     private void createIndex(String indexName, @Language("JSON") String properties)
