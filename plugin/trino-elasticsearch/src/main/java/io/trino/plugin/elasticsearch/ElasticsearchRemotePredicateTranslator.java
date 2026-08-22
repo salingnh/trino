@@ -113,7 +113,12 @@ final class ElasticsearchRemotePredicateTranslator
 
         String field = column.predicateName();
         if (domain.getValues().isNone()) {
-            return Optional.of(new ElasticsearchRemotePredicate.Not(new ElasticsearchRemotePredicate.Exists(field)));
+            if (domain.isNullAllowed()) {
+                return Optional.of(new ElasticsearchRemotePredicate.Not(new ElasticsearchRemotePredicate.Exists(field)));
+            }
+            return conjunction(List.of(
+                    new ElasticsearchRemotePredicate.Exists(field),
+                    new ElasticsearchRemotePredicate.Not(new ElasticsearchRemotePredicate.Exists(field))));
         }
         if (domain.getValues().isAll()) {
             return Optional.of(new ElasticsearchRemotePredicate.Exists(field));
