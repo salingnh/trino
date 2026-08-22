@@ -1,16 +1,17 @@
 # Elasticsearch Connector Pushdown Roadmap
 
-This roadmap tracks the staged implementation of the Elasticsearch connector pushdown architecture. Work must progress in order. A stage is not considered complete until its implementation-specific tests and connector-level checks pass.
+This roadmap tracks the staged implementation of the Elasticsearch connector pushdown architecture. A stage is not considered complete until its implementation-specific tests and connector-level checks pass.
 
 ## Delivery rules
 
 1. Work on a feature branch; never implement directly on `master`.
 2. Keep each stage reviewable and independently testable.
-3. Do not start the next stage until the current stage is green.
+3. P0.1-P0.5 may be implemented as one integration batch on the P0 feature branch, but P1 work must not start until the complete P0 gate is green.
 4. Every behavior change must include regression tests covering exact SQL semantics and generated Elasticsearch behavior.
-5. Prefer exact pushdown. Candidate-only or approximate pushdown must retain the Trino residual predicate.
-6. Avoid Elasticsearch scripts for generic predicate pushdown unless there is no index-native equivalent and the performance/correctness trade-off is demonstrated.
-7. Keep upstream contribution in mind: isolate performance changes from architectural refactors where possible.
+5. Prefer exact pushdown. Candidate-only pushdown must retain the Trino residual predicate. Approximate pushdown is allowed only behind explicit UNSAFE opt-in and must be marked as approximate in the Remote Predicate IR.
+6. Dynamic filters must be exact: join re-checking can remove false positives but cannot recover rows lost to approximate false negatives.
+7. Avoid Elasticsearch scripts for generic predicate pushdown unless there is no index-native equivalent and the performance/correctness trade-off is demonstrated.
+8. Keep upstream contribution in mind: isolate performance changes from architectural refactors where possible.
 
 ## Test gate used for every implementation stage
 
@@ -22,13 +23,13 @@ Run the narrowest unit tests first, then the connector module checks before mark
 ./mvnw -pl :trino-elasticsearch test
 ```
 
-For a PR intended for upstream, GitHub CI must also be green before the stage is marked complete.
+For the current P0 integration branch, implementation is completed first and formatting/Maven/CI failures are then fixed as a batch. GitHub CI must be green before P0 is marked complete.
 
 ---
 
 ## P0.1 — Remote Predicate IR
 
-**Status:** IN PROGRESS
+**Status:** IMPLEMENTED — FULL TEST GATE PENDING
 
 ### Objective
 
@@ -41,6 +42,8 @@ RemotePredicate
 ├── And
 ├── Or
 ├── Not
+├── Enforced
+│   └── EXACT / PREFILTER / APPROXIMATE metadata
 ├── Term
 ├── Terms
 ├── Range
@@ -51,36 +54,39 @@ RemotePredicate
 └── Exists
 ```
 
-Every translation must also retain enforcement information:
+Enforcement semantics:
 
 ```text
 EXACT        remote predicate is authoritative
 PREFILTER    remote predicate only reduces candidates; Trino residual is required
-APPROXIMATE  remote predicate intentionally uses approximate full-text semantics
+APPROXIMATE  remote predicate intentionally uses approximate full-text semantics after UNSAFE opt-in
 ```
+
+`EXACT` is the default for primitive IR nodes. `PREFILTER` and `APPROXIMATE` are retained explicitly through the `Enforced` IR wrapper and table-handle JSON serialization. The wrapper is transparent to Elasticsearch DSL rendering.
 
 ### Implementation sequence
 
-- [ ] P0.1a Add immutable/sealed Remote Predicate IR model.
-- [ ] P0.1b Add Elasticsearch DSL renderer for the IR without changing current query behavior.
-- [ ] P0.1c Add unit tests for every primitive node and boolean composition.
-- [ ] P0.1d Add an optional remote predicate field to `ElasticsearchTableHandle`.
-- [ ] P0.1e Teach `ElasticsearchQueryBuilder` to compose legacy constraints and the new IR.
-- [ ] P0.1f Add round-trip/table-handle tests and regression tests.
-- [ ] P0.1g Run full connector test gate.
+- [x] P0.1a Add immutable/sealed Remote Predicate IR model.
+- [x] P0.1b Add Elasticsearch DSL renderer for the IR without changing current query behavior.
+- [x] P0.1c Add unit tests for primitive nodes, enforcement metadata and boolean composition.
+- [x] P0.1d Add an optional remote predicate field to `ElasticsearchTableHandle`.
+- [x] P0.1e Teach `ElasticsearchQueryBuilder` to compose legacy constraints and the new IR.
+- [x] P0.1f Add round-trip/table-handle tests and regression tests.
+- [ ] P0.1g Run full connector test gate and GitHub CI.
 
 ### Acceptance criteria
 
 - Multiple remote predicates can target the same field.
 - `AND`, `OR`, and `NOT` are representable without map-key collisions.
-- Existing connector behavior remains unchanged until individual translators migrate.
-- No synthetic `TupleDomain` workaround is required for new predicates.
+- Enforcement metadata survives planning and serialization.
+- Existing legacy state can be canonicalized into the IR during migration.
+- No synthetic `TupleDomain` workaround is required for newly migrated runtime predicates.
 
 ---
 
 ## P0.2 — Native Elasticsearch `terms`
 
-**Status:** NOT STARTED
+**Status:** IMPLEMENTED — FULL TEST GATE PENDING
 
 ### Objective
 
@@ -88,20 +94,20 @@ Translate discrete multi-value predicates to native Elasticsearch `terms` querie
 
 ### Scope
 
-- [ ] Single discrete value -> `Term`.
-- [ ] Multiple discrete values -> `Terms`.
-- [ ] Numeric values.
-- [ ] Boolean values.
-- [ ] Timestamp/date values supported by the connector.
-- [ ] `keyword` and safe `.keyword` paths for VARCHAR.
-- [ ] Preserve residuals when exact semantics are not guaranteed.
+- [x] Single discrete value -> `Term`.
+- [x] Multiple discrete values -> `Terms`.
+- [x] Numeric values.
+- [x] Boolean values.
+- [x] Timestamp/date values supported by the connector.
+- [x] `keyword` and safe `.keyword` paths for VARCHAR.
+- [x] Preserve residuals when exact semantics are not guaranteed.
 
 ### Required tests
 
-- [ ] `IN` with 1, 10, 1,000 and more than 1,024 values.
-- [ ] Generated DSL contains one `terms` query instead of >1,024 bool clauses.
-- [ ] Results equal non-pushdown Trino execution.
-- [ ] Case-preserving remote field names remain correct.
+- [x] `IN` with 1, 10, 1,000 and more than 1,024 values through the ES7/ES8 P0 connector base test.
+- [x] Generated DSL contains one native `terms` query instead of >1,024 bool clauses.
+- [x] Connector results are checked against reference Trino execution.
+- [x] Case-preserving remote field names remain correct.
 
 ### Acceptance criteria
 
@@ -111,7 +117,7 @@ Large `IN (...)` predicates no longer depend on Elasticsearch's bool-clause limi
 
 ## P0.3 — Primitive Array Exact Pushdown
 
-**Status:** NOT STARTED
+**Status:** IMPLEMENTED — FULL TEST GATE PENDING
 
 ### Objective
 
@@ -137,58 +143,62 @@ arrays_overlap(tags, ARRAY['telegram', 'facebook'])
 
 ### Primitive element types
 
-- [ ] TINYINT / SMALLINT / INTEGER / BIGINT
-- [ ] REAL / DOUBLE
-- [ ] BOOLEAN
-- [ ] supported temporal types
-- [ ] IP where supported by the connector
-- [ ] VARCHAR backed by exact `keyword`
-- [ ] VARCHAR backed by safe `text.keyword`
+- [x] TINYINT / SMALLINT / INTEGER / BIGINT
+- [x] REAL / DOUBLE
+- [x] BOOLEAN
+- [x] TIMESTAMP_MILLIS backed by Elasticsearch date mappings
+- [x] IP where supported by the connector
+- [x] VARCHAR backed by exact `keyword`
+- [x] VARCHAR backed by safe `text.keyword`
 
 ### Explicitly not exact-pushed
 
-- [ ] `array_col = ARRAY[...]`
-- [ ] `array_col[index] = value`
-- [ ] `element_at(array_col, n)`
-- [ ] `array_position(...)`
-- [ ] `contains_sequence(...)`
-- [ ] `cardinality(array_col)`
-- [ ] analyzed-text-only array membership
-- [ ] whole-array `IS NULL` / `IS NOT NULL` unless semantics are proven equivalent for empty arrays
+- [x] `array_col = ARRAY[...]`
+- [x] `array_col[index] = value`
+- [x] `element_at(array_col, n)`
+- [x] `array_position(...)`
+- [x] `contains_sequence(...)`
+- [x] `cardinality(array_col)`
+- [x] analyzed-text-only array membership
+- [x] whole-array `IS NULL` / `IS NOT NULL` unless semantics are proven equivalent for empty arrays
 
 ### Required tests
 
-- [ ] ES7 and ES8 connector tests.
-- [ ] Empty array vs NULL behavior.
-- [ ] Arrays containing NULL elements.
-- [ ] Duplicate values.
-- [ ] Numeric arrays.
-- [ ] Exact keyword arrays.
-- [ ] analyzed text fallback/residual.
-- [ ] existing array subscript and whole-array equality tests remain non-pushdown.
+- [x] ES7 and ES8 connector acceptance suite.
+- [x] Empty array vs NULL/missing behavior.
+- [x] NULL elements in constant `arrays_overlap` arrays remain residual.
+- [x] Duplicate constant values.
+- [x] Numeric arrays.
+- [x] Boolean and timestamp translator coverage.
+- [x] Exact keyword arrays.
+- [x] `text.keyword` case-sensitive membership.
+- [x] analyzed text fallback/residual.
+- [x] whole-array equality remains non-pushdown.
+- [ ] Source arrays containing NULL elements: connector-level regression coverage.
 
 ---
 
 ## P0.4 — Dynamic Filter Planner
 
-**Status:** NOT STARTED
+**Status:** IMPLEMENTED — INTEGRATION GATE PENDING
 
 ### Objective
 
-Use the new `Term`/`Terms` IR to make dynamic filtering scale beyond the current fixed domain-compaction behavior.
+Use the new `Term`/`Terms` IR to make dynamic filtering scale beyond the current fixed domain-compaction behavior while preserving join correctness.
 
 ### Planner
 
 ```text
 DynamicFilter
-  ├── single value -> Term
-  ├── small set -> Terms
-  ├── medium set -> batched Terms
-  ├── range -> Range
+  ├── single exact value -> Term
+  ├── small exact set -> Terms
+  ├── medium exact set -> batched Terms
+  ├── exact range -> Range
+  ├── analyzed/approximate field -> no remote dynamic filter
   └── excessive/unsafe -> bounded fallback
 ```
 
-### Configuration candidates
+### Configuration
 
 ```properties
 elasticsearch.dynamic-filtering.max-values
@@ -198,40 +208,69 @@ elasticsearch.dynamic-filtering.max-query-bytes
 
 ### Required tests
 
-- [ ] Small dynamic-filter value set.
-- [ ] >1,000 values without losing selectivity merely because of the old hard-coded compaction threshold.
-- [ ] Batched query generation.
-- [ ] Request-byte budget.
-- [ ] Correct fallback when budget is exceeded.
-- [ ] Join integration tests where dynamic filtering reduces Elasticsearch input.
+- [x] Small dynamic-filter value set.
+- [x] >1,000 values without losing selectivity merely because of the old hard-coded compaction threshold.
+- [x] Batched query generation.
+- [x] Request-byte budget.
+- [x] Correct fallback when value/query budget is exceeded.
+- [x] Analyzed-text dynamic filters are rejected rather than approximated.
+- [x] Configuration defaults and explicit mappings.
+- [ ] Join integration test proving dynamic filtering reaches Elasticsearch and reduces source input.
+
+### Correctness invariant
+
+Dynamic filtering never uses approximate analyzed-text matching. A join can re-check false positives, but it cannot recover a source row that Elasticsearch incorrectly removed as a false negative.
 
 ---
 
 ## P0.5 — Complete Rule-based Predicate Migration
 
-**Status:** NOT STARTED
+**Status:** IMPLEMENTED — FULL TEST GATE PENDING
 
 ### Objective
 
-Move legacy predicate-specific logic out of `ElasticsearchMetadata.applyFilter()` and into composable expression/domain translation rules targeting the Remote Predicate IR.
+Move predicate-specific planning out of the monolithic legacy path and into composable expression/domain translation rules targeting the Remote Predicate IR.
 
 ### Rules
 
-- [ ] Exact discrete domain
-- [ ] Range domain
-- [ ] Exact LIKE/prefix
-- [ ] analyzed-text LIKE
-- [ ] `starts_with`
-- [ ] `substr` / `substring` prefix recognition
-- [ ] `regexp_like`
-- [ ] array `contains`
-- [ ] `arrays_overlap`
+- [x] Exact discrete domain
+- [x] Range domain
+- [x] Exact LIKE/prefix
+- [x] analyzed-text LIKE
+- [x] `starts_with`
+- [x] `substr` / `substring` prefix recognition
+- [x] `regexp_like`
+- [x] array `contains`
+- [x] `arrays_overlap`
 
 ### Cleanup after migration
 
-- [ ] Remove synthetic full-text domains.
-- [ ] Remove or deprecate legacy regex/prefix/match-phrase-prefix maps when no longer referenced.
-- [ ] Preserve full-text modes DISABLED / SAFE / UNSAFE.
+- [x] Runtime P0 rules no longer require synthetic full-text domains; the DomainTranslator-generated analyzed prefix range is removed only when provenance is proven safe.
+- [x] New P0 rules target Remote Predicate IR and do not write legacy regex/prefix/match-phrase-prefix maps.
+- [x] Legacy maps are retained only as compatibility state while fallback behavior remains; any fallback state is immediately canonicalized into IR.
+- [x] Preserve full-text modes DISABLED / SAFE / UNSAFE.
+- [x] SAFE keeps Trino residuals and records `PREFILTER`; UNSAFE records `APPROXIMATE`.
+- [x] Multiple regexp predicates can target the same field without map collisions.
+- [x] Remote predicates are preserved across limit/aggregation handle rewrites.
+- [x] Statistics do not silently ignore remote predicates: until statistics become IR-aware, the rule-based facade returns conservative empty statistics for filtered handles.
+
+---
+
+## P0 final gate
+
+**Status:** NOT GREEN YET
+
+Before P1 starts:
+
+- [ ] Add connector-level source-array NULL-element regression coverage.
+- [ ] Add/verify join integration coverage for dynamic filtering reaching Elasticsearch.
+- [ ] Run focused P0 unit tests.
+- [ ] Run `./mvnw -pl :trino-elasticsearch airstyle:check` and fix formatting as one final batch.
+- [ ] Run `./mvnw -pl :trino-elasticsearch test`.
+- [ ] Inspect and fix compile/API/test failures rather than treating every Maven failure as formatting.
+- [ ] GitHub CI for PR #15 is green.
+
+No P1 implementation starts before this gate is complete.
 
 ---
 
@@ -323,7 +362,7 @@ Do not replace Scroll without benchmark evidence.
 - [ ] Improve early cancellation where safe.
 - [ ] Make composite aggregation page size configurable if benchmarks justify it.
 - [ ] Add aggregation resource/byte metrics.
-- [ ] Add statistics caching/selectivity improvements only after measuring planning overhead.
+- [ ] Make statistics rendering fully Remote-Predicate-IR-aware, then add caching/selectivity improvements only after measuring planning overhead.
 
 ---
 
@@ -343,7 +382,7 @@ Do not prioritize generic join pushdown. Preferred architecture is:
 Trino join
   -> build-side dynamic filter
   -> DynamicFilterPlanner
-  -> Term/Terms/Range
+  -> exact Term/Terms/Range
   -> Elasticsearch
 ```
 
@@ -352,17 +391,19 @@ Trino join
 ## Current execution order
 
 ```text
-P0.1 Remote Predicate IR
-  -> P0.2 Native terms
-  -> P0.3 Primitive array exact pushdown
-  -> P0.4 Dynamic Filter Planner
-  -> P0.5 Rule migration
-  -> P1.1 any_match
-  -> P1.2 boolean composition
-  -> P1.3 observability
-  -> P1.4 scan execution v2
-  -> P2 hardening
-  -> P3 optional SPI work
+P0 implementation batch
+  ├── P0.1 Remote Predicate IR
+  ├── P0.2 Native terms
+  ├── P0.3 Primitive array exact pushdown
+  ├── P0.4 Dynamic Filter Planner
+  └── P0.5 Rule migration
+        -> P0 final Maven / connector / CI gate
+        -> P1.1 any_match
+        -> P1.2 boolean composition
+        -> P1.3 observability
+        -> P1.4 scan execution v2
+        -> P2 hardening
+        -> P3 optional SPI work
 ```
 
 Update this file after every completed stage, including the tests/CI used to validate completion.
