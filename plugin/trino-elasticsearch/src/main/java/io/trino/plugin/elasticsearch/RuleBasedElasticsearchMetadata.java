@@ -55,6 +55,8 @@ import static io.trino.plugin.elasticsearch.ElasticsearchRemotePredicateTranslat
 import static io.trino.plugin.elasticsearch.ElasticsearchRemotePredicateTranslator.conjunction;
 import static io.trino.plugin.elasticsearch.ElasticsearchRemotePredicateTranslator.withRemotePredicate;
 import static io.trino.plugin.elasticsearch.ElasticsearchSessionProperties.getFullTextPushdownMode;
+import static io.trino.plugin.elasticsearch.FullTextPushdownMode.DISABLED;
+import static io.trino.plugin.elasticsearch.FullTextPushdownMode.SAFE;
 import static io.trino.plugin.elasticsearch.FullTextPushdownMode.UNSAFE;
 
 /**
@@ -83,15 +85,24 @@ public class RuleBasedElasticsearchMetadata
             Constraint constraint)
     {
         ElasticsearchTableHandle input = (ElasticsearchTableHandle) table;
-        RemoteExpressionRewrite expressionRewrite = rewriteRemoteExpressions(session, constraint, getFullTextPushdownMode(session) == UNSAFE);
+        FullTextPushdownMode fullTextMode = getFullTextPushdownMode(session);
+        RemoteExpressionRewrite expressionRewrite = rewriteRemoteExpressions(session, constraint, fullTextMode);
         Constraint preparedConstraint = expressionRewrite.constraint();
 
         Optional<ElasticsearchRemotePredicate> inheritedPredicate = combine(input.remotePredicate(), expressionRewrite.remotePredicate());
         Optional<ConstraintApplicationResult<ConnectorTableHandle>> legacyResult = super.applyFilter(session, table, preparedConstraint);
 
         if (legacyResult.isPresent()) {
-            Optional<ElasticsearchRemotePredicate> finalInheritedPredicate = inheritedPredicate;
-            return legacyResult.map(result -> result.transform(handle -> canonicalize((ElasticsearchTableHandle) handle, finalInheritedPredicate)));
+            ConstraintApplicationResult<ConnectorTableHandle> result = legacyResult.orElseThrow();
+            ElasticsearchTableHandle canonicalHandle = canonicalize((ElasticsearchTableHandle) result.getHandle(), inheritedPredicate);
+            ConnectorExpression remainingExpression = appendResidualExpressions(
+                    result.getRemainingExpression().orElse(preparedConstraint.getExpression()),
+                    expressionRewrite.residualExpressions());
+            return Optional.of(new ConstraintApplicationResult<>(
+                    canonicalHandle,
+                    result.getRemainingFilter(),
+                    remainingExpression,
+                    result.isPrecalculateStatistics()));
         }
 
         if (expressionRewrite.remotePredicate().isEmpty()) {
@@ -102,7 +113,7 @@ public class RuleBasedElasticsearchMetadata
         return Optional.of(new ConstraintApplicationResult<>(
                 rewrittenHandle,
                 preparedConstraint.getSummary(),
-                preparedConstraint.getExpression(),
+                appendResidualExpressions(preparedConstraint.getExpression(), expressionRewrite.residualExpressions()),
                 false));
     }
 
@@ -135,10 +146,14 @@ public class RuleBasedElasticsearchMetadata
                         result.isPrecalculateStatistics()));
     }
 
-    private static RemoteExpressionRewrite rewriteRemoteExpressions(ConnectorSession session, Constraint constraint, boolean unsafeFullText)
+    private static RemoteExpressionRewrite rewriteRemoteExpressions(
+            ConnectorSession session,
+            Constraint constraint,
+            FullTextPushdownMode fullTextMode)
     {
-        Constraint expressionConstraint = unsafeFullText ? removeSyntheticPrefixLikeDomains(constraint) : constraint;
+        Constraint expressionConstraint = fullTextMode == UNSAFE ? removeSyntheticPrefixLikeDomains(constraint) : constraint;
         List<ConnectorExpression> remainingExpressions = new ArrayList<>();
+        List<ConnectorExpression> residualExpressions = new ArrayList<>();
         List<ElasticsearchRemotePredicate> remotePredicates = new ArrayList<>();
 
         for (ConnectorExpression expression : ConnectorExpressions.extractConjuncts(expressionConstraint.getExpression())) {
@@ -148,7 +163,23 @@ public class RuleBasedElasticsearchMetadata
                 continue;
             }
 
-            if (unsafeFullText) {
+            Optional<RegexpRemoteRewrite> regexpRewrite = translateRegexp(expression, expressionConstraint.getAssignments());
+            if (fullTextMode != DISABLED && regexpRewrite.isPresent()) {
+                RegexpRemoteRewrite translated = regexpRewrite.orElseThrow();
+                boolean safePrefilter = translated.column().supportsPredicates() && translated.translation().quality().safeForPrefilter();
+                if (fullTextMode == UNSAFE || safePrefilter) {
+                    remotePredicates.add(new ElasticsearchRemotePredicate.Regexp(
+                            translated.column().predicateName(),
+                            translated.translation().pattern()));
+                    if (fullTextMode == SAFE) {
+                        // SAFE uses the remote regexp only to reduce candidates. Trino remains authoritative.
+                        residualExpressions.add(expression);
+                    }
+                    continue;
+                }
+            }
+
+            if (fullTextMode == UNSAFE) {
                 Optional<ElasticsearchExpressionRewrite> rewrite = EXPRESSION_TRANSLATOR.rewrite(session, expression, expressionConstraint.getAssignments());
                 if (rewrite.isPresent()) {
                     ElasticsearchExpressionRewrite translated = rewrite.orElseThrow();
@@ -164,14 +195,49 @@ public class RuleBasedElasticsearchMetadata
         }
 
         if (remotePredicates.isEmpty() && expressionConstraint == constraint) {
-            return new RemoteExpressionRewrite(constraint, Optional.empty());
+            return new RemoteExpressionRewrite(constraint, Optional.empty(), List.of());
         }
         return new RemoteExpressionRewrite(
                 new Constraint(
                         expressionConstraint.getSummary(),
                         ConnectorExpressions.and(remainingExpressions),
                         expressionConstraint.getAssignments()),
-                conjunction(remotePredicates));
+                conjunction(remotePredicates),
+                residualExpressions);
+    }
+
+    private static Optional<RegexpRemoteRewrite> translateRegexp(
+            ConnectorExpression expression,
+            Map<String, ColumnHandle> assignments)
+    {
+        if (!(expression instanceof Call call) || !call.getFunctionName().getName().equals("regexp_like")) {
+            return Optional.empty();
+        }
+        List<ConnectorExpression> arguments = call.getArguments();
+        if (arguments.size() != 2
+                || !(arguments.get(0) instanceof Variable variable)
+                || !(arguments.get(1) instanceof Constant constant)
+                || !(constant.getValue() instanceof Slice pattern)) {
+            return Optional.empty();
+        }
+        ColumnHandle assigned = assignments.get(variable.getName());
+        if (!(assigned instanceof ElasticsearchColumnHandle column) || !(column.type() instanceof VarcharType)) {
+            return Optional.empty();
+        }
+        return CasePreservingElasticsearchMetadata.translateRegexpLike(pattern.toStringUtf8())
+                .map(translation -> new RegexpRemoteRewrite(column, translation));
+    }
+
+    private static ConnectorExpression appendResidualExpressions(
+            ConnectorExpression expression,
+            List<ConnectorExpression> residualExpressions)
+    {
+        if (residualExpressions.isEmpty()) {
+            return expression;
+        }
+        List<ConnectorExpression> conjuncts = new ArrayList<>(ConnectorExpressions.extractConjuncts(expression));
+        conjuncts.addAll(residualExpressions);
+        return ConnectorExpressions.and(conjuncts);
     }
 
     /**
@@ -353,5 +419,12 @@ public class RuleBasedElasticsearchMetadata
                 false));
     }
 
-    private record RemoteExpressionRewrite(Constraint constraint, Optional<ElasticsearchRemotePredicate> remotePredicate) {}
+    private record RegexpRemoteRewrite(
+            ElasticsearchColumnHandle column,
+            CasePreservingElasticsearchMetadata.RegexpTranslation translation) {}
+
+    private record RemoteExpressionRewrite(
+            Constraint constraint,
+            Optional<ElasticsearchRemotePredicate> remotePredicate,
+            List<ConnectorExpression> residualExpressions) {}
 }
