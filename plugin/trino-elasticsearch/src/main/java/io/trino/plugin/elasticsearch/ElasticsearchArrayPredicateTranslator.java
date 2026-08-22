@@ -23,6 +23,7 @@ import io.trino.spi.expression.Constant;
 import io.trino.spi.expression.Variable;
 import io.trino.spi.type.ArrayType;
 import io.trino.spi.type.Type;
+import io.trino.spi.type.VarcharType;
 
 import java.util.ArrayList;
 import java.util.List;
@@ -134,7 +135,8 @@ final class ElasticsearchArrayPredicateTranslator
                 || elementType.equals(DOUBLE)
                 || elementType.equals(BOOLEAN)
                 || elementType.equals(TIMESTAMP_MILLIS)
-                || elementType instanceof io.trino.spi.type.VarcharType;
+                || elementType instanceof VarcharType
+                || elementType.getBaseName().equalsIgnoreCase("ipaddress");
         if (!supportedElementType) {
             return Optional.empty();
         }
