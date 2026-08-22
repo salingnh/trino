@@ -35,7 +35,6 @@ import java.util.Optional;
 import static com.google.common.collect.ImmutableList.toImmutableList;
 import static io.trino.plugin.elasticsearch.ElasticsearchRemotePredicateTranslator.combine;
 import static io.trino.plugin.elasticsearch.ElasticsearchRemotePredicateTranslator.withRemotePredicate;
-import static io.trino.plugin.elasticsearch.ElasticsearchSessionProperties.getFullTextPushdownMode;
 import static io.trino.plugin.elasticsearch.ElasticsearchTableHandle.Type.QUERY;
 import static java.util.Objects.requireNonNull;
 
@@ -88,16 +87,14 @@ public class ElasticsearchPageSourceProvider
                             .collect(toImmutableList()));
         }
 
-        // Dynamic filters are runtime prefilters: the join always re-checks the key. Keep discrete values discrete and
-        // render them as native terms queries instead of simplifying >1000 values into a broad TupleDomain range.
+        // Dynamic filters are runtime join filters. Only exact Elasticsearch predicates are allowed here: join
+        // re-checking can remove false positives, but cannot recover rows lost to an approximate false negative.
         TupleDomain<ElasticsearchColumnHandle> dynamicFilterPredicate = dynamicFilter.getCurrentPredicate()
                 .transformKeys(ElasticsearchColumnHandle.class::cast);
         if (dynamicFilterPredicate.isNone()) {
             return new EmptyPageSource();
         }
-        Optional<ElasticsearchRemotePredicate> plannedDynamicFilter = dynamicFilterPlanner.plan(
-                dynamicFilterPredicate,
-                getFullTextPushdownMode(session));
+        Optional<ElasticsearchRemotePredicate> plannedDynamicFilter = dynamicFilterPlanner.plan(dynamicFilterPredicate);
         if (plannedDynamicFilter.isPresent()) {
             elasticsearchTable = withRemotePredicate(
                     elasticsearchTable,
