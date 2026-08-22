@@ -28,6 +28,7 @@ import java.util.Optional;
 import java.util.OptionalLong;
 
 import static io.trino.plugin.elasticsearch.ElasticsearchTableHandle.Type.SCAN;
+import static io.trino.plugin.elasticsearch.expression.ElasticsearchRemotePredicate.Enforcement.PREFILTER;
 import static org.assertj.core.api.Assertions.assertThat;
 
 public class TestElasticsearchTableHandle
@@ -44,7 +45,10 @@ public class TestElasticsearchTableHandle
                 new ElasticsearchRemotePredicate.Range(
                         "score",
                         Optional.of(new ElasticsearchRemotePredicate.Bound(1.5, true)),
-                        Optional.empty())));
+                        Optional.empty()),
+                new ElasticsearchRemotePredicate.Enforced(
+                        new ElasticsearchRemotePredicate.MatchPhrase("description", "apache trino"),
+                        PREFILTER)));
 
         ElasticsearchTableHandle handle = new ElasticsearchTableHandle(
                 SCAN,
@@ -65,6 +69,8 @@ public class TestElasticsearchTableHandle
         ElasticsearchTableHandle copy = TABLE_CODEC.fromJson(json);
 
         assertThat(json).contains("\"@type\":\"and\"");
+        assertThat(json).contains("\"@type\":\"enforced\"");
+        assertThat(json).contains("\"enforcement\":\"PREFILTER\"");
         assertThat(copy).isEqualTo(handle);
         assertThat(copy.remotePredicate()).contains(predicate);
     }
