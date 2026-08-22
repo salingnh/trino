@@ -16,7 +16,6 @@ package io.trino.plugin.elasticsearch;
 import io.trino.plugin.elasticsearch.expression.ElasticsearchRemotePredicate;
 import io.trino.spi.predicate.Domain;
 import io.trino.spi.predicate.TupleDomain;
-import io.trino.spi.type.VarcharType;
 
 import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
@@ -28,19 +27,22 @@ import static io.trino.plugin.elasticsearch.ElasticsearchRemotePredicateTranslat
 import static io.trino.plugin.elasticsearch.ElasticsearchRemotePredicateTranslator.getValue;
 
 /**
- * Converts runtime dynamic filters into bounded Elasticsearch predicates without TupleDomain simplification.
+ * Converts runtime dynamic filters into bounded exact Elasticsearch predicates without TupleDomain simplification.
  *
  * <p>The old execution path simplified domains at 1000 values, which could turn a selective discrete join-key set
  * into a broad range. This planner keeps discrete values discrete and batches them into native {@code terms} queries.
  * If a predicate exceeds the configured safety budget, it is omitted; the join still re-checks every row, so this
  * fallback affects only performance, never correctness.</p>
+ *
+ * <p>Analyzed-text-only fields are deliberately not supported here, even when approximate full-text pushdown is
+ * enabled for ordinary query predicates. A join can re-check false positives, but it cannot recover a row that an
+ * approximate dynamic filter removed as a false negative.</p>
  */
 final class ElasticsearchDynamicFilterPlanner
 {
     static final int DEFAULT_MAX_VALUES = 50_000;
     static final int DEFAULT_TERMS_BATCH_SIZE = 1_000;
     static final int DEFAULT_MAX_QUERY_BYTES = 1_048_576;
-    private static final int MAX_ANALYZED_TEXT_VALUES = 512;
 
     private final int maxValues;
     private final int termsBatchSize;
@@ -61,9 +63,7 @@ final class ElasticsearchDynamicFilterPlanner
         this.maxQueryBytes = maxQueryBytes;
     }
 
-    public Optional<ElasticsearchRemotePredicate> plan(
-            TupleDomain<ElasticsearchColumnHandle> dynamicFilter,
-            FullTextPushdownMode fullTextMode)
+    public Optional<ElasticsearchRemotePredicate> plan(TupleDomain<ElasticsearchColumnHandle> dynamicFilter)
     {
         if (dynamicFilter.isAll() || dynamicFilter.isNone()) {
             return Optional.empty();
@@ -72,7 +72,7 @@ final class ElasticsearchDynamicFilterPlanner
         List<ElasticsearchRemotePredicate> predicates = new ArrayList<>();
         int usedBytes = 0;
         for (var entry : dynamicFilter.getDomains().orElseThrow().entrySet()) {
-            Optional<ElasticsearchRemotePredicate> predicate = planDomain(entry.getKey(), entry.getValue(), fullTextMode);
+            Optional<ElasticsearchRemotePredicate> predicate = planDomain(entry.getKey(), entry.getValue());
             if (predicate.isEmpty()) {
                 continue;
             }
@@ -90,21 +90,12 @@ final class ElasticsearchDynamicFilterPlanner
         return conjunction(predicates);
     }
 
-    private Optional<ElasticsearchRemotePredicate> planDomain(
-            ElasticsearchColumnHandle column,
-            Domain domain,
-            FullTextPushdownMode fullTextMode)
+    private Optional<ElasticsearchRemotePredicate> planDomain(ElasticsearchColumnHandle column, Domain domain)
     {
-        if (column.supportsPredicates()) {
-            return planExactDomain(column, domain);
+        if (!column.supportsPredicates()) {
+            return Optional.empty();
         }
-        if (fullTextMode != FullTextPushdownMode.DISABLED && column.type() instanceof VarcharType) {
-            if (!domain.getValues().isDiscreteSet() || domain.getValues().getDiscreteSet().size() > MAX_ANALYZED_TEXT_VALUES) {
-                return Optional.empty();
-            }
-            return ElasticsearchRemotePredicateTranslator.translateDomain(column, domain);
-        }
-        return Optional.empty();
+        return planExactDomain(column, domain);
     }
 
     private Optional<ElasticsearchRemotePredicate> planExactDomain(ElasticsearchColumnHandle column, Domain domain)
