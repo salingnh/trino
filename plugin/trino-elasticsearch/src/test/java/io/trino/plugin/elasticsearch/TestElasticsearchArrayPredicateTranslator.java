@@ -125,7 +125,7 @@ public class TestElasticsearchArrayPredicateTranslator
                 new PrimitiveType("integer"),
                 new IntegerDecoder.Descriptor("Numbers"),
                 false);
-        BlockBuilder builder = INTEGER.createFixedSizeBlockBuilder(2);
+        BlockBuilder builder = INTEGER.createBlockBuilder(null, 2);
         INTEGER.writeLong(builder, 1);
         builder.appendNull();
         Call arraysOverlap = new Call(
@@ -138,7 +138,7 @@ public class TestElasticsearchArrayPredicateTranslator
 
     private static Block integerBlock(long... values)
     {
-        BlockBuilder builder = INTEGER.createFixedSizeBlockBuilder(values.length);
+        BlockBuilder builder = INTEGER.createBlockBuilder(null, values.length);
         for (long value : values) {
             INTEGER.writeLong(builder, value);
         }
