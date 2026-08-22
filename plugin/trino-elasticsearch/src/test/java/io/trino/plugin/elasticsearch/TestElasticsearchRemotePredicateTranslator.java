@@ -100,4 +100,15 @@ public class TestElasticsearchRemotePredicateTranslator
 
         assertThat(predicate).isEqualTo(new ElasticsearchRemotePredicate.Terms("UserID", List.of(1L, 2L)));
     }
+
+    @Test
+    public void testEmptyDomainMatchesNoDocuments()
+    {
+        ElasticsearchRemotePredicate predicate = ElasticsearchRemotePredicateTranslator.translateDomain(USER_ID, Domain.none(INTEGER))
+                .orElseThrow();
+
+        assertThat(predicate).isEqualTo(new ElasticsearchRemotePredicate.And(List.of(
+                new ElasticsearchRemotePredicate.Exists("UserID"),
+                new ElasticsearchRemotePredicate.Not(new ElasticsearchRemotePredicate.Exists("UserID")))));
+    }
 }
