@@ -43,6 +43,8 @@ import static io.trino.plugin.elasticsearch.ElasticsearchRemotePredicateTranslat
 import static io.trino.plugin.elasticsearch.FullTextPushdownMode.DISABLED;
 import static io.trino.plugin.elasticsearch.FullTextPushdownMode.SAFE;
 import static io.trino.plugin.elasticsearch.FullTextPushdownMode.UNSAFE;
+import static io.trino.plugin.elasticsearch.expression.ElasticsearchRemotePredicate.Enforcement.APPROXIMATE;
+import static io.trino.plugin.elasticsearch.expression.ElasticsearchRemotePredicate.Enforcement.PREFILTER;
 import static io.trino.spi.expression.StandardFunctions.EQUAL_OPERATOR_FUNCTION_NAME;
 import static java.util.Locale.ENGLISH;
 import static java.util.Objects.requireNonNull;
@@ -53,7 +55,7 @@ import static java.util.Objects.requireNonNull;
  * <p>The planner deliberately separates remote predicates from residual predicates. Exact Elasticsearch predicates
  * are removed from the Trino residual. SAFE full-text predicates are retained as residuals because their Elasticsearch
  * counterpart is only a candidate-reducing prefilter. UNSAFE full-text predicates are authoritative by explicit user
- * choice.</p>
+ * choice and are marked APPROXIMATE in the IR.</p>
  */
 final class ElasticsearchPredicatePushdownPlanner
 {
@@ -95,7 +97,11 @@ final class ElasticsearchPredicatePushdownPlanner
                 continue;
             }
 
-            remotePredicates.add(translated.orElseThrow());
+            ElasticsearchRemotePredicate remotePredicate = translated.orElseThrow();
+            if (fullTextDiscretePredicate) {
+                remotePredicate = enforceFullText(remotePredicate, fullTextMode);
+            }
+            remotePredicates.add(remotePredicate);
             remainingDomains.remove(column);
             if (fullTextDiscretePredicate && fullTextMode == SAFE) {
                 residualDomains.put(column, domain);
@@ -191,9 +197,10 @@ final class ElasticsearchPredicatePushdownPlanner
                     if (fullTextMode != UNSAFE && !safePrefilter) {
                         return Optional.empty();
                     }
-                    return Optional.of(new ExpressionPushdown(
+                    ElasticsearchRemotePredicate predicate = enforceFullText(
                             new ElasticsearchRemotePredicate.Regexp(column.predicateName(), translation.pattern()),
-                            fullTextMode == SAFE));
+                            fullTextMode);
+                    return Optional.of(new ExpressionPushdown(predicate, fullTextMode == SAFE));
                 });
     }
 
@@ -247,7 +254,9 @@ final class ElasticsearchPredicatePushdownPlanner
                 ElasticsearchExpressionRewrite translated = rewrite.orElseThrow();
                 return switch (translated.queryType()) {
                     case MATCH_PHRASE -> Optional.of(new ExpressionPushdown(
-                            new ElasticsearchRemotePredicate.MatchPhrase(translated.column().remoteName(), translated.value()),
+                            enforceFullText(
+                                    new ElasticsearchRemotePredicate.MatchPhrase(translated.column().remoteName(), translated.value()),
+                                    fullTextMode),
                             false));
                 };
             }
@@ -256,7 +265,9 @@ final class ElasticsearchPredicatePushdownPlanner
         Optional<String> prefix = ElasticsearchMetadata.likePrefix(pattern, escape);
         if (prefix.isPresent()) {
             return Optional.of(new ExpressionPushdown(
-                    new ElasticsearchRemotePredicate.MatchPhrasePrefix(column.remoteName(), prefix.orElseThrow()),
+                    enforceFullText(
+                            new ElasticsearchRemotePredicate.MatchPhrasePrefix(column.remoteName(), prefix.orElseThrow()),
+                            fullTextMode),
                     fullTextMode == SAFE));
         }
 
@@ -265,8 +276,19 @@ final class ElasticsearchPredicatePushdownPlanner
         }
 
         return Optional.of(new ExpressionPushdown(
-                new ElasticsearchRemotePredicate.Regexp(column.remoteName(), ElasticsearchMetadata.likeToRegexp(pattern, escape)),
+                enforceFullText(
+                        new ElasticsearchRemotePredicate.Regexp(column.remoteName(), ElasticsearchMetadata.likeToRegexp(pattern, escape)),
+                        fullTextMode),
                 fullTextMode == SAFE));
+    }
+
+    private static ElasticsearchRemotePredicate enforceFullText(
+            ElasticsearchRemotePredicate predicate,
+            FullTextPushdownMode fullTextMode)
+    {
+        return new ElasticsearchRemotePredicate.Enforced(
+                predicate,
+                fullTextMode == SAFE ? PREFILTER : APPROXIMATE);
     }
 
     private static Optional<ElasticsearchRemotePredicate> translateExactPrefixCall(
