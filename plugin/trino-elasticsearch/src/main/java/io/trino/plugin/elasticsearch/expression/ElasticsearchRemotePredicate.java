@@ -27,9 +27,9 @@ import static java.util.Objects.requireNonNull;
 /**
  * Connector-owned representation of a predicate that can be rendered as Elasticsearch Query DSL.
  *
- * <p>The IR deliberately models Elasticsearch's index-level predicate primitives rather than SQL
- * expressions. Translation code is responsible for proving whether a remote predicate is exact or
- * only a candidate prefilter before constructing this representation.
+ * <p>The IR deliberately models Elasticsearch's index-level predicate primitives rather than SQL expressions. Exact
+ * predicates use {@link Enforcement#EXACT} by default. Translation code wraps candidate-only or intentionally
+ * approximate predicates in {@link Enforced} so enforcement semantics survive planning, serialization and execution.</p>
  */
 @JsonTypeInfo(
         use = JsonTypeInfo.Id.NAME,
@@ -38,6 +38,7 @@ import static java.util.Objects.requireNonNull;
         @JsonSubTypes.Type(value = ElasticsearchRemotePredicate.And.class, name = "and"),
         @JsonSubTypes.Type(value = ElasticsearchRemotePredicate.Or.class, name = "or"),
         @JsonSubTypes.Type(value = ElasticsearchRemotePredicate.Not.class, name = "not"),
+        @JsonSubTypes.Type(value = ElasticsearchRemotePredicate.Enforced.class, name = "enforced"),
         @JsonSubTypes.Type(value = ElasticsearchRemotePredicate.Term.class, name = "term"),
         @JsonSubTypes.Type(value = ElasticsearchRemotePredicate.Terms.class, name = "terms"),
         @JsonSubTypes.Type(value = ElasticsearchRemotePredicate.Range.class, name = "range"),
@@ -49,6 +50,7 @@ import static java.util.Objects.requireNonNull;
 })
 public sealed interface ElasticsearchRemotePredicate
         permits ElasticsearchRemotePredicate.And,
+                ElasticsearchRemotePredicate.Enforced,
                 ElasticsearchRemotePredicate.Exists,
                 ElasticsearchRemotePredicate.MatchPhrase,
                 ElasticsearchRemotePredicate.MatchPhrasePrefix,
@@ -65,6 +67,11 @@ public sealed interface ElasticsearchRemotePredicate
         EXACT,
         PREFILTER,
         APPROXIMATE,
+    }
+
+    default Enforcement enforcement()
+    {
+        return Enforcement.EXACT;
     }
 
     enum ValueType
@@ -126,6 +133,17 @@ public sealed interface ElasticsearchRemotePredicate
         public Not
         {
             requireNonNull(predicate, "predicate is null");
+        }
+    }
+
+    record Enforced(ElasticsearchRemotePredicate predicate, Enforcement enforcement)
+            implements ElasticsearchRemotePredicate
+    {
+        public Enforced
+        {
+            requireNonNull(predicate, "predicate is null");
+            requireNonNull(enforcement, "enforcement is null");
+            checkArgument(enforcement != Enforcement.EXACT, "EXACT predicates do not require an enforcement wrapper");
         }
     }
 
