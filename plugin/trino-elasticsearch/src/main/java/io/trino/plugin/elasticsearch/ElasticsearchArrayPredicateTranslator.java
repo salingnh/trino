@@ -13,6 +13,7 @@
  */
 package io.trino.plugin.elasticsearch;
 
+import io.trino.plugin.elasticsearch.client.IndexMetadata.DateTimeType;
 import io.trino.plugin.elasticsearch.client.IndexMetadata.PrimitiveType;
 import io.trino.plugin.elasticsearch.expression.ElasticsearchRemotePredicate;
 import io.trino.spi.block.Block;
@@ -122,11 +123,18 @@ final class ElasticsearchArrayPredicateTranslator
 
     private static Optional<Type> exactArrayElementType(ElasticsearchColumnHandle column)
     {
-        if (column == null || !(column.type() instanceof ArrayType arrayType) || !(column.elasticsearchType() instanceof PrimitiveType primitiveType)) {
+        if (column == null || !(column.type() instanceof ArrayType arrayType)) {
             return Optional.empty();
         }
 
         Type elementType = arrayType.getElementType();
+        if (elementType.equals(TIMESTAMP_MILLIS)) {
+            return column.elasticsearchType() instanceof DateTimeType ? Optional.of(elementType) : Optional.empty();
+        }
+        if (!(column.elasticsearchType() instanceof PrimitiveType primitiveType)) {
+            return Optional.empty();
+        }
+
         boolean supportedElementType = elementType.equals(TINYINT)
                 || elementType.equals(SMALLINT)
                 || elementType.equals(INTEGER)
@@ -134,7 +142,6 @@ final class ElasticsearchArrayPredicateTranslator
                 || elementType.equals(REAL)
                 || elementType.equals(DOUBLE)
                 || elementType.equals(BOOLEAN)
-                || elementType.equals(TIMESTAMP_MILLIS)
                 || elementType instanceof VarcharType
                 || elementType.getBaseName().equalsIgnoreCase("ipaddress");
         if (!supportedElementType) {
