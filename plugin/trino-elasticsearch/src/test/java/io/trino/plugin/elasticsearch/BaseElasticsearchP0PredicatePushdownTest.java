@@ -24,6 +24,7 @@ import org.intellij.lang.annotations.Language;
 import org.junit.jupiter.api.Test;
 
 import java.io.IOException;
+import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
 import java.util.stream.IntStream;
@@ -136,11 +137,23 @@ public abstract class BaseElasticsearchP0PredicatePushdownTest
                     .buildOrThrow());
             index(indexName, ImmutableMap.of("id", "4"));
 
+            List<String> tagsWithNull = new ArrayList<>();
+            tagsWithNull.add(null);
+            tagsWithNull.add("facebook");
+            index(indexName, ImmutableMap.of("id", "5", "tags", tagsWithNull));
+
+            List<String> onlyNullTag = new ArrayList<>();
+            onlyNullTag.add(null);
+            index(indexName, ImmutableMap.of("id", "6", "tags", onlyNullTag));
+
             assertThat(query("SELECT id FROM " + indexName + " WHERE contains(tags, 'telegram')"))
                     .matches("VALUES VARCHAR '1'")
                     .isFullyPushedDown();
+            assertThat(query("SELECT id FROM " + indexName + " WHERE contains(tags, 'facebook')"))
+                    .matches("VALUES VARCHAR '1', VARCHAR '5'")
+                    .isFullyPushedDown();
             assertThat(query("SELECT id FROM " + indexName + " WHERE arrays_overlap(tags, ARRAY['facebook', 'missing'])"))
-                    .matches("VALUES VARCHAR '1'")
+                    .matches("VALUES VARCHAR '1', VARCHAR '5'")
                     .isFullyPushedDown();
             assertThat(query("SELECT id FROM " + indexName + " WHERE contains(numbers, 2)"))
                     .matches("VALUES VARCHAR '1'")
@@ -166,7 +179,7 @@ public abstract class BaseElasticsearchP0PredicatePushdownTest
 
             // Duplicate constants are harmless, but the existential predicate still maps to native terms semantics.
             assertThat(query("SELECT id FROM " + indexName + " WHERE arrays_overlap(tags, ARRAY['facebook', 'facebook'])"))
-                    .matches("VALUES VARCHAR '1'")
+                    .matches("VALUES VARCHAR '1', VARCHAR '5'")
                     .isFullyPushedDown();
 
             // Whole-array equality and whole-array NULL checks are intentionally not part of P0 exact membership.
