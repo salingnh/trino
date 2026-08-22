@@ -37,6 +37,7 @@ final class ElasticsearchRemotePredicateQueryBuilder
             case ElasticsearchRemotePredicate.Not not -> JSON.objectNode().set(
                     "bool",
                     JSON.objectNode().set("must_not", JSON.arrayNode().add(build(not.predicate()))));
+            case ElasticsearchRemotePredicate.Enforced enforced -> build(enforced.predicate());
             case ElasticsearchRemotePredicate.Term term -> JSON.objectNode().set(
                     "term",
                     JSON.objectNode().set(term.field(), toJsonValue(term.value())));
