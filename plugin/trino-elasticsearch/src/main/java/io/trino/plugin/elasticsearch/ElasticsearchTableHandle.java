@@ -16,6 +16,7 @@ package io.trino.plugin.elasticsearch;
 import com.google.common.collect.ImmutableList;
 import com.google.common.collect.ImmutableMap;
 import com.google.common.collect.ImmutableSet;
+import io.trino.plugin.elasticsearch.expression.ElasticsearchRemotePredicate;
 import io.trino.spi.connector.ColumnHandle;
 import io.trino.spi.connector.ConnectorTableHandle;
 import io.trino.spi.predicate.TupleDomain;
@@ -41,7 +42,8 @@ public record ElasticsearchTableHandle(
         OptionalLong limit,
         List<ElasticsearchColumnSort> sortOrder,
         Set<ElasticsearchColumnHandle> columns,
-        Optional<ElasticsearchAggregation> aggregation)
+        Optional<ElasticsearchAggregation> aggregation,
+        Optional<ElasticsearchRemotePredicate> remotePredicate)
         implements ConnectorTableHandle
 {
     public enum Type
@@ -62,6 +64,37 @@ public record ElasticsearchTableHandle(
                 OptionalLong.empty(),
                 ImmutableList.of(),
                 ImmutableSet.of(),
+                Optional.empty(),
+                Optional.empty());
+    }
+
+    public ElasticsearchTableHandle(
+            Type type,
+            String schema,
+            String index,
+            TupleDomain<ColumnHandle> constraint,
+            Map<String, String> regexes,
+            Map<String, String> prefixes,
+            Map<String, String> matchPhrasePrefixes,
+            Optional<String> query,
+            OptionalLong limit,
+            List<ElasticsearchColumnSort> sortOrder,
+            Set<ElasticsearchColumnHandle> columns,
+            Optional<ElasticsearchAggregation> aggregation)
+    {
+        this(
+                type,
+                schema,
+                index,
+                constraint,
+                regexes,
+                prefixes,
+                matchPhrasePrefixes,
+                query,
+                limit,
+                sortOrder,
+                columns,
+                aggregation,
                 Optional.empty());
     }
 
@@ -79,7 +112,8 @@ public record ElasticsearchTableHandle(
                 limit,
                 sortOrder,
                 columns,
-                aggregation);
+                aggregation,
+                remotePredicate);
     }
 
     public ElasticsearchTableHandle withConstraint(TupleDomain<ColumnHandle> constraint)
@@ -96,7 +130,8 @@ public record ElasticsearchTableHandle(
                 limit,
                 sortOrder,
                 columns,
-                aggregation);
+                aggregation,
+                remotePredicate);
     }
 
     public ElasticsearchTableHandle withTopN(long limit, List<ElasticsearchColumnSort> sortOrder)
@@ -113,7 +148,8 @@ public record ElasticsearchTableHandle(
                 OptionalLong.of(limit),
                 sortOrder,
                 columns,
-                aggregation);
+                aggregation,
+                remotePredicate);
     }
 
     public ElasticsearchTableHandle
@@ -130,6 +166,7 @@ public record ElasticsearchTableHandle(
         requireNonNull(query, "query is null");
         requireNonNull(limit, "limit is null");
         requireNonNull(aggregation, "aggregation is null");
+        requireNonNull(remotePredicate, "remotePredicate is null");
     }
 
     @Override
