@@ -28,8 +28,6 @@ import java.util.Map;
 import java.util.stream.IntStream;
 
 import static io.airlift.slice.Slices.utf8Slice;
-import static io.trino.plugin.elasticsearch.FullTextPushdownMode.DISABLED;
-import static io.trino.plugin.elasticsearch.FullTextPushdownMode.SAFE;
 import static io.trino.spi.type.IntegerType.INTEGER;
 import static io.trino.spi.type.VarcharType.VARCHAR;
 import static org.assertj.core.api.Assertions.assertThat;
@@ -55,7 +53,7 @@ public class TestElasticsearchDynamicFilterPlanner
         ElasticsearchDynamicFilterPlanner planner = new ElasticsearchDynamicFilterPlanner();
         Domain domain = Domain.multipleValues(INTEGER, values(10));
 
-        ElasticsearchRemotePredicate predicate = planner.plan(TupleDomain.withColumnDomains(Map.of(ID, domain)), DISABLED).orElseThrow();
+        ElasticsearchRemotePredicate predicate = planner.plan(TupleDomain.withColumnDomains(Map.of(ID, domain))).orElseThrow();
 
         assertThat(predicate).isInstanceOf(ElasticsearchRemotePredicate.Terms.class);
         ElasticsearchRemotePredicate.Terms terms = (ElasticsearchRemotePredicate.Terms) predicate;
@@ -69,7 +67,7 @@ public class TestElasticsearchDynamicFilterPlanner
         ElasticsearchDynamicFilterPlanner planner = new ElasticsearchDynamicFilterPlanner(10_000, 1_000, 1_048_576);
         Domain domain = Domain.multipleValues(INTEGER, values(2_500));
 
-        ElasticsearchRemotePredicate predicate = planner.plan(TupleDomain.withColumnDomains(Map.of(ID, domain)), DISABLED).orElseThrow();
+        ElasticsearchRemotePredicate predicate = planner.plan(TupleDomain.withColumnDomains(Map.of(ID, domain))).orElseThrow();
 
         assertThat(predicate).isInstanceOf(ElasticsearchRemotePredicate.Or.class);
         List<ElasticsearchRemotePredicate> batches = ((ElasticsearchRemotePredicate.Or) predicate).predicates();
@@ -85,7 +83,7 @@ public class TestElasticsearchDynamicFilterPlanner
         ElasticsearchDynamicFilterPlanner planner = new ElasticsearchDynamicFilterPlanner();
         Domain domain = Domain.create(ValueSet.ofRanges(Range.range(INTEGER, 10L, true, 20L, false)), false);
 
-        ElasticsearchRemotePredicate predicate = planner.plan(TupleDomain.withColumnDomains(Map.of(ID, domain)), DISABLED).orElseThrow();
+        ElasticsearchRemotePredicate predicate = planner.plan(TupleDomain.withColumnDomains(Map.of(ID, domain))).orElseThrow();
 
         assertThat(predicate).isInstanceOf(ElasticsearchRemotePredicate.Range.class);
     }
@@ -96,7 +94,7 @@ public class TestElasticsearchDynamicFilterPlanner
         ElasticsearchDynamicFilterPlanner planner = new ElasticsearchDynamicFilterPlanner(5, 2, 1_048_576);
         Domain domain = Domain.multipleValues(INTEGER, values(6));
 
-        assertThat(planner.plan(TupleDomain.withColumnDomains(Map.of(ID, domain)), DISABLED)).isEmpty();
+        assertThat(planner.plan(TupleDomain.withColumnDomains(Map.of(ID, domain)))).isEmpty();
     }
 
     @Test
@@ -105,19 +103,17 @@ public class TestElasticsearchDynamicFilterPlanner
         ElasticsearchDynamicFilterPlanner planner = new ElasticsearchDynamicFilterPlanner(100, 100, 16);
         Domain domain = Domain.multipleValues(INTEGER, values(10));
 
-        assertThat(planner.plan(TupleDomain.withColumnDomains(Map.of(ID, domain)), DISABLED)).isEmpty();
+        assertThat(planner.plan(TupleDomain.withColumnDomains(Map.of(ID, domain)))).isEmpty();
     }
 
     @Test
-    public void testAnalyzedTextHasStricterBound()
+    public void testAnalyzedTextAlwaysFallsBack()
     {
         ElasticsearchDynamicFilterPlanner planner = new ElasticsearchDynamicFilterPlanner();
-        List<io.airlift.slice.Slice> values = IntStream.range(0, 600)
-                .mapToObj(value -> utf8Slice("value-" + value))
-                .toList();
-        Domain domain = Domain.multipleValues(VARCHAR, values);
+        Domain domain = Domain.multipleValues(VARCHAR, List.of(utf8Slice("Alpha"), utf8Slice("Beta")));
 
-        assertThat(planner.plan(TupleDomain.withColumnDomains(Map.of(ANALYZED_TEXT, domain)), SAFE)).isEmpty();
+        // Dynamic filtering must never use approximate analyzed-text matching: false negatives would corrupt join results.
+        assertThat(planner.plan(TupleDomain.withColumnDomains(Map.of(ANALYZED_TEXT, domain)))).isEmpty();
     }
 
     private static List<Long> values(int count)
