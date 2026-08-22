@@ -38,6 +38,9 @@ import java.util.Optional;
 import static io.airlift.slice.Slices.utf8Slice;
 import static io.trino.plugin.elasticsearch.FullTextPushdownMode.SAFE;
 import static io.trino.plugin.elasticsearch.FullTextPushdownMode.UNSAFE;
+import static io.trino.plugin.elasticsearch.expression.ElasticsearchRemotePredicate.Enforcement.APPROXIMATE;
+import static io.trino.plugin.elasticsearch.expression.ElasticsearchRemotePredicate.Enforcement.EXACT;
+import static io.trino.plugin.elasticsearch.expression.ElasticsearchRemotePredicate.Enforcement.PREFILTER;
 import static io.trino.spi.expression.Constant.TRUE;
 import static io.trino.spi.expression.StandardFunctions.EQUAL_OPERATOR_FUNCTION_NAME;
 import static io.trino.spi.expression.StandardFunctions.LIKE_FUNCTION_NAME;
@@ -71,7 +74,9 @@ public class TestElasticsearchPredicatePushdownPlanner
 
         assertThat(result.remainingConstraint().getSummary().isAll()).isTrue();
         assertThat(result.residualFilter().isAll()).isTrue();
-        assertThat(result.remotePredicate()).contains(new ElasticsearchRemotePredicate.Terms("UserID", List.of(1L, 2L, 3L)));
+        ElasticsearchRemotePredicate predicate = result.remotePredicate().orElseThrow();
+        assertThat(predicate).isEqualTo(new ElasticsearchRemotePredicate.Terms("UserID", List.of(1L, 2L, 3L)));
+        assertThat(predicate.enforcement()).isEqualTo(EXACT);
     }
 
     @Test
@@ -177,7 +182,9 @@ public class TestElasticsearchPredicatePushdownPlanner
 
         assertThat(result.remainingConstraint().getSummary().isAll()).isTrue();
         assertThat(result.residualFilter()).isEqualTo(TupleDomain.withColumnDomains(Map.<ColumnHandle, Domain>of(column, domain)));
-        assertThat(result.remotePredicate()).contains(new ElasticsearchRemotePredicate.MatchPhrase("value", "Alpha Beta"));
+        assertThat(result.remotePredicate()).contains(new ElasticsearchRemotePredicate.Enforced(
+                new ElasticsearchRemotePredicate.MatchPhrase("value", "Alpha Beta"),
+                PREFILTER));
     }
 
     @Test
@@ -200,7 +207,9 @@ public class TestElasticsearchPredicatePushdownPlanner
         assertThat(result.remainingConstraint().getExpression()).isEqualTo(TRUE);
         assertThat(result.residualFilter().isAll()).isTrue();
         assertThat(result.residualExpressions()).isEmpty();
-        assertThat(result.remotePredicate()).contains(new ElasticsearchRemotePredicate.MatchPhrasePrefix("value", "Alpha"));
+        assertThat(result.remotePredicate()).contains(new ElasticsearchRemotePredicate.Enforced(
+                new ElasticsearchRemotePredicate.MatchPhrasePrefix("value", "Alpha"),
+                APPROXIMATE));
     }
 
     private static Constraint expressionConstraint(ElasticsearchColumnHandle column, Call expression)
