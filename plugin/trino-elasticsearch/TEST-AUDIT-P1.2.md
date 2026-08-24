@@ -41,125 +41,180 @@ Therefore adding P1.2 does not replace P0/P1.1 acceptance coverage. Both Elastic
 | # | Test source | Classification | P1.2 audit decision |
 |---:|---|---|---|
 | 1 | `BaseElasticsearchAnyMatchPushdownTest.java` | CURRENT-SEMANTIC / CURRENT-ARCH | Keep. P1.1 same-element semantics are mandatory regression coverage under P1.2. |
-| 2 | `BaseElasticsearchConnectorTest.java` | CURRENT-SEMANTIC + SUPERSEDED definitions | Keep as inherited baseline. Some historical predicate methods are overridden by FullText/P0; those ancestor definitions are not counted as current predicate coverage. |
-| 3 | `BaseElasticsearchFullTextPushdownTest.java` | CURRENT-SEMANTIC | Keep. DISABLED/SAFE/UNSAFE behavior and residual semantics remain production contracts. |
+| 2 | `BaseElasticsearchConnectorTest.java` | CURRENT-SEMANTIC + SUPERSEDED definitions | Keep as inherited baseline. Historical predicate methods overridden by FullText/P0 are not counted as current predicate coverage. |
+| 3 | `BaseElasticsearchFullTextPushdownTest.java` | CURRENT-SEMANTIC | Keep and re-evaluate SAFE expectations against the lossless-prefilter invariant. UNSAFE remains the analyzer-semantic opt-in. |
 | 4 | `BaseElasticsearchP0PredicatePushdownTest.java` | CURRENT-SEMANTIC / CURRENT-ARCH | Keep. Native Terms, dynamic filtering, array membership, NULL edges and same-field regexp behavior must survive P1.2. |
-| 5 | `BaseElasticsearchPredicateCompositionTest.java` | CURRENT-SEMANTIC / CURRENT-ARCH | Keep. P1.2 ES7/ES8 acceptance contract. |
+| 5 | `BaseElasticsearchPredicateCompositionTest.java` | CURRENT-SEMANTIC / CURRENT-ARCH / REWRITTEN | P1.2 ES7/ES8 contract. Expanded with UNSAFE same-field full-text AND and a custom-analyzer regression proving SAFE cannot use a lossy candidate. |
 | 6 | `ElasticsearchLoader.java` | INFRASTRUCTURE | No architecture assertion to rewrite. Still compiled/used by connector tests. |
 | 7 | `ElasticsearchQueryRunner.java` | INFRASTRUCTURE | No architecture assertion to rewrite. Required by integration suite. |
 | 8 | `ElasticsearchServer.java` | INFRASTRUCTURE | No architecture assertion to rewrite. Required by ES7/ES8 integration suite. |
 | 9 | `TestAggregationQueryPageSource.java` | INDEPENDENT | Aggregation page decoding is not changed by P1.2; still mandatory in full module run. |
 | 10 | `TestAwsSecurityConfig.java` | INDEPENDENT | Security configuration unaffected; keep and rerun. |
 | 11 | `TestBuildSort.java` | INDEPENDENT | Sort construction unaffected; keep and rerun. |
-| 12 | `TestElasticsearch7ConnectorTest.java` | CURRENT-ARCH | Keep. Entry point for cumulative P1.2→P1.1→P0→FullText→Base acceptance on ES7. |
-| 13 | `TestElasticsearch8ConnectorTest.java` | CURRENT-ARCH | Keep. Entry point for cumulative P1.2→P1.1→P0→FullText→Base acceptance on ES8. |
-| 14 | `TestElasticsearchArrayPredicateTranslator.java` | CURRENT-ARCH | Keep. Owns same-element proof boundary for `any_match`; document-level composer must not reinterpret these tests. |
-| 15 | `TestElasticsearchComplexTypePredicatePushDown.java` | CURRENT-SEMANTIC | Keep. Nested primitive/ROW/ARRAY predicate and no-data-read behavior remains a broad regression contract. |
-| 16 | `TestElasticsearchConfig.java` | INDEPENDENT / CONFIG | Keep. Existing dynamic-filter/resource configuration remains mandatory even though P1.2 composition policy currently has its own permanent policy object. |
-| 17 | `TestElasticsearchDynamicFilterPlanner.java` | CURRENT-ARCH | Keep. Exact-only dynamic filters, Terms batching and query-byte fallback must not be altered by P1.2 normalization. |
-| 18 | `TestElasticsearchMetadata.java` | CURRENT-SEMANTIC | Keep. `LIKE`→regexp helper semantics remain used by current translation. |
-| 19 | `TestElasticsearchPredicateComposer.java` | CURRENT-ARCH / REWRITTEN | Updated: partial OR and unproven NOT are planner-owned residuals, not compatibility `remaining`. |
-| 20 | `TestElasticsearchPredicateCompositionPlanner.java` | CURRENT-ARCH / REWRITTEN | Updated to assert planner-owned residuals for partial OR/NOT and current document-scope composition behavior. |
-| 21 | `TestElasticsearchPredicateCompositionPolicy.java` | CURRENT-ARCH | Keep. Resource-shape limits are part of the permanent composer contract. |
-| 22 | `TestElasticsearchPredicateCompositionRequestBudget.java` | CURRENT-ARCH | Keep. Oversized composed predicates must fall back safely rather than create an unsafe/oversized remote request. |
-| 23 | `TestElasticsearchPredicatePushdownPlanner.java` | CURRENT-ARCH | Keep. Direct planner→IR behavior is the current predicate planning contract. Synthetic LIKE range handling remains relevant because Trino DomainTranslator can still contribute that domain. |
-| 24 | `TestElasticsearchPredicateTranslation.java` | CURRENT-ARCH / ADDED-GAP | Added by the architecture audit. Directly validates EXACT/PREFILTER ownership, compatibility `remaining` versus planner-owned `residual`, and result invariant enforcement. |
-| 25 | `TestElasticsearchProjectionPushdownPlans.java` | CURRENT-ARCH | Keep. Proves remote predicate state survives projection/dereference and join planning in the table handle. |
-| 26 | `TestElasticsearchQueryBuilder.java` | COMPATIBILITY + REMOVED-OBSOLETE | Rewritten. Generic TupleDomain compatibility rendering remains; old analyzed-text synthetic-domain MatchPhrase/legacy MatchPhrasePrefix tests were removed. Direct full-text IR rendering is covered by `TestElasticsearchRemotePredicateQueryBuilder`. |
-| 27 | `TestElasticsearchRemoteColumnCase.java` | CURRENT-ARCH / REWRITTEN | Migrated analyzed-text casing test from legacy TupleDomain query building to planner→Remote Predicate IR. |
-| 28 | `TestElasticsearchRemotePredicateQueryBuilder.java` | CURRENT-ARCH | Keep. Canonical DSL renderer tests for Term/Terms/Range/Prefix/Regexp/MatchPhrase/MatchPhrasePrefix/Exists/And/Or/Not/Enforced. |
-| 29 | `TestElasticsearchRemotePredicateTranslator.java` | CURRENT-ARCH + COMPATIBILITY | Keep. Normal translation/composition tests are current; `canonicalize` legacy-state test is legitimate because runtime compatibility fallback still canonicalizes legacy state into IR. |
-| 30 | `TestElasticsearchTableHandle.java` | CURRENT-ARCH + COMPATIBILITY | Keep. IR serialization, connector-handle round trip and copy preservation are permanent; legacy constructor behavior remains a compatibility construction contract. |
-| 31 | `TestLikePrefix.java` | CURRENT-SEMANTIC | Keep. Pure LIKE-prefix recognition helper used by the current planner. |
-| 32 | `TestPasswordConfig.java` | INDEPENDENT | Authentication configuration unaffected; keep and rerun. |
-| 33 | `TestRegexpPushdownTranslator.java` | CURRENT-SEMANTIC | Keep. Current planner still consumes `translateRegexpLike`; exact/approximate/unsupported classification remains production behavior. |
-| 34 | `TestRuleBasedElasticsearchMetadata.java` | CURRENT-ARCH / REMOVED-OBSOLETE | Rewritten to facade fixed-point and residual orchestration only. Tests for retired synthetic-domain lowering helper were removed. |
-| 35 | `client/TestExtractAddress.java` | INDEPENDENT | Client address parsing unaffected; keep and rerun. |
-| 36 | `client/TestKeywordSubfield.java` | CURRENT-SEMANTIC | Keep. Exact-predicate safety of keyword sub-fields directly affects planner field selection. |
+| 12 | `TestElasticsearch7ConnectorTest.java` | CURRENT-ARCH | Entry point for cumulative P1.2→P1.1→P0→FullText→Base acceptance on ES7. |
+| 13 | `TestElasticsearch8ConnectorTest.java` | CURRENT-ARCH | Entry point for cumulative P1.2→P1.1→P0→FullText→Base acceptance on ES8. |
+| 14 | `TestElasticsearchArrayPredicateTranslator.java` | CURRENT-ARCH | Owns same-element proof boundary for `any_match`; document-level composer must not reinterpret these tests. |
+| 15 | `TestElasticsearchComplexTypePredicatePushDown.java` | CURRENT-SEMANTIC | Keep. Nested primitive/ROW/ARRAY predicate and no-data-read behavior remains broad regression coverage. |
+| 16 | `TestElasticsearchConfig.java` | INDEPENDENT / CONFIG | Keep. Existing dynamic-filter/resource configuration remains mandatory. |
+| 17 | `TestElasticsearchDynamicFilterPlanner.java` | CURRENT-ARCH | Keep. Dynamic filters remain exact-only; P1.2 normalizer must not turn batching into approximate behavior. |
+| 18 | `TestElasticsearchMetadata.java` | CURRENT-SEMANTIC | Keep. `LIKE`→regexp helper semantics remain used by current exact/UNSAFE translation paths. |
+| 19 | `TestElasticsearchPredicateComposer.java` | CURRENT-ARCH / REWRITTEN | Expanded to lock EXACT/PREFILTER/APPROXIMATE algebra, partial OR ownership, whole-OR residual behavior and exact Terms compaction. |
+| 20 | `TestElasticsearchPredicateCompositionPlanner.java` | CURRENT-ARCH / REWRITTEN | Locks document-scope composition, owned residuals, lossless SAFE analyzed-text rejection and mixed EXACT/proven-PREFILTER OR. |
+| 21 | `TestElasticsearchPredicateCompositionPolicy.java` | CURRENT-ARCH / REWRITTEN | Explicitly tests all resource limits and planner-owned fallback instead of relying on hidden defaults. |
+| 22 | `TestElasticsearchPredicateCompositionRequestBudget.java` | CURRENT-ARCH / REWRITTEN | Oversized composed predicates become owned residuals rather than compatibility state or oversized remote requests. |
+| 23 | `TestElasticsearchPredicatePushdownPlanner.java` | CURRENT-ARCH / REWRITTEN | Direct planner→IR contract. SAFE analyzed Domain/LIKE now remain owned residuals; proven keyword regexp candidate remains PREFILTER. |
+| 24 | `TestElasticsearchPredicateTranslation.java` | CURRENT-ARCH / ADDED-GAP | Added by audit to validate result invariants and the semantic difference between `remaining` and planner-owned `residual`. |
+| 25 | `TestElasticsearchProjectionPushdownPlans.java` | CURRENT-ARCH | Remote predicate state must survive projection/dereference and join planning. |
+| 26 | `TestElasticsearchQueryBuilder.java` | COMPATIBILITY + REMOVED-OBSOLETE | Generic TupleDomain compatibility rendering remains; obsolete analyzed-text synthetic-domain renderer tests were removed. |
+| 27 | `TestElasticsearchRemoteColumnCase.java` | CURRENT-ARCH / REWRITTEN | Migrated analyzed-text casing coverage from legacy TupleDomain query building to planner→Remote Predicate IR. |
+| 28 | `TestElasticsearchRemotePredicateNormalizer.java` | CURRENT-ARCH / ADDED-GAP | Added by audit. Locks flatten/dedupe and conservative compatible exact numeric range intersection without temporary MatchNone encoding. |
+| 29 | `TestElasticsearchRemotePredicateQueryBuilder.java` | CURRENT-ARCH | Canonical DSL renderer for Term/Terms/Range/Prefix/Regexp/MatchPhrase/MatchPhrasePrefix/Exists/And/Or/Not/Enforced. |
+| 30 | `TestElasticsearchRemotePredicateTranslator.java` | CURRENT-ARCH + COMPATIBILITY | Current Domain translation plus legitimate legacy-state canonicalization into IR. |
+| 31 | `TestElasticsearchTableHandle.java` | CURRENT-ARCH + COMPATIBILITY | IR serialization, connector-handle round trip and copy preservation; legacy construction only where still supported. |
+| 32 | `TestLikePrefix.java` | CURRENT-SEMANTIC | Pure LIKE-prefix recognition helper used by current planner. |
+| 33 | `TestPasswordConfig.java` | INDEPENDENT | Authentication configuration unaffected; keep and rerun. |
+| 34 | `TestRegexpPushdownTranslator.java` | CURRENT-SEMANTIC | Exact/approximate/unsupported regexp classification remains current production behavior. |
+| 35 | `TestRuleBasedElasticsearchMetadata.java` | CURRENT-ARCH / REWRITTEN / REMOVED-OBSOLETE | Restricted to facade fixed-point/orchestration and now proves SAFE planner rejection cannot be bypassed by legacy metadata. |
+| 36 | `client/TestExtractAddress.java` | INDEPENDENT | Client address parsing unaffected; keep and rerun. |
+| 37 | `client/TestKeywordSubfield.java` | CURRENT-SEMANTIC | Exact-predicate safety of keyword sub-fields directly affects planner field selection. |
 
-## Obsolete tests removed or migrated in P1.2
+## Architectural findings from the audit
 
-### Synthetic full-text `TupleDomain` lowering
+### 1. Retired synthetic full-text lowering bridge removed
 
-Old tests in `TestRuleBasedElasticsearchMetadata` directly exercised `rewriteUnsafeFullTextConstraint()` and asserted temporary synthetic Domain transport. Runtime planning now lowers to `ElasticsearchRemotePredicate` directly, so those tests were removed instead of updating expected values.
+Old tests in `TestRuleBasedElasticsearchMetadata` directly exercised `rewriteUnsafeFullTextConstraint()` and asserted temporary synthetic Domain transport. Runtime planning already targets `ElasticsearchRemotePredicate` directly, so keeping the helper solely for tests would preserve dead architecture.
 
-Replacement coverage exists at the owning abstractions:
+The tests were removed/migrated and the production helper was deleted. `createLikePrefixDomain()` remains because the current planner still uses it to identify a prefix range synthesized by Trino `DomainTranslator` on the UNSAFE analyzed-prefix path.
+
+Replacement coverage lives at the owning abstractions:
 
 - `TestElasticsearchPredicateTranslation`
 - `TestElasticsearchPredicatePushdownPlanner`
 - `TestElasticsearchPredicateComposer`
 - `TestElasticsearchPredicateCompositionPlanner`
 - `TestElasticsearchRemotePredicateQueryBuilder`
-- ES7/ES8 cumulative acceptance suites
+- cumulative ES7/ES8 acceptance suites
 
-### Legacy QueryBuilder full-text transport
+### 2. SAFE residual did not guarantee correctness
 
-Old `TestElasticsearchQueryBuilder` cases manufactured analyzed-text `TupleDomain`/legacy prefix-map state solely to render `match_phrase` or `match_phrase_prefix`. These are no longer the primary production transport for new predicate functionality and were removed.
+The audit found a semantic contradiction in the previous SAFE full-text contract. A Trino residual can remove remote false positives, but cannot recover a SQL match already filtered out by Elasticsearch.
 
-The canonical equivalents are tested directly as Remote Predicate IR in `TestElasticsearchRemotePredicateQueryBuilder` and end-to-end in `BaseElasticsearchFullTextPushdownTest`.
+Concrete regression case:
 
-### Remote field casing
+```text
+source value: "ngô văn"
+analyzer: standard + lowercase + asciifolding
+indexed terms: "ngo", "van"
+SQL: name LIKE '%ngô%'
+```
 
-The analyzed-text case-preservation test formerly built a legacy analyzed-text Domain directly. It was migrated to:
+A remote regexp containing `ngô` can miss the indexed `ngo` term. Retaining the SQL LIKE as a residual cannot restore the lost row.
+
+P1.2 therefore makes SAFE genuinely lossless:
+
+```text
+SAFE analyzed-text Domain/LIKE without proof
+  -> no remote predicate
+  -> planner-owned residual
+  -> legacy compatibility must not retry it
+
+SAFE proven keyword regexp candidate
+  -> remote PREFILTER
+  -> exact SQL residual retained
+
+UNSAFE analyzed-text translation
+  -> APPROXIMATE remote predicate
+  -> analyzer semantics explicitly accepted
+```
+
+`BaseElasticsearchPredicateCompositionTest` now includes a custom analyzer acceptance case on both ES7 and ES8 that would fail under the old lossy SAFE implementation.
+
+### 3. Planner rejection cannot fall through to legacy metadata
+
+Returning a recognized-but-rejected SAFE predicate as `remaining` was insufficient because legacy `ElasticsearchMetadata.applyFilter()` can also translate analyzed-text predicates. That allowed the compatibility layer to bypass the permanent planner's correctness decision.
+
+The final ownership contract is:
+
+```text
+remaining
+  -> planner does not own predicate
+  -> compatibility may inspect it
+
+residual
+  -> planner owns predicate
+  -> Trino is authoritative
+  -> compatibility may not retry it
+```
+
+This rule now covers partial OR, unproven NOT, resource-budget fallback and recognized SAFE full-text forms without lossless proof.
+
+### 4. Enforcement algebra is explicit regression coverage
+
+Composer tests now lock the effective subtree semantics:
+
+```text
+EXACT + EXACT       -> EXACT
+EXACT + PREFILTER   -> PREFILTER + required residual
+EXACT + APPROXIMATE -> APPROXIMATE
+
+OR with PREFILTER   -> whole SQL OR retained as residual
+OR with APPROXIMATE -> APPROXIMATE dominates
+partial OR          -> no remote OR; whole subtree is owned residual
+```
+
+An APPROXIMATE branch is allowed only under explicit UNSAFE policy. A residual does not convert an approximation into a safe candidate.
+
+### 5. Exact numeric range normalization is conservative
+
+`ElasticsearchRemotePredicateNormalizer` now intersects compatible direct exact numeric ranges on the same field for `LONG` and `DOUBLE` values.
+
+It deliberately does not merge:
+
+- different fields;
+- `Enforced` ranges;
+- STRING/timestamp-like values without an ordering proof;
+- contradictory ranges.
+
+Contradictory ranges remain as independent clauses because the IR has no permanent `MatchNone` node. P1.2 does not introduce a temporary `Exists AND NOT Exists` encoding merely to canonicalize them.
+
+### 6. Legacy QueryBuilder full-text transport removed from current coverage
+
+Old `TestElasticsearchQueryBuilder` cases manufactured analyzed-text TupleDomain/legacy prefix-map state solely to render `match_phrase` or `match_phrase_prefix`. These are no longer the production transport for new predicate functionality and were removed.
+
+Canonical full-text DSL rendering is tested directly by `TestElasticsearchRemotePredicateQueryBuilder` and end-to-end by the inherited acceptance suites.
+
+### 7. Remote field casing migrated to current architecture
+
+The analyzed-text case-preservation test now protects:
 
 ```text
 Constraint
   -> ElasticsearchPredicatePushdownPlanner
-  -> Enforced(MatchPhrase("Ho_ten", ...), APPROXIMATE)
+  -> Remote Predicate IR using original remote field case
 ```
 
-This protects the same user-visible casing behavior on the actual current architecture.
-
-### Partial OR and NOT ownership
-
-Old P1.2 expectations treated rejected partial OR and unproven NOT as compatibility `remaining`. That was architecturally unsafe because legacy fallback could retry a subtree the composer deliberately rejected.
-
-Tests now require:
-
-```text
-partial OR / unproven NOT
-  -> no remote predicate
-  -> no compatibility remaining expression
-  -> planner-owned Trino residual
-```
-
-### Missing direct translation-result coverage
-
-The new `ElasticsearchPredicateTranslation` abstraction initially had no dedicated unit test. The audit added `TestElasticsearchPredicateTranslation` rather than assuming composer tests indirectly covered the result contract.
-
-The new test distinguishes:
-
-```text
-unsupported
-  -> remaining
-  -> compatibility may inspect it
-
-planner-owned residual
-  -> residual
-  -> compatibility must not retry it
-```
-
-and verifies EXACT/PREFILTER constructor invariants.
+rather than manufacturing a legacy analyzed-text Domain solely for the old renderer.
 
 ## Compatibility paths intentionally retained
 
-P1.2 does not delete all legacy state atomically. The following compatibility tests remain intentional:
+P1.2 does not delete all legacy state atomically. The following compatibility coverage remains intentional:
 
 - legacy predicate state canonicalized into `ElasticsearchRemotePredicate` at the `RuleBasedElasticsearchMetadata` boundary;
-- generic `TupleDomain` state rendered together with an already planned remote predicate;
-- legacy table-handle constructor/serialization compatibility where still supported.
+- generic TupleDomain state rendered together with an already planned remote predicate;
+- legacy table-handle constructor/serialization behavior where still supported.
 
-No new P1.2 feature may be implemented on top of these compatibility paths.
+No new P1.2 feature is implemented on top of these compatibility paths.
 
 ## Architecture-sensitive test groups to pass before completion
 
-The following groups must pass on the final squashed P1.2 head:
+The final squashed P1.2 head must pass:
 
 1. Translation and IR
    - `TestElasticsearchPredicateTranslation`
    - `TestElasticsearchPredicatePushdownPlanner`
    - `TestElasticsearchArrayPredicateTranslator`
    - `TestElasticsearchRemotePredicateTranslator`
+   - `TestElasticsearchRemotePredicateNormalizer`
    - `TestElasticsearchRemotePredicateQueryBuilder`
    - `TestElasticsearchTableHandle`
 
@@ -177,20 +232,21 @@ The following groups must pass on the final squashed P1.2 head:
 4. Dynamic filtering/resource safety
    - `TestElasticsearchDynamicFilterPlanner`
 
-5. Full ES acceptance
+5. Full Elasticsearch acceptance
    - `TestElasticsearch7ConnectorTest`
    - `TestElasticsearch8ConnectorTest`
-   - inherited FullText/P0/P1.1/P1.2 suites
+   - inherited FullText/P0/P1.1/P1.2 behavior
+   - custom analyzer SAFE false-negative regression
 
 6. Entire module
-   - every architecture-independent test listed in the inventory above
+   - every architecture-independent test in the complete inventory above
 
 ## Final completion gate
 
 P1.2 must not be marked complete until all of these are true:
 
-- the complete test inventory above has been reviewed against the final production architecture;
-- obsolete implementation tests have been removed or migrated;
+- all 37 test/support sources above have been reviewed against the final production architecture;
+- obsolete implementation tests and test-only production helpers have been removed or migrated;
 - no current behavior is covered only by a superseded ancestor test;
 - focused architecture-sensitive tests pass;
 - AirStyle passes;
@@ -198,5 +254,5 @@ P1.2 must not be marked complete until all of these are true:
 - Elasticsearch 7 cumulative acceptance passes;
 - Elasticsearch 8 cumulative acceptance passes;
 - Error Prone/compile checks pass;
-- final CI is run on the cleaned/squashed branch history;
-- P1.3 can consume `ElasticsearchPredicateTranslation`, composer, IR and reason metadata without replacing them.
+- final CI is run on a cleaned/squashed branch history;
+- P1.3 can consume `ElasticsearchPredicateTranslation`, composer, normalized IR, enforcement and reason metadata without replacing the P1.2 model.
