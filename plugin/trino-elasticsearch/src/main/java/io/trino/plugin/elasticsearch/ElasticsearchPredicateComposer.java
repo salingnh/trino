@@ -22,6 +22,7 @@ import io.trino.plugin.elasticsearch.expression.ElasticsearchRemotePredicate.Ter
 import io.trino.plugin.elasticsearch.expression.ElasticsearchRemotePredicate.Value;
 import io.trino.spi.expression.ConnectorExpression;
 
+import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
 import java.util.LinkedHashMap;
 import java.util.LinkedHashSet;
@@ -50,8 +51,17 @@ final class ElasticsearchPredicateComposer
             ConnectorExpression source,
             List<ElasticsearchPredicateTranslation<ConnectorExpression>> children)
     {
+        return and(source, children, ElasticsearchPredicateCompositionPolicy.DEFAULT);
+    }
+
+    static ElasticsearchPredicateTranslation<ConnectorExpression> and(
+            ConnectorExpression source,
+            List<ElasticsearchPredicateTranslation<ConnectorExpression>> children,
+            ElasticsearchPredicateCompositionPolicy policy)
+    {
         requireNonNull(source, "source is null");
         requireNonNull(children, "children is null");
+        requireNonNull(policy, "policy is null");
 
         List<ElasticsearchRemotePredicate> remotePredicates = new ArrayList<>();
         List<ConnectorExpression> remaining = new ArrayList<>();
@@ -80,6 +90,9 @@ final class ElasticsearchPredicateComposer
                     remainingExpression.isPresent() ? remainingExpression : Optional.of(source),
                     Optional.empty(),
                     Reason.BOOLEAN_AND);
+        }
+        if (!isWithinRequestBudget(remotePredicate.orElseThrow(), policy)) {
+            return ElasticsearchPredicateTranslation.unsupported(source, Reason.BOOLEAN_AND);
         }
 
         Enforcement enforcement;
@@ -128,13 +141,11 @@ final class ElasticsearchPredicateComposer
                 .toList();
         Optional<List<ElasticsearchRemotePredicate>> compacted = compactExactTerms(remotePredicates, policy);
         if (compacted.isEmpty()) {
-            // Exceeding the local request-shape budget is a safe performance fallback. Do not manufacture a remote OR
-            // that is likely to exceed Elasticsearch terms/bool limits.
             return ElasticsearchPredicateTranslation.unsupported(source, Reason.BOOLEAN_OR);
         }
 
         Optional<ElasticsearchRemotePredicate> remotePredicate = ElasticsearchRemotePredicateNormalizer.or(compacted.orElseThrow());
-        if (remotePredicate.isEmpty()) {
+        if (remotePredicate.isEmpty() || !isWithinRequestBudget(remotePredicate.orElseThrow(), policy)) {
             return ElasticsearchPredicateTranslation.unsupported(source, Reason.BOOLEAN_OR);
         }
 
@@ -234,6 +245,17 @@ final class ElasticsearchPredicateComposer
             return Optional.empty();
         }
         return Optional.of(List.copyOf(result));
+    }
+
+    private static boolean isWithinRequestBudget(
+            ElasticsearchRemotePredicate predicate,
+            ElasticsearchPredicateCompositionPolicy policy)
+    {
+        int bytes = ElasticsearchRemotePredicateQueryBuilder.build(predicate)
+                .toString()
+                .getBytes(StandardCharsets.UTF_8)
+                .length;
+        return bytes <= policy.maxQueryBytes();
     }
 
     private static Optional<ConnectorExpression> andExpressions(List<ConnectorExpression> expressions)
