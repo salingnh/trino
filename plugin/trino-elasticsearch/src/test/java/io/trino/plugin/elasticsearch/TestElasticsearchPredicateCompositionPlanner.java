@@ -82,7 +82,7 @@ public class TestElasticsearchPredicateCompositionPlanner
     }
 
     @Test
-    public void testPartialOrRemainsEntirelyAtCompatibilityBoundary()
+    public void testPartialOrBecomesPlannerOwnedResidual()
     {
         ArrayType arrayType = new ArrayType(INTEGER);
         ElasticsearchColumnHandle column = integerArrayColumn("Numbers");
@@ -96,8 +96,8 @@ public class TestElasticsearchPredicateCompositionPlanner
         ElasticsearchPredicatePushdownPlanner.Result result = plan(expression, Map.of("numbers", column));
 
         assertThat(result.remotePredicate()).isEmpty();
-        assertThat(result.remainingConstraint().getExpression()).isEqualTo(expression);
-        assertThat(result.residualExpressions()).isEmpty();
+        assertThat(result.remainingConstraint().getExpression()).isEqualTo(TRUE);
+        assertThat(result.residualExpressions()).containsExactly(expression);
     }
 
     @Test
@@ -166,7 +166,7 @@ public class TestElasticsearchPredicateCompositionPlanner
     }
 
     @Test
-    public void testNotRemainsUnownedUntilNullSemanticsAreProven()
+    public void testNotBecomesPlannerOwnedResidualUntilNullSemanticsAreProven()
     {
         ArrayType arrayType = new ArrayType(INTEGER);
         ElasticsearchColumnHandle column = integerArrayColumn("Numbers");
@@ -176,8 +176,8 @@ public class TestElasticsearchPredicateCompositionPlanner
         ElasticsearchPredicatePushdownPlanner.Result result = plan(expression, Map.of("numbers", column));
 
         assertThat(result.remotePredicate()).isEmpty();
-        assertThat(result.remainingConstraint().getExpression()).isEqualTo(expression);
-        assertThat(result.residualExpressions()).isEmpty();
+        assertThat(result.remainingConstraint().getExpression()).isEqualTo(TRUE);
+        assertThat(result.residualExpressions()).containsExactly(expression);
     }
 
     private static ElasticsearchPredicatePushdownPlanner.Result plan(
