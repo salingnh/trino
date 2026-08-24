@@ -25,75 +25,72 @@ import static org.assertj.core.api.Assertions.assertThat;
 public class TestElasticsearchRemotePredicateNormalizer
 {
     @Test
-    public void testCompatibleLongRangesMergeToIntersection()
+    public void testNestedAndIsFlattenedAndDeduplicated()
     {
-        ElasticsearchRemotePredicate.Range lower = range("score", 10L, true, null, false);
-        ElasticsearchRemotePredicate.Range upper = range("score", null, false, 20L, false);
+        ElasticsearchRemotePredicate first = new ElasticsearchRemotePredicate.Term("status", "active");
+        ElasticsearchRemotePredicate second = new ElasticsearchRemotePredicate.Term("tenant", "blue");
 
-        assertThat(ElasticsearchRemotePredicateNormalizer.and(List.of(lower, upper)))
-                .contains(range("score", 10L, true, 20L, false));
-    }
-
-    @Test
-    public void testStrongerBoundsWinAndEqualBoundsTightenInclusivity()
-    {
-        ElasticsearchRemotePredicate.Range first = range("score", 10L, true, 30L, true);
-        ElasticsearchRemotePredicate.Range second = range("score", 10L, false, 20L, false);
-
-        assertThat(ElasticsearchRemotePredicateNormalizer.and(List.of(first, second)))
-                .contains(range("score", 10L, false, 20L, false));
-    }
-
-    @Test
-    public void testCompatibleDoubleRangesMerge()
-    {
-        ElasticsearchRemotePredicate.Range first = range("ratio", 1.5, true, null, false);
-        ElasticsearchRemotePredicate.Range second = range("ratio", null, false, 2.5, true);
-
-        assertThat(ElasticsearchRemotePredicateNormalizer.and(List.of(first, second)))
-                .contains(range("ratio", 1.5, true, 2.5, true));
-    }
-
-    @Test
-    public void testDifferentFieldsAreNotMerged()
-    {
-        ElasticsearchRemotePredicate.Range first = range("a", 1L, true, null, false);
-        ElasticsearchRemotePredicate.Range second = range("b", null, false, 10L, true);
-
-        assertThat(ElasticsearchRemotePredicateNormalizer.and(List.of(first, second)))
+        assertThat(ElasticsearchRemotePredicateNormalizer.and(List.of(
+                first,
+                new ElasticsearchRemotePredicate.And(List.of(second, first)))))
                 .contains(new ElasticsearchRemotePredicate.And(List.of(first, second)));
     }
 
     @Test
-    public void testStringRangesAreNotMergedWithoutOrderingProof()
+    public void testNestedOrIsFlattenedAndDeduplicated()
     {
-        ElasticsearchRemotePredicate.Range first = range("timestamp", "2026-01-01T00:00:00", true, null, false);
-        ElasticsearchRemotePredicate.Range second = range("timestamp", null, false, "2026-12-31T23:59:59", true);
+        ElasticsearchRemotePredicate first = new ElasticsearchRemotePredicate.Term("status", "active");
+        ElasticsearchRemotePredicate second = new ElasticsearchRemotePredicate.Term("status", "pending");
 
-        assertThat(ElasticsearchRemotePredicateNormalizer.and(List.of(first, second)))
-                .contains(new ElasticsearchRemotePredicate.And(List.of(first, second)));
+        assertThat(ElasticsearchRemotePredicateNormalizer.or(List.of(
+                first,
+                new ElasticsearchRemotePredicate.Or(List.of(second, first)))))
+                .contains(new ElasticsearchRemotePredicate.Or(List.of(first, second)));
     }
 
     @Test
-    public void testContradictoryRangesAreNotCollapsedWithoutMatchNoneIr()
+    public void testIndependentSameFieldRangesAreNotFusedAtDocumentScope()
     {
-        ElasticsearchRemotePredicate.Range first = range("score", 20L, true, null, false);
-        ElasticsearchRemotePredicate.Range second = range("score", null, false, 10L, true);
+        ElasticsearchRemotePredicate.Range greaterThanTen = range("numbers", 10L, false, null, false);
+        ElasticsearchRemotePredicate.Range lessThanTwenty = range("numbers", null, false, 20L, false);
 
-        assertThat(ElasticsearchRemotePredicateNormalizer.and(List.of(first, second)))
-                .contains(new ElasticsearchRemotePredicate.And(List.of(first, second)));
+        // For a multivalued Elasticsearch field, [5, 25] satisfies these two independent clauses using different
+        // values. Fusing them to one 10 < x < 20 Range would introduce a false negative. The general IR normalizer has
+        // no same-value proof and must preserve the document-scope conjunction.
+        assertThat(ElasticsearchRemotePredicateNormalizer.and(List.of(greaterThanTen, lessThanTwenty)))
+                .contains(new ElasticsearchRemotePredicate.And(List.of(greaterThanTen, lessThanTwenty)));
     }
 
     @Test
-    public void testEnforcedRangeIsNotMergedWithExactRange()
+    public void testDuplicateRangeCanBeRemovedWithoutChangingScope()
     {
-        ElasticsearchRemotePredicate.Range exact = range("score", 10L, true, null, false);
-        ElasticsearchRemotePredicate.Enforced prefilter = new ElasticsearchRemotePredicate.Enforced(
-                range("score", null, false, 20L, true),
+        ElasticsearchRemotePredicate.Range range = range("score", 10L, true, 20L, false);
+
+        assertThat(ElasticsearchRemotePredicateNormalizer.and(List.of(range, range)))
+                .contains(range);
+    }
+
+    @Test
+    public void testEnforcedPredicateKeepsEnforcementWhileNormalizingInnerTree()
+    {
+        ElasticsearchRemotePredicate first = new ElasticsearchRemotePredicate.Term("status", "active");
+        ElasticsearchRemotePredicate.Enforced input = new ElasticsearchRemotePredicate.Enforced(
+                new ElasticsearchRemotePredicate.And(List.of(first, first)),
                 PREFILTER);
 
-        assertThat(ElasticsearchRemotePredicateNormalizer.and(List.of(exact, prefilter)))
-                .contains(new ElasticsearchRemotePredicate.And(List.of(exact, prefilter)));
+        assertThat(ElasticsearchRemotePredicateNormalizer.normalize(input))
+                .isEqualTo(new ElasticsearchRemotePredicate.Enforced(first, PREFILTER));
+    }
+
+    @Test
+    public void testNotNormalizesItsChildWithoutChangingNegationScope()
+    {
+        ElasticsearchRemotePredicate first = new ElasticsearchRemotePredicate.Term("status", "active");
+        ElasticsearchRemotePredicate input = new ElasticsearchRemotePredicate.Not(
+                new ElasticsearchRemotePredicate.Or(List.of(first, first)));
+
+        assertThat(ElasticsearchRemotePredicateNormalizer.normalize(input))
+                .isEqualTo(new ElasticsearchRemotePredicate.Not(first));
     }
 
     private static ElasticsearchRemotePredicate.Range range(
