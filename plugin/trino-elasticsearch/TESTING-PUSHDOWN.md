@@ -59,6 +59,22 @@ residual
 
 Partial OR, unproven NOT, resource-budget rejection, and recognized full-text forms deliberately rejected by SAFE are planner-owned residuals. A legacy path must never get a second chance to push a predicate that the permanent planner rejected for correctness.
 
+### Document scope must not be collapsed into same-value scope
+
+Elasticsearch multi-valued fields do not preserve the distinction between a Trino scalar column and a remotely multi-valued field strongly enough for a global IR normalizer to assume one-value semantics.
+
+For example, a document with values `[5, 25]` satisfies these independent document-scope predicates:
+
+```text
+Range(field > 10)
+AND
+Range(field < 20)
+```
+
+because different values may satisfy each clause. Rewriting them globally to `Range(10 < field < 20)` would create a false negative.
+
+Therefore the global Remote Predicate IR normalizer may flatten and deduplicate boolean structure, but it must not fuse independent ranges merely because they use the same field name. Range fusion is allowed only at an abstraction that has explicit same-value proof, such as the `any_match` lambda translator after it proves both bounds apply to the same array element.
+
 ## Required coverage layers
 
 Architecture-changing PRs must cover all applicable layers:
@@ -84,6 +100,7 @@ Validate:
 - repeated `applyFilter` fixed points;
 - existing remote predicate composition;
 - document-scope versus same-element array semantics;
+- independent same-field ranges are not fused without same-value proof;
 - resource-budget fallback;
 - unsupported NOT behavior until NULL/missing equivalence is proven;
 - rejected planner-owned predicates cannot fall back through legacy metadata.
@@ -125,8 +142,9 @@ P1.2 changes the predicate translation/composition architecture. The following a
 - `ElasticsearchPredicateTranslation` and `ElasticsearchPredicateComposer` are the primary semantic test targets.
 - Partial OR, unproven NOT, resource rejection, and recognized but unproven SAFE full-text translations are planner-owned residuals. Tests must not expect them to return through the legacy compatibility boundary.
 - SAFE analyzed-text equality/LIKE is not remotely prefiltered without a no-false-negative proof. UNSAFE remains the explicit approximation boundary.
-- `ElasticsearchRemotePredicateNormalizer` performs deterministic semantic normalization. It may flatten/deduplicate and intersect compatible exact numeric ranges. Request-shape compaction/batching belongs to the composer policy so dynamic-filter batching cannot be undone accidentally.
-- Contradictory ranges are not encoded using a temporary fake match-none expression. They remain semantically valid independent range clauses until a permanent IR representation is justified.
+- `ElasticsearchRemotePredicateNormalizer` performs deterministic semantic normalization only: flattening, deduplication, and recursive normalization. It does not fuse independent same-field ranges because document-scope predicates may be satisfied by different remote values.
+- Same-value range fusion remains encapsulated in translators that can prove that semantic scope, including the existing `any_match` translator.
+- Contradictory independent ranges are not encoded using a temporary fake match-none expression. They remain valid independent clauses until a permanent IR representation and same-value proof justify a stronger rewrite.
 - `TestRuleBasedElasticsearchMetadata` is restricted to facade/runtime fixed-point, residual orchestration, and compatibility-bypass regression tests.
 - Historical tests for synthetic `TupleDomain` full-text lowering are obsolete once runtime lowering targets Remote Predicate IR directly; those tests and their test-only production helper must not be preserved as architectural requirements.
 - P0 and P1.1 acceptance tests remain mandatory regression inputs and are inherited by the P1.2 Elasticsearch 7/8 suites.
