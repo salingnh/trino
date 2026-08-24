@@ -87,12 +87,12 @@ final class ElasticsearchPredicateComposer
             return ElasticsearchPredicateTranslation.composed(
                     Optional.empty(),
                     Optional.empty(),
-                    remainingExpression.isPresent() ? remainingExpression : Optional.of(source),
-                    Optional.empty(),
+                    remainingExpression,
+                    residualExpression,
                     Reason.BOOLEAN_AND);
         }
         if (!isWithinRequestBudget(remotePredicate.orElseThrow(), policy)) {
-            return ElasticsearchPredicateTranslation.unsupported(source, Reason.BOOLEAN_AND);
+            return ElasticsearchPredicateTranslation.residual(source, Reason.BOOLEAN_AND);
         }
 
         Enforcement enforcement;
@@ -130,10 +130,10 @@ final class ElasticsearchPredicateComposer
         requireNonNull(children, "children is null");
         requireNonNull(policy, "policy is null");
 
-        // Every OR branch needs a no-false-negative remote candidate. A single unowned branch makes partial OR
-        // pushdown unsafe because Elasticsearch could remove rows that satisfy only that branch.
+        // Every OR branch needs a no-false-negative remote candidate. Once the composer owns the OR structure, a
+        // partial translation is an owned Trino residual, not compatibility-boundary state that legacy code may retry.
         if (children.stream().anyMatch(child -> child.remaining().isPresent() || child.remotePredicate().isEmpty())) {
-            return ElasticsearchPredicateTranslation.unsupported(source, Reason.BOOLEAN_OR);
+            return ElasticsearchPredicateTranslation.residual(source, Reason.BOOLEAN_OR);
         }
 
         List<ElasticsearchRemotePredicate> remotePredicates = children.stream()
@@ -141,12 +141,12 @@ final class ElasticsearchPredicateComposer
                 .toList();
         Optional<List<ElasticsearchRemotePredicate>> compacted = compactExactTerms(remotePredicates, policy);
         if (compacted.isEmpty()) {
-            return ElasticsearchPredicateTranslation.unsupported(source, Reason.BOOLEAN_OR);
+            return ElasticsearchPredicateTranslation.residual(source, Reason.BOOLEAN_OR);
         }
 
         Optional<ElasticsearchRemotePredicate> remotePredicate = ElasticsearchRemotePredicateNormalizer.or(compacted.orElseThrow());
         if (remotePredicate.isEmpty() || !isWithinRequestBudget(remotePredicate.orElseThrow(), policy)) {
-            return ElasticsearchPredicateTranslation.unsupported(source, Reason.BOOLEAN_OR);
+            return ElasticsearchPredicateTranslation.residual(source, Reason.BOOLEAN_OR);
         }
 
         boolean approximate = children.stream()
@@ -166,9 +166,9 @@ final class ElasticsearchPredicateComposer
 
     static ElasticsearchPredicateTranslation<ConnectorExpression> not(ConnectorExpression source)
     {
-        // The permanent API exists now, but no document-scope NOT form is enabled until SQL three-valued logic,
-        // missing-field behavior and multi-valued-field semantics are proven equivalent.
-        return ElasticsearchPredicateTranslation.unsupported(
+        // The composer owns NOT. Until SQL three-valued logic, missing-field behavior and multi-valued-field semantics
+        // are proven equivalent for a form, Trino keeps it as an authoritative residual and legacy pushdown is bypassed.
+        return ElasticsearchPredicateTranslation.residual(
                 requireNonNull(source, "source is null"),
                 Reason.BOOLEAN_NOT_UNPROVEN);
     }
