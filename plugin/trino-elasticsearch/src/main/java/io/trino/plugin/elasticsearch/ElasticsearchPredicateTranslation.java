@@ -30,8 +30,9 @@ import static java.util.Objects.requireNonNull;
  *
  * <p>{@code remaining} is predicate state that this planner does not own and may still be offered to the legacy
  * compatibility boundary. {@code residual} is predicate state that this planner does own and Trino remains
- * authoritative for. A residual may exist with or without a remote candidate: partial OR, unproven NOT semantics and
- * resource-budget fallbacks must not be handed back to a legacy path that could bypass the composer's decision.</p>
+ * authoritative for. A residual may exist with or without a remote candidate: partial OR, unproven NOT semantics,
+ * intentionally disabled or unproven full-text candidates, and resource-budget fallbacks must not be handed back to a
+ * legacy path that could bypass the planner's decision.</p>
  */
 record ElasticsearchPredicateTranslation<R>(
         Optional<ElasticsearchRemotePredicate> remotePredicate,
@@ -48,7 +49,9 @@ record ElasticsearchPredicateTranslation<R>(
         EXACT_LIKE,
         EXACT_REGEXP,
         EXACT_PREFIX,
+        FULL_TEXT_DISABLED,
         FULL_TEXT_SAFE_PREFILTER,
+        FULL_TEXT_SAFE_UNPROVEN,
         FULL_TEXT_UNSAFE_APPROXIMATE,
         BOOLEAN_AND,
         BOOLEAN_OR,
