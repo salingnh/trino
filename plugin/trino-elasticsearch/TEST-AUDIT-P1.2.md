@@ -270,5 +270,5 @@ P1.2 must not be marked complete until all of these are true:
 - Elasticsearch 7 cumulative acceptance passes;
 - Elasticsearch 8 cumulative acceptance passes;
 - Error Prone/compile checks pass;
-- final CI is run on the cleaned/squashed branch history;
+- final CI runs on a stable head that contains the final production semantics and regression suite;
 - P1.3 can consume `ElasticsearchPredicateTranslation`, composer, normalized IR, enforcement and reason metadata without replacing the P1.2 model.
