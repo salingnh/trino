@@ -28,7 +28,7 @@ import static org.assertj.core.api.Assertions.assertThat;
 public class TestElasticsearchPredicateCompositionRequestBudget
 {
     @Test
-    public void testOversizedOrFallsBackInsteadOfSendingRemoteRequest()
+    public void testOversizedOrFallsBackToOwnedResidualInsteadOfSendingRemoteRequest()
     {
         ConnectorExpression left = new Variable("left", BOOLEAN);
         ConnectorExpression right = new Variable("right", BOOLEAN);
@@ -47,6 +47,7 @@ public class TestElasticsearchPredicateCompositionRequestBudget
                 new ElasticsearchPredicateCompositionPolicy(10, 10, 10, 128));
 
         assertThat(result.remotePredicate()).isEmpty();
-        assertThat(result.remaining()).contains(source);
+        assertThat(result.remaining()).isEmpty();
+        assertThat(result.residual()).contains(source);
     }
 }
