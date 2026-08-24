@@ -19,13 +19,19 @@ package io.trino.plugin.elasticsearch;
  * <p>The policy is part of the permanent composer API. Defaults are deliberately conservative and can later be
  * supplied from connector/session configuration without changing the translation or composition contracts.</p>
  */
-record ElasticsearchPredicateCompositionPolicy(int maxTermsValues, int termsBatchSize, int maxBooleanClauses)
+record ElasticsearchPredicateCompositionPolicy(int maxTermsValues, int termsBatchSize, int maxBooleanClauses, int maxQueryBytes)
 {
-    static final ElasticsearchPredicateCompositionPolicy DEFAULT = new ElasticsearchPredicateCompositionPolicy(50_000, 1_000, 1_000);
+    static final int DEFAULT_MAX_QUERY_BYTES = 1_048_576;
+    static final ElasticsearchPredicateCompositionPolicy DEFAULT = new ElasticsearchPredicateCompositionPolicy(50_000, 1_000, 1_000, DEFAULT_MAX_QUERY_BYTES);
+
+    ElasticsearchPredicateCompositionPolicy(int maxTermsValues, int termsBatchSize, int maxBooleanClauses)
+    {
+        this(maxTermsValues, termsBatchSize, maxBooleanClauses, DEFAULT_MAX_QUERY_BYTES);
+    }
 
     ElasticsearchPredicateCompositionPolicy
     {
-        if (maxTermsValues < 1 || termsBatchSize < 1 || maxBooleanClauses < 1) {
+        if (maxTermsValues < 1 || termsBatchSize < 1 || maxBooleanClauses < 1 || maxQueryBytes < 1) {
             throw new IllegalArgumentException("Predicate composition limits must be positive");
         }
     }
