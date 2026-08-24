@@ -22,6 +22,7 @@ import org.junit.jupiter.api.Test;
 
 import java.util.List;
 
+import static io.trino.plugin.elasticsearch.expression.ElasticsearchRemotePredicate.Enforcement.APPROXIMATE;
 import static io.trino.plugin.elasticsearch.expression.ElasticsearchRemotePredicate.Enforcement.EXACT;
 import static io.trino.plugin.elasticsearch.expression.ElasticsearchRemotePredicate.Enforcement.PREFILTER;
 import static io.trino.spi.type.BooleanType.BOOLEAN;
@@ -33,11 +34,24 @@ public class TestElasticsearchPredicateComposer
     private static final ConnectorExpression B = new Variable("b", BOOLEAN);
 
     @Test
+    public void testExactAndExactStaysExact()
+    {
+        ElasticsearchPredicateTranslation<ConnectorExpression> result = ElasticsearchPredicateComposer.and(
+                ConnectorExpressions.and(List.of(A, B)),
+                List.of(exact("status", "active"), exact("tenant", "blue")));
+
+        assertThat(result.enforcement()).contains(EXACT);
+        assertThat(result.remaining()).isEmpty();
+        assertThat(result.residual()).isEmpty();
+        assertThat(result.remotePredicate()).contains(new ElasticsearchRemotePredicate.And(List.of(
+                new ElasticsearchRemotePredicate.Term("status", "active"),
+                new ElasticsearchRemotePredicate.Term("tenant", "blue"))));
+    }
+
+    @Test
     public void testAndCanUseExactBranchAsCandidateWhenAnotherBranchIsUnowned()
     {
-        ElasticsearchPredicateTranslation<ConnectorExpression> exact = ElasticsearchPredicateTranslation.exact(
-                new ElasticsearchRemotePredicate.Term("status", "active"),
-                Reason.EXACT_DOMAIN);
+        ElasticsearchPredicateTranslation<ConnectorExpression> exact = exact("status", "active");
         ElasticsearchPredicateTranslation<ConnectorExpression> unsupported = ElasticsearchPredicateTranslation.unsupported(
                 B,
                 Reason.UNSUPPORTED_EXPRESSION);
@@ -53,19 +67,16 @@ public class TestElasticsearchPredicateComposer
     }
 
     @Test
-    public void testAndKeepsOnlyConnectorOwnedResidual()
+    public void testExactAndPrefilterIsPrefilter()
     {
-        ElasticsearchPredicateTranslation<ConnectorExpression> exact = ElasticsearchPredicateTranslation.exact(
-                new ElasticsearchRemotePredicate.Term("status", "active"),
-                Reason.EXACT_DOMAIN);
         ElasticsearchPredicateTranslation<ConnectorExpression> prefilter = ElasticsearchPredicateTranslation.prefilter(
-                new ElasticsearchRemotePredicate.MatchPhrase("message", "fatal"),
+                new ElasticsearchRemotePredicate.Regexp("message", ".*(fatal).*"),
                 B,
                 Reason.FULL_TEXT_SAFE_PREFILTER);
 
         ElasticsearchPredicateTranslation<ConnectorExpression> result = ElasticsearchPredicateComposer.and(
                 ConnectorExpressions.and(List.of(A, B)),
-                List.of(exact, prefilter));
+                List.of(exact("status", "active"), prefilter));
 
         assertThat(result.enforcement()).contains(PREFILTER);
         assertThat(result.remaining()).isEmpty();
@@ -74,19 +85,54 @@ public class TestElasticsearchPredicateComposer
     }
 
     @Test
+    public void testExactAndApproximateIsApproximate()
+    {
+        ElasticsearchPredicateTranslation<ConnectorExpression> approximate = ElasticsearchPredicateTranslation.approximate(
+                new ElasticsearchRemotePredicate.MatchPhrase("message", "fatal"),
+                Reason.FULL_TEXT_UNSAFE_APPROXIMATE);
+
+        ElasticsearchPredicateTranslation<ConnectorExpression> result = ElasticsearchPredicateComposer.and(
+                ConnectorExpressions.and(List.of(A, B)),
+                List.of(exact("status", "active"), approximate));
+
+        assertThat(result.enforcement()).contains(APPROXIMATE);
+        assertThat(result.remaining()).isEmpty();
+        assertThat(result.residual()).isEmpty();
+        assertThat(result.remotePredicate()).contains(new ElasticsearchRemotePredicate.And(List.of(
+                new ElasticsearchRemotePredicate.Term("status", "active"),
+                new ElasticsearchRemotePredicate.Enforced(
+                        new ElasticsearchRemotePredicate.MatchPhrase("message", "fatal"),
+                        APPROXIMATE))));
+    }
+
+    @Test
+    public void testAndKeepsOnlyConnectorOwnedResidual()
+    {
+        ElasticsearchPredicateTranslation<ConnectorExpression> prefilter = ElasticsearchPredicateTranslation.prefilter(
+                new ElasticsearchRemotePredicate.Regexp("message", ".*(fatal).*"),
+                B,
+                Reason.FULL_TEXT_SAFE_PREFILTER);
+
+        ElasticsearchPredicateTranslation<ConnectorExpression> result = ElasticsearchPredicateComposer.and(
+                ConnectorExpressions.and(List.of(A, B)),
+                List.of(exact("status", "active"), prefilter));
+
+        assertThat(result.enforcement()).contains(PREFILTER);
+        assertThat(result.remaining()).isEmpty();
+        assertThat(result.residual()).contains(B);
+    }
+
+    @Test
     public void testPartialOrBecomesPlannerOwnedResidual()
     {
         ConnectorExpression source = ConnectorExpressions.or(List.of(A, B));
-        ElasticsearchPredicateTranslation<ConnectorExpression> exact = ElasticsearchPredicateTranslation.exact(
-                new ElasticsearchRemotePredicate.Term("status", "active"),
-                Reason.EXACT_DOMAIN);
         ElasticsearchPredicateTranslation<ConnectorExpression> unsupported = ElasticsearchPredicateTranslation.unsupported(
                 B,
                 Reason.UNSUPPORTED_EXPRESSION);
 
         ElasticsearchPredicateTranslation<ConnectorExpression> result = ElasticsearchPredicateComposer.or(
                 source,
-                List.of(exact, unsupported));
+                List.of(exact("status", "active"), unsupported));
 
         assertThat(result.remotePredicate()).isEmpty();
         assertThat(result.enforcement()).isEmpty();
@@ -95,20 +141,17 @@ public class TestElasticsearchPredicateComposer
     }
 
     @Test
-    public void testOrWithPrefilterKeepsWholeOrResidual()
+    public void testExactOrPrefilterKeepsWholeOrResidual()
     {
         ConnectorExpression source = ConnectorExpressions.or(List.of(A, B));
-        ElasticsearchPredicateTranslation<ConnectorExpression> exact = ElasticsearchPredicateTranslation.exact(
-                new ElasticsearchRemotePredicate.Term("status", "active"),
-                Reason.EXACT_DOMAIN);
         ElasticsearchPredicateTranslation<ConnectorExpression> prefilter = ElasticsearchPredicateTranslation.prefilter(
-                new ElasticsearchRemotePredicate.MatchPhrase("message", "fatal"),
+                new ElasticsearchRemotePredicate.Regexp("message", ".*(fatal).*"),
                 B,
                 Reason.FULL_TEXT_SAFE_PREFILTER);
 
         ElasticsearchPredicateTranslation<ConnectorExpression> result = ElasticsearchPredicateComposer.or(
                 source,
-                List.of(exact, prefilter));
+                List.of(exact("status", "active"), prefilter));
 
         assertThat(result.enforcement()).contains(PREFILTER);
         assertThat(result.remaining()).isEmpty();
@@ -117,18 +160,50 @@ public class TestElasticsearchPredicateComposer
     }
 
     @Test
-    public void testExactOrStaysExact()
+    public void testExactOrApproximateIsApproximate()
     {
-        ElasticsearchPredicateTranslation<ConnectorExpression> first = ElasticsearchPredicateTranslation.exact(
-                new ElasticsearchRemotePredicate.Term("status", "active"),
-                Reason.EXACT_DOMAIN);
-        ElasticsearchPredicateTranslation<ConnectorExpression> second = ElasticsearchPredicateTranslation.exact(
-                new ElasticsearchRemotePredicate.Term("status", "pending"),
-                Reason.EXACT_DOMAIN);
+        ConnectorExpression source = ConnectorExpressions.or(List.of(A, B));
+        ElasticsearchPredicateTranslation<ConnectorExpression> approximate = ElasticsearchPredicateTranslation.approximate(
+                new ElasticsearchRemotePredicate.MatchPhrase("message", "fatal"),
+                Reason.FULL_TEXT_UNSAFE_APPROXIMATE);
 
         ElasticsearchPredicateTranslation<ConnectorExpression> result = ElasticsearchPredicateComposer.or(
+                source,
+                List.of(exact("status", "active"), approximate));
+
+        assertThat(result.enforcement()).contains(APPROXIMATE);
+        assertThat(result.remaining()).isEmpty();
+        assertThat(result.residual()).isEmpty();
+        assertThat(result.remotePredicate().orElseThrow()).isInstanceOf(ElasticsearchRemotePredicate.Or.class);
+    }
+
+    @Test
+    public void testApproximateOrPrefilterRemainsApproximateAndKeepsWholeResidual()
+    {
+        ConnectorExpression source = ConnectorExpressions.or(List.of(A, B));
+        ElasticsearchPredicateTranslation<ConnectorExpression> approximate = ElasticsearchPredicateTranslation.approximate(
+                new ElasticsearchRemotePredicate.MatchPhrase("message", "fatal"),
+                Reason.FULL_TEXT_UNSAFE_APPROXIMATE);
+        ElasticsearchPredicateTranslation<ConnectorExpression> prefilter = ElasticsearchPredicateTranslation.prefilter(
+                new ElasticsearchRemotePredicate.Regexp("status", ".*(active).*"),
+                B,
+                Reason.FULL_TEXT_SAFE_PREFILTER);
+
+        ElasticsearchPredicateTranslation<ConnectorExpression> result = ElasticsearchPredicateComposer.or(
+                source,
+                List.of(approximate, prefilter));
+
+        assertThat(result.enforcement()).contains(APPROXIMATE);
+        assertThat(result.remaining()).isEmpty();
+        assertThat(result.residual()).contains(source);
+    }
+
+    @Test
+    public void testExactOrStaysExactAndCompactsSameFieldTerms()
+    {
+        ElasticsearchPredicateTranslation<ConnectorExpression> result = ElasticsearchPredicateComposer.or(
                 ConnectorExpressions.or(List.of(A, B)),
-                List.of(first, second));
+                List.of(exact("status", "active"), exact("status", "pending")));
 
         assertThat(result.enforcement()).contains(EXACT);
         assertThat(result.remaining()).isEmpty();
@@ -144,5 +219,12 @@ public class TestElasticsearchPredicateComposer
         assertThat(result.remotePredicate()).isEmpty();
         assertThat(result.remaining()).isEmpty();
         assertThat(result.residual()).contains(A);
+    }
+
+    private static ElasticsearchPredicateTranslation<ConnectorExpression> exact(String field, Object value)
+    {
+        return ElasticsearchPredicateTranslation.exact(
+                new ElasticsearchRemotePredicate.Term(field, value),
+                Reason.EXACT_DOMAIN);
     }
 }
