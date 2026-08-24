@@ -41,7 +41,9 @@ import static io.trino.spi.type.TimestampType.TIMESTAMP_MILLIS;
 import static io.trino.spi.type.TinyintType.TINYINT;
 import static io.trino.spi.type.TypeUtils.readNativeValue;
 
-/** Exact Elasticsearch membership pushdown for primitive arrays. */
+/**
+ * Exact Elasticsearch membership pushdown for primitive arrays.
+ */
 final class ElasticsearchArrayPredicateTranslator
 {
     private ElasticsearchArrayPredicateTranslator() {}

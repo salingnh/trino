@@ -16,7 +16,6 @@ package io.trino.plugin.elasticsearch;
 import com.google.common.collect.ImmutableList;
 import io.airlift.slice.Slice;
 import io.trino.plugin.elasticsearch.expression.ElasticsearchRemotePredicate;
-import io.trino.spi.connector.ColumnHandle;
 import io.trino.spi.predicate.Domain;
 import io.trino.spi.predicate.Range;
 import io.trino.spi.predicate.TupleDomain;
@@ -144,6 +143,20 @@ final class ElasticsearchRemotePredicateTranslator
                 alternatives.add(new ElasticsearchRemotePredicate.Terms(field, values));
             }
         }
+        else if (domain.getValues().complement().isDiscreteSet()) {
+            List<Object> excludedValues = domain.getValues().complement().getDiscreteSet().stream()
+                    .map(value -> getValue(column.type(), value))
+                    .toList();
+            ElasticsearchRemotePredicate excluded = excludedValues.size() == 1
+                    ? new ElasticsearchRemotePredicate.Term(field, excludedValues.getFirst())
+                    : new ElasticsearchRemotePredicate.Terms(field, excludedValues);
+            List<ElasticsearchRemotePredicate> predicates = new ArrayList<>();
+            if (!domain.isNullAllowed()) {
+                predicates.add(new ElasticsearchRemotePredicate.Exists(field));
+            }
+            predicates.add(new ElasticsearchRemotePredicate.Not(excluded));
+            return conjunction(predicates);
+        }
         else {
             for (Range range : domain.getValues().getRanges().getOrderedRanges()) {
                 if (range.isSingleValue()) {
@@ -186,9 +199,8 @@ final class ElasticsearchRemotePredicateTranslator
     public static Optional<ElasticsearchRemotePredicate> conjunction(List<ElasticsearchRemotePredicate> predicates)
     {
         requireNonNull(predicates, "predicates is null");
-        List<ElasticsearchRemotePredicate> flattened = predicates.stream()
-                .flatMap(predicate -> predicate instanceof ElasticsearchRemotePredicate.And and ? and.predicates().stream() : java.util.stream.Stream.of(predicate))
-                .toList();
+        List<ElasticsearchRemotePredicate> flattened = new ArrayList<>();
+        predicates.forEach(predicate -> addConjunct(flattened, predicate));
         if (flattened.isEmpty()) {
             return Optional.empty();
         }
@@ -196,6 +208,17 @@ final class ElasticsearchRemotePredicateTranslator
             return Optional.of(flattened.getFirst());
         }
         return Optional.of(new ElasticsearchRemotePredicate.And(flattened));
+    }
+
+    private static void addConjunct(List<ElasticsearchRemotePredicate> conjuncts, ElasticsearchRemotePredicate predicate)
+    {
+        if (predicate instanceof ElasticsearchRemotePredicate.And and) {
+            and.predicates().forEach(conjunct -> addConjunct(conjuncts, conjunct));
+            return;
+        }
+        if (!conjuncts.contains(predicate)) {
+            conjuncts.add(predicate);
+        }
     }
 
     public static Optional<ElasticsearchRemotePredicate> disjunction(List<ElasticsearchRemotePredicate> predicates)

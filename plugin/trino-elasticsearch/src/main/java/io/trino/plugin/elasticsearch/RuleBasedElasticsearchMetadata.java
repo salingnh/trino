@@ -96,6 +96,9 @@ public class RuleBasedElasticsearchMetadata
             ConnectorExpression remainingExpression = appendResidualExpressions(
                     result.getRemainingExpression().orElse(preparedConstraint.getExpression()),
                     predicatePlan.residualExpressions());
+            if (canonicalHandle.equals(input)) {
+                return Optional.empty();
+            }
             return Optional.of(new ConstraintApplicationResult<>(
                     canonicalHandle,
                     result.getRemainingFilter().intersect(predicatePlan.residualFilter()),
@@ -108,6 +111,9 @@ public class RuleBasedElasticsearchMetadata
         }
 
         ElasticsearchTableHandle rewrittenHandle = withRemotePredicate(input, inheritedPredicate);
+        if (rewrittenHandle.equals(input)) {
+            return Optional.empty();
+        }
         return Optional.of(new ConstraintApplicationResult<>(
                 rewrittenHandle,
                 preparedConstraint.getSummary().intersect(predicatePlan.residualFilter()),

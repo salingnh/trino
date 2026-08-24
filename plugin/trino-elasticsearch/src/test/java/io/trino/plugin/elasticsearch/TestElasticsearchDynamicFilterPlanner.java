@@ -15,6 +15,7 @@ package io.trino.plugin.elasticsearch;
 
 import io.trino.plugin.elasticsearch.client.IndexMetadata.PrimitiveType;
 import io.trino.plugin.elasticsearch.decoders.IntegerDecoder;
+import io.trino.plugin.elasticsearch.decoders.TimestampDecoder;
 import io.trino.plugin.elasticsearch.decoders.VarcharDecoder;
 import io.trino.plugin.elasticsearch.expression.ElasticsearchRemotePredicate;
 import io.trino.spi.predicate.Domain;
@@ -29,6 +30,7 @@ import java.util.stream.IntStream;
 
 import static io.airlift.slice.Slices.utf8Slice;
 import static io.trino.spi.type.IntegerType.INTEGER;
+import static io.trino.spi.type.TimestampType.TIMESTAMP_MILLIS;
 import static io.trino.spi.type.VarcharType.VARCHAR;
 import static org.assertj.core.api.Assertions.assertThat;
 
@@ -46,6 +48,12 @@ public class TestElasticsearchDynamicFilterPlanner
             new PrimitiveType("text"),
             new VarcharDecoder.Descriptor("Message"),
             false);
+    private static final ElasticsearchColumnHandle EVENT_TIME = new ElasticsearchColumnHandle(
+            List.of("EventTime"),
+            TIMESTAMP_MILLIS,
+            new PrimitiveType("date"),
+            new TimestampDecoder.Descriptor("EventTime"),
+            true);
 
     @Test
     public void testSmallDiscreteFilterUsesTermsAndPreservesCase()
@@ -89,12 +97,34 @@ public class TestElasticsearchDynamicFilterPlanner
     }
 
     @Test
+    public void testSingleValueRangesUseNativeTerms()
+    {
+        ElasticsearchDynamicFilterPlanner planner = new ElasticsearchDynamicFilterPlanner();
+        Domain domain = Domain.create(ValueSet.ofRanges(
+                Range.equal(INTEGER, 10L),
+                Range.equal(INTEGER, 20L)), false);
+
+        ElasticsearchRemotePredicate predicate = planner.plan(TupleDomain.withColumnDomains(Map.of(ID, domain))).orElseThrow();
+
+        assertThat(predicate).isEqualTo(new ElasticsearchRemotePredicate.Terms("UserID", List.of(10L, 20L)));
+    }
+
+    @Test
     public void testTooManyValuesFallBackWithoutNarrowingResults()
     {
         ElasticsearchDynamicFilterPlanner planner = new ElasticsearchDynamicFilterPlanner(5, 2, 1_048_576);
         Domain domain = Domain.multipleValues(INTEGER, values(6));
 
         assertThat(planner.plan(TupleDomain.withColumnDomains(Map.of(ID, domain)))).isEmpty();
+    }
+
+    @Test
+    public void testLargeDateFilterFallsBackBelowLuceneClauseLimit()
+    {
+        ElasticsearchDynamicFilterPlanner planner = new ElasticsearchDynamicFilterPlanner(10_000, 2_000, 1_048_576);
+        Domain domain = Domain.multipleValues(TIMESTAMP_MILLIS, values(1_001));
+
+        assertThat(planner.plan(TupleDomain.withColumnDomains(Map.of(EVENT_TIME, domain)))).isEmpty();
     }
 
     @Test

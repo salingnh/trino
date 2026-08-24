@@ -13,6 +13,7 @@
  */
 package io.trino.plugin.elasticsearch.expression;
 
+import com.fasterxml.jackson.annotation.JsonProperty;
 import com.fasterxml.jackson.annotation.JsonSubTypes;
 import com.fasterxml.jackson.annotation.JsonTypeInfo;
 import com.google.common.collect.ImmutableList;
@@ -33,6 +34,7 @@ import static java.util.Objects.requireNonNull;
  */
 @JsonTypeInfo(
         use = JsonTypeInfo.Id.NAME,
+        include = JsonTypeInfo.As.EXISTING_PROPERTY,
         property = "@type")
 @JsonSubTypes({
         @JsonSubTypes.Type(value = ElasticsearchRemotePredicate.And.class, name = "and"),
@@ -72,6 +74,25 @@ public sealed interface ElasticsearchRemotePredicate
     default Enforcement enforcement()
     {
         return Enforcement.EXACT;
+    }
+
+    @JsonProperty("@type")
+    default String type()
+    {
+        return switch (this) {
+            case And _ -> "and";
+            case Or _ -> "or";
+            case Not _ -> "not";
+            case Enforced _ -> "enforced";
+            case Term _ -> "term";
+            case Terms _ -> "terms";
+            case Range _ -> "range";
+            case Prefix _ -> "prefix";
+            case Regexp _ -> "regexp";
+            case MatchPhrase _ -> "matchPhrase";
+            case MatchPhrasePrefix _ -> "matchPhrasePrefix";
+            case Exists _ -> "exists";
+        };
     }
 
     enum ValueType

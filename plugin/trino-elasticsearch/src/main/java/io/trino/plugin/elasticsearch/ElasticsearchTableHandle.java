@@ -13,6 +13,8 @@
  */
 package io.trino.plugin.elasticsearch;
 
+import com.fasterxml.jackson.databind.annotation.JsonDeserialize;
+import com.fasterxml.jackson.databind.annotation.JsonSerialize;
 import com.google.common.collect.ImmutableList;
 import com.google.common.collect.ImmutableMap;
 import com.google.common.collect.ImmutableSet;
@@ -43,6 +45,8 @@ public record ElasticsearchTableHandle(
         List<ElasticsearchColumnSort> sortOrder,
         Set<ElasticsearchColumnHandle> columns,
         Optional<ElasticsearchAggregation> aggregation,
+        @JsonSerialize(contentAs = ElasticsearchRemotePredicate.class)
+        @JsonDeserialize(contentAs = ElasticsearchRemotePredicate.class)
         Optional<ElasticsearchRemotePredicate> remotePredicate)
         implements ConnectorTableHandle
 {
@@ -82,8 +86,7 @@ public record ElasticsearchTableHandle(
             Set<ElasticsearchColumnHandle> columns,
             Optional<ElasticsearchAggregation> aggregation)
     {
-        this(
-                type,
+        this(type,
                 schema,
                 index,
                 constraint,
@@ -202,6 +205,7 @@ public record ElasticsearchTableHandle(
             attributes.append("sort=" + sortOrder);
         }
         query.ifPresent(value -> attributes.append("query" + value));
+        remotePredicate.ifPresent(value -> attributes.append("remotePredicate=" + value));
 
         if (attributes.length() > 0) {
             builder.append("(");

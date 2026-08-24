@@ -43,11 +43,11 @@ public class TestElasticsearchRemotePredicateQueryBuilder
                 .isEqualTo("{\"term\":{\"enabled\":true}}");
         assertThat(build(new ElasticsearchRemotePredicate.Term("count", 7)).toString())
                 .isEqualTo("{\"term\":{\"count\":7}}");
-        assertThat(build(new ElasticsearchRemotePredicate.Term("score", 1.5F)).toString())
+        assertThat(build(new ElasticsearchRemotePredicate.Term("score", 1.5f)).toString())
                 .isEqualTo("{\"term\":{\"score\":1.5}}");
         assertThat(new ElasticsearchRemotePredicate.Term("count", 7).value().type())
                 .isEqualTo(ElasticsearchRemotePredicate.ValueType.LONG);
-        assertThat(new ElasticsearchRemotePredicate.Term("score", 1.5F).value().type())
+        assertThat(new ElasticsearchRemotePredicate.Term("score", 1.5f).value().type())
                 .isEqualTo(ElasticsearchRemotePredicate.ValueType.DOUBLE);
     }
 

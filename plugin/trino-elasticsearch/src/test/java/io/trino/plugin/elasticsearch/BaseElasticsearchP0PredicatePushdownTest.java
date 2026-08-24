@@ -41,7 +41,9 @@ import static java.lang.String.format;
 import static java.util.stream.Collectors.joining;
 import static org.assertj.core.api.Assertions.assertThat;
 
-/** P0 predicate-pushdown acceptance contract executed against both Elasticsearch 7 and Elasticsearch 8. */
+/**
+ * P0 predicate-pushdown acceptance contract executed against both Elasticsearch 7 and Elasticsearch 8.
+ */
 public abstract class BaseElasticsearchP0PredicatePushdownTest
         extends BaseElasticsearchFullTextPushdownTest
 {
@@ -72,8 +74,10 @@ public abstract class BaseElasticsearchP0PredicatePushdownTest
         Session unsafe = Session.builder(getSession())
                 .setCatalogSessionProperty(catalogName, "full_text_pushdown_mode", "UNSAFE")
                 .build();
-        String sql = "SELECT count(*) FROM orders WHERE regexp_like(orderstatus, '^O$')";
+        String sql = "SELECT count(*) FROM orders WHERE regexp_like(orderstatus, '^[oO]$')";
 
+        // The fixture analyzes orderstatus to lowercase; this pattern intentionally matches both the source value and
+        // the analyzed term so the assertion can validate pushdown and results independently of that known difference.
         assertQuery(unsafe, sql);
         assertThat(query(unsafe, sql)).isFullyPushedDown();
     }

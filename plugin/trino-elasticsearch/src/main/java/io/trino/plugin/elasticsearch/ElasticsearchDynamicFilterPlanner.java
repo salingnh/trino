@@ -25,6 +25,7 @@ import java.util.Optional;
 import static io.trino.plugin.elasticsearch.ElasticsearchRemotePredicateTranslator.conjunction;
 import static io.trino.plugin.elasticsearch.ElasticsearchRemotePredicateTranslator.disjunction;
 import static io.trino.plugin.elasticsearch.ElasticsearchRemotePredicateTranslator.getValue;
+import static io.trino.spi.type.TimestampType.TIMESTAMP_MILLIS;
 
 /**
  * Converts runtime dynamic filters into bounded exact Elasticsearch predicates without TupleDomain simplification.
@@ -40,6 +41,8 @@ import static io.trino.plugin.elasticsearch.ElasticsearchRemotePredicateTranslat
  */
 final class ElasticsearchDynamicFilterPlanner
 {
+    private static final int MAX_DATE_TERMS = 1_000;
+
     static final int DEFAULT_MAX_VALUES = 50_000;
     static final int DEFAULT_TERMS_BATCH_SIZE = 1_000;
     static final int DEFAULT_MAX_QUERY_BYTES = 1_048_576;
@@ -78,9 +81,9 @@ final class ElasticsearchDynamicFilterPlanner
             }
 
             int predicateBytes = ElasticsearchRemotePredicateQueryBuilder.build(predicate.orElseThrow())
-                    .toString()
-                    .getBytes(StandardCharsets.UTF_8)
-                    .length;
+            .toString()
+            .getBytes(StandardCharsets.UTF_8)
+            .length;
             if (predicateBytes > maxQueryBytes - usedBytes) {
                 continue;
             }
@@ -100,12 +103,24 @@ final class ElasticsearchDynamicFilterPlanner
 
     private Optional<ElasticsearchRemotePredicate> planExactDomain(ElasticsearchColumnHandle column, Domain domain)
     {
-        if (!domain.getValues().isDiscreteSet()) {
-            return ElasticsearchRemotePredicateTranslator.translateDomain(column, domain);
+        List<Object> values;
+        if (domain.getValues().isDiscreteSet()) {
+            values = domain.getValues().getDiscreteSet();
+        }
+        else {
+            List<io.trino.spi.predicate.Range> ranges = domain.getValues().getRanges().getOrderedRanges();
+            if (ranges.stream().anyMatch(range -> !range.isSingleValue())) {
+                return ElasticsearchRemotePredicateTranslator.translateDomain(column, domain);
+            }
+            values = ranges.stream()
+                    .map(io.trino.spi.predicate.Range::getSingleValue)
+                    .toList();
         }
 
-        List<Object> values = domain.getValues().getDiscreteSet();
-        if (values.size() > maxValues) {
+        // Elasticsearch rewrites date terms into Lucene clauses instead of a point-set query. Stay below the
+        // traditional 1024-clause floor; omitting a dynamic filter is safe because the join re-checks every row.
+        if (values.size() > maxValues
+                || (column.type().equals(TIMESTAMP_MILLIS) && values.size() > Math.min(termsBatchSize, MAX_DATE_TERMS))) {
             return Optional.empty();
         }
         if (values.isEmpty()) {

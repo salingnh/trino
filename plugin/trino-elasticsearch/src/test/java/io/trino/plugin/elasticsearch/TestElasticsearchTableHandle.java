@@ -13,14 +13,18 @@
  */
 package io.trino.plugin.elasticsearch;
 
+import com.fasterxml.jackson.databind.json.JsonMapper;
 import com.google.common.collect.ImmutableList;
 import com.google.common.collect.ImmutableMap;
 import com.google.common.collect.ImmutableSet;
 import io.airlift.json.JsonCodec;
 import io.airlift.json.JsonCodecFactory;
 import io.airlift.json.JsonMapperProvider;
+import io.trino.metadata.HandleJsonModule;
+import io.trino.metadata.HandleResolver;
 import io.trino.plugin.elasticsearch.expression.ElasticsearchRemotePredicate;
 import io.trino.spi.connector.ColumnHandle;
+import io.trino.spi.connector.ConnectorTableHandle;
 import io.trino.spi.predicate.TupleDomain;
 import org.junit.jupiter.api.Test;
 
@@ -35,6 +39,14 @@ public class TestElasticsearchTableHandle
 {
     private static final JsonCodec<ElasticsearchTableHandle> TABLE_CODEC = new JsonCodecFactory(new JsonMapperProvider().get())
             .jsonCodec(ElasticsearchTableHandle.class);
+    private static final JsonCodec<ConnectorTableHandle> CONNECTOR_TABLE_CODEC = connectorTableCodec();
+
+    private static JsonCodec<ConnectorTableHandle> connectorTableCodec()
+    {
+        JsonMapper mapper = new JsonMapperProvider().get();
+        mapper.registerModule(HandleJsonModule.tableHandleModule(new HandleResolver()));
+        return new JsonCodecFactory(mapper).jsonCodec(ConnectorTableHandle.class);
+    }
 
     @Test
     public void testRemotePredicateJsonRoundTrip()
@@ -73,6 +85,38 @@ public class TestElasticsearchTableHandle
         assertThat(json).contains("\"enforcement\":\"PREFILTER\"");
         assertThat(copy).isEqualTo(handle);
         assertThat(copy.remotePredicate()).contains(predicate);
+    }
+
+    @Test
+    public void testRemotePredicateJsonRoundTripThroughConnectorHandleCodec()
+    {
+        ElasticsearchRemotePredicate predicate = new ElasticsearchRemotePredicate.And(ImmutableList.of(
+                new ElasticsearchRemotePredicate.Term("status.keyword", "active"),
+                new ElasticsearchRemotePredicate.Enforced(
+                        new ElasticsearchRemotePredicate.MatchPhrase("description", "apache trino"),
+                        PREFILTER)));
+
+        ElasticsearchTableHandle handle = new ElasticsearchTableHandle(
+                SCAN,
+                "default",
+                "events",
+                TupleDomain.all(),
+                ImmutableMap.of(),
+                ImmutableMap.of(),
+                ImmutableMap.of(),
+                Optional.empty(),
+                OptionalLong.empty(),
+                ImmutableList.of(),
+                ImmutableSet.of(),
+                Optional.empty(),
+                Optional.of(predicate));
+
+        String json = CONNECTOR_TABLE_CODEC.toJson(handle);
+        ConnectorTableHandle copy = CONNECTOR_TABLE_CODEC.fromJson(json);
+
+        assertThat(json).contains("\"remotePredicate\":{");
+        assertThat(json).contains("\"@type\":\"and\"");
+        assertThat(copy).isEqualTo(handle);
     }
 
     @Test

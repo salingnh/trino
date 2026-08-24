@@ -19,6 +19,7 @@ import io.trino.plugin.elasticsearch.expression.ElasticsearchRemotePredicate;
 import io.trino.spi.connector.ColumnHandle;
 import io.trino.spi.predicate.Domain;
 import io.trino.spi.predicate.TupleDomain;
+import io.trino.spi.predicate.ValueSet;
 import org.junit.jupiter.api.Test;
 
 import java.util.List;
@@ -29,7 +30,9 @@ import java.util.Set;
 
 import static io.trino.plugin.elasticsearch.ElasticsearchRemotePredicateTranslator.canonicalize;
 import static io.trino.plugin.elasticsearch.ElasticsearchRemotePredicateTranslator.combine;
+import static io.trino.plugin.elasticsearch.ElasticsearchRemotePredicateTranslator.conjunction;
 import static io.trino.plugin.elasticsearch.ElasticsearchTableHandle.Type.SCAN;
+import static io.trino.plugin.elasticsearch.expression.ElasticsearchRemotePredicate.Enforcement.PREFILTER;
 import static io.trino.spi.type.IntegerType.INTEGER;
 import static org.assertj.core.api.Assertions.assertThat;
 
@@ -58,13 +61,55 @@ public class TestElasticsearchRemotePredicateTranslator
     }
 
     @Test
+    public void testDuplicateConjunctionIsIdempotent()
+    {
+        ElasticsearchRemotePredicate predicate = new ElasticsearchRemotePredicate.Term("UserID", 10L);
+
+        assertThat(conjunction(List.of(predicate, predicate))).contains(predicate);
+    }
+
+    @Test
+    public void testCombineDuplicateExactPredicateIsIdempotent()
+    {
+        ElasticsearchRemotePredicate predicate = new ElasticsearchRemotePredicate.Term("UserID", 10L);
+
+        assertThat(combine(Optional.of(predicate), Optional.of(predicate))).contains(predicate);
+    }
+
+    @Test
+    public void testNestedConjunctionIsFlattenedAndDeduplicatedInEncounterOrder()
+    {
+        ElasticsearchRemotePredicate first = new ElasticsearchRemotePredicate.Term("UserID", 10L);
+        ElasticsearchRemotePredicate second = new ElasticsearchRemotePredicate.Term("UserID", 20L);
+        ElasticsearchRemotePredicate.And nested = new ElasticsearchRemotePredicate.And(List.of(
+                first,
+                new ElasticsearchRemotePredicate.And(List.of(second, first))));
+
+        ElasticsearchRemotePredicate expected = new ElasticsearchRemotePredicate.And(List.of(first, second));
+        assertThat(conjunction(List.of(nested, first))).contains(expected);
+        assertThat(combine(Optional.of(first), Optional.of(new ElasticsearchRemotePredicate.And(List.of(second, first)))))
+                .contains(expected);
+    }
+
+    @Test
+    public void testDuplicateEnforcedPredicateIsIdempotent()
+    {
+        ElasticsearchRemotePredicate predicate = new ElasticsearchRemotePredicate.Enforced(
+                new ElasticsearchRemotePredicate.MatchPhrase("message", "fatal error"),
+                PREFILTER);
+
+        assertThat(conjunction(List.of(predicate, predicate))).contains(predicate);
+        assertThat(combine(Optional.of(predicate), Optional.of(predicate))).contains(predicate);
+    }
+
+    @Test
     public void testCanonicalizeMovesLegacyStateIntoIr()
     {
         ElasticsearchTableHandle legacy = new ElasticsearchTableHandle(
                 SCAN,
                 "default",
                 "events",
-                TupleDomain.withColumnDomains(Map.<ColumnHandle, Domain>of(USER_ID, Domain.multipleValues(INTEGER, List.of(1L, 2L, 3L))),
+                TupleDomain.withColumnDomains(Map.<ColumnHandle, Domain>of(USER_ID, Domain.multipleValues(INTEGER, List.of(1L, 2L, 3L)))),
                 Map.of("UserID", "[0-9]+"),
                 Map.of("UserID", "1"),
                 Map.of(),
@@ -110,5 +155,18 @@ public class TestElasticsearchRemotePredicateTranslator
         assertThat(predicate).isEqualTo(new ElasticsearchRemotePredicate.And(List.of(
                 new ElasticsearchRemotePredicate.Exists("UserID"),
                 new ElasticsearchRemotePredicate.Not(new ElasticsearchRemotePredicate.Exists("UserID")))));
+    }
+
+    @Test
+    public void testComplementOfDiscreteDomainUsesNegatedTerms()
+    {
+        Domain domain = Domain.create(ValueSet.of(INTEGER, 1L, 2L, 3L).complement(), false);
+
+        ElasticsearchRemotePredicate predicate = ElasticsearchRemotePredicateTranslator.translateDomain(USER_ID, domain)
+                .orElseThrow();
+
+        assertThat(predicate).isEqualTo(new ElasticsearchRemotePredicate.And(List.of(
+                new ElasticsearchRemotePredicate.Exists("UserID"),
+                new ElasticsearchRemotePredicate.Not(new ElasticsearchRemotePredicate.Terms("UserID", List.of(1L, 2L, 3L))))));
     }
 }
