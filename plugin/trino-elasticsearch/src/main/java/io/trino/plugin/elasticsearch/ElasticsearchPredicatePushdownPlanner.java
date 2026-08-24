@@ -119,24 +119,30 @@ final class ElasticsearchPredicatePushdownPlanner
             Domain domain,
             FullTextPushdownMode fullTextMode)
     {
-        boolean exactPredicate = column.supportsPredicates();
-        boolean approximateFullTextPredicate = fullTextMode == UNSAFE
-                && isAnalyzedTextOnly(column)
-                && domain.getValues().isDiscreteSet();
-        if (!exactPredicate && !approximateFullTextPredicate) {
+        if (column.supportsPredicates()) {
+            Optional<ElasticsearchRemotePredicate> translated = translateDomain(column, domain);
+            if (translated.isEmpty()) {
+                return ElasticsearchPredicateTranslation.unsupported(domain, Reason.UNSUPPORTED_DOMAIN);
+            }
+            return ElasticsearchPredicateTranslation.exact(translated.orElseThrow(), Reason.EXACT_DOMAIN);
+        }
+
+        boolean analyzedDiscrete = isAnalyzedTextOnly(column) && domain.getValues().isDiscreteSet();
+        if (!analyzedDiscrete) {
             return ElasticsearchPredicateTranslation.unsupported(domain, Reason.UNSUPPORTED_DOMAIN);
+        }
+        if (fullTextMode == DISABLED) {
+            return ElasticsearchPredicateTranslation.residual(domain, Reason.FULL_TEXT_DISABLED);
+        }
+        if (fullTextMode == SAFE) {
+            return ElasticsearchPredicateTranslation.residual(domain, Reason.FULL_TEXT_SAFE_UNPROVEN);
         }
 
         Optional<ElasticsearchRemotePredicate> translated = translateDomain(column, domain);
         if (translated.isEmpty()) {
-            return ElasticsearchPredicateTranslation.unsupported(domain, Reason.UNSUPPORTED_DOMAIN);
+            return ElasticsearchPredicateTranslation.residual(domain, Reason.UNSUPPORTED_DOMAIN);
         }
-
-        ElasticsearchRemotePredicate predicate = translated.orElseThrow();
-        if (exactPredicate) {
-            return ElasticsearchPredicateTranslation.exact(predicate, Reason.EXACT_DOMAIN);
-        }
-        return ElasticsearchPredicateTranslation.approximate(predicate, Reason.FULL_TEXT_UNSAFE_APPROXIMATE);
+        return ElasticsearchPredicateTranslation.approximate(translated.orElseThrow(), Reason.FULL_TEXT_UNSAFE_APPROXIMATE);
     }
 
     private static ElasticsearchPredicateTranslation<ConnectorExpression> translateExpression(
@@ -216,7 +222,7 @@ final class ElasticsearchPredicatePushdownPlanner
             return Optional.empty();
         }
         if (fullTextMode == DISABLED) {
-            return Optional.of(ElasticsearchPredicateTranslation.unsupported(expression, Reason.UNSUPPORTED_EXPRESSION));
+            return Optional.of(ElasticsearchPredicateTranslation.residual(expression, Reason.FULL_TEXT_DISABLED));
         }
 
         List<ConnectorExpression> arguments = call.getArguments();
@@ -224,23 +230,23 @@ final class ElasticsearchPredicatePushdownPlanner
                 || !(arguments.get(0) instanceof Variable variable)
                 || !(arguments.get(1) instanceof Constant constant)
                 || !(constant.getValue() instanceof Slice pattern)) {
-            return Optional.of(ElasticsearchPredicateTranslation.unsupported(expression, Reason.UNSUPPORTED_EXPRESSION));
+            return Optional.of(ElasticsearchPredicateTranslation.residual(expression, Reason.UNSUPPORTED_EXPRESSION));
         }
 
         ColumnHandle assigned = assignments.get(variable.getName());
         if (!(assigned instanceof ElasticsearchColumnHandle column) || !(column.type() instanceof VarcharType)) {
-            return Optional.of(ElasticsearchPredicateTranslation.unsupported(expression, Reason.UNSUPPORTED_EXPRESSION));
+            return Optional.of(ElasticsearchPredicateTranslation.residual(expression, Reason.UNSUPPORTED_EXPRESSION));
         }
 
         Optional<CasePreservingElasticsearchMetadata.RegexpTranslation> translated = CasePreservingElasticsearchMetadata.translateRegexpLike(pattern.toStringUtf8());
         if (translated.isEmpty()) {
-            return Optional.of(ElasticsearchPredicateTranslation.unsupported(expression, Reason.UNSUPPORTED_EXPRESSION));
+            return Optional.of(ElasticsearchPredicateTranslation.residual(expression, Reason.UNSUPPORTED_EXPRESSION));
         }
 
         CasePreservingElasticsearchMetadata.RegexpTranslation translation = translated.orElseThrow();
         boolean safePrefilter = column.supportsPredicates() && translation.quality().safeForPrefilter();
-        if (fullTextMode != UNSAFE && !safePrefilter) {
-            return Optional.of(ElasticsearchPredicateTranslation.unsupported(expression, Reason.UNSUPPORTED_EXPRESSION));
+        if (fullTextMode == SAFE && !safePrefilter) {
+            return Optional.of(ElasticsearchPredicateTranslation.residual(expression, Reason.FULL_TEXT_SAFE_UNPROVEN));
         }
 
         ElasticsearchRemotePredicate predicate = new ElasticsearchRemotePredicate.Regexp(column.predicateName(), translation.pattern());
@@ -264,19 +270,19 @@ final class ElasticsearchPredicatePushdownPlanner
         Variable variable = (Variable) arguments.get(0);
         ElasticsearchColumnHandle column = (ElasticsearchColumnHandle) assignments.get(variable.getName());
         if (column == null || !(column.type() instanceof VarcharType)) {
-            return Optional.of(ElasticsearchPredicateTranslation.unsupported(expression, Reason.UNSUPPORTED_EXPRESSION));
+            return Optional.of(ElasticsearchPredicateTranslation.residual(expression, Reason.UNSUPPORTED_EXPRESSION));
         }
 
         Object patternValue = ((Constant) arguments.get(1)).getValue();
         if (!(patternValue instanceof Slice pattern)) {
-            return Optional.of(ElasticsearchPredicateTranslation.unsupported(expression, Reason.UNSUPPORTED_EXPRESSION));
+            return Optional.of(ElasticsearchPredicateTranslation.residual(expression, Reason.UNSUPPORTED_EXPRESSION));
         }
 
         Optional<Slice> escape = Optional.empty();
         if (arguments.size() == 3) {
             Object escapeValue = ((Constant) arguments.get(2)).getValue();
             if (!(escapeValue instanceof Slice escapeSlice)) {
-                return Optional.of(ElasticsearchPredicateTranslation.unsupported(expression, Reason.UNSUPPORTED_EXPRESSION));
+                return Optional.of(ElasticsearchPredicateTranslation.residual(expression, Reason.UNSUPPORTED_EXPRESSION));
             }
             escape = Optional.of(escapeSlice);
         }
@@ -289,8 +295,14 @@ final class ElasticsearchPredicatePushdownPlanner
             return Optional.of(ElasticsearchPredicateTranslation.exact(predicate, Reason.EXACT_LIKE));
         }
 
-        if (fullTextMode != UNSAFE || !isAnalyzedTextOnly(column)) {
+        if (!isAnalyzedTextOnly(column)) {
             return Optional.of(ElasticsearchPredicateTranslation.unsupported(expression, Reason.UNSUPPORTED_EXPRESSION));
+        }
+        if (fullTextMode == DISABLED) {
+            return Optional.of(ElasticsearchPredicateTranslation.residual(expression, Reason.FULL_TEXT_DISABLED));
+        }
+        if (fullTextMode == SAFE) {
+            return Optional.of(ElasticsearchPredicateTranslation.residual(expression, Reason.FULL_TEXT_SAFE_UNPROVEN));
         }
 
         Optional<ElasticsearchExpressionRewrite> rewrite = EXPRESSION_TRANSLATOR.rewrite(session, expression, assignments);
@@ -310,7 +322,7 @@ final class ElasticsearchPredicatePushdownPlanner
         }
 
         if (patternSpansTokens(pattern)) {
-            return Optional.of(ElasticsearchPredicateTranslation.unsupported(expression, Reason.UNSUPPORTED_EXPRESSION));
+            return Optional.of(ElasticsearchPredicateTranslation.residual(expression, Reason.UNSUPPORTED_EXPRESSION));
         }
 
         ElasticsearchRemotePredicate predicate = new ElasticsearchRemotePredicate.Regexp(
