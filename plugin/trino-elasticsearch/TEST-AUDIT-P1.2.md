@@ -44,7 +44,7 @@ Therefore adding P1.2 does not replace P0/P1.1 acceptance coverage. Both Elastic
 | 2 | `BaseElasticsearchConnectorTest.java` | CURRENT-SEMANTIC + SUPERSEDED definitions | Keep as inherited baseline. Historical predicate methods overridden by FullText/P0 are not counted as current predicate coverage. |
 | 3 | `BaseElasticsearchFullTextPushdownTest.java` | CURRENT-SEMANTIC | Keep and re-evaluate SAFE expectations against the lossless-prefilter invariant. UNSAFE remains the analyzer-semantic opt-in. |
 | 4 | `BaseElasticsearchP0PredicatePushdownTest.java` | CURRENT-SEMANTIC / CURRENT-ARCH | Keep. Native Terms, dynamic filtering, array membership, NULL edges and same-field regexp behavior must survive P1.2. |
-| 5 | `BaseElasticsearchPredicateCompositionTest.java` | CURRENT-SEMANTIC / CURRENT-ARCH / REWRITTEN | P1.2 ES7/ES8 contract. Expanded with UNSAFE same-field full-text AND and a custom-analyzer regression proving SAFE cannot use a lossy candidate. |
+| 5 | `BaseElasticsearchPredicateCompositionTest.java` | CURRENT-SEMANTIC / CURRENT-ARCH / REWRITTEN | P1.2 ES7/ES8 contract. Expanded with exact same-field scalar composition, UNSAFE same-field full-text AND and a custom-analyzer regression proving SAFE cannot use a lossy candidate. |
 | 6 | `ElasticsearchLoader.java` | INFRASTRUCTURE | No architecture assertion to rewrite. Still compiled/used by connector tests. |
 | 7 | `ElasticsearchQueryRunner.java` | INFRASTRUCTURE | No architecture assertion to rewrite. Required by integration suite. |
 | 8 | `ElasticsearchServer.java` | INFRASTRUCTURE | No architecture assertion to rewrite. Required by ES7/ES8 integration suite. |
@@ -67,14 +67,14 @@ Therefore adding P1.2 does not replace P0/P1.1 acceptance coverage. Both Elastic
 | 25 | `TestElasticsearchProjectionPushdownPlans.java` | CURRENT-ARCH | Remote predicate state must survive projection/dereference and join planning. |
 | 26 | `TestElasticsearchQueryBuilder.java` | COMPATIBILITY + REMOVED-OBSOLETE | Generic TupleDomain compatibility rendering remains; obsolete analyzed-text synthetic-domain renderer tests were removed. |
 | 27 | `TestElasticsearchRemoteColumnCase.java` | CURRENT-ARCH / REWRITTEN | Migrated analyzed-text casing coverage from legacy TupleDomain query building to planner→Remote Predicate IR. |
-| 28 | `TestElasticsearchRemotePredicateNormalizer.java` | CURRENT-ARCH / ADDED-GAP | Added by audit. Locks flatten/dedupe and conservative compatible exact numeric range intersection without temporary MatchNone encoding. |
+| 28 | `TestElasticsearchRemotePredicateNormalizer.java` | CURRENT-ARCH / ADDED-GAP / REWRITTEN | Added by audit. Locks flatten/dedupe and explicitly proves independent same-field ranges are preserved at document scope; range fusion is not a global IR rewrite. |
 | 29 | `TestElasticsearchRemotePredicateQueryBuilder.java` | CURRENT-ARCH | Canonical DSL renderer for Term/Terms/Range/Prefix/Regexp/MatchPhrase/MatchPhrasePrefix/Exists/And/Or/Not/Enforced. |
 | 30 | `TestElasticsearchRemotePredicateTranslator.java` | CURRENT-ARCH + COMPATIBILITY | Current Domain translation plus legitimate legacy-state canonicalization into IR. |
 | 31 | `TestElasticsearchTableHandle.java` | CURRENT-ARCH + COMPATIBILITY | IR serialization, connector-handle round trip and copy preservation; legacy construction only where still supported. |
 | 32 | `TestLikePrefix.java` | CURRENT-SEMANTIC | Pure LIKE-prefix recognition helper used by current planner. |
 | 33 | `TestPasswordConfig.java` | INDEPENDENT | Authentication configuration unaffected; keep and rerun. |
 | 34 | `TestRegexpPushdownTranslator.java` | CURRENT-SEMANTIC | Exact/approximate/unsupported regexp classification remains current production behavior. |
-| 35 | `TestRuleBasedElasticsearchMetadata.java` | CURRENT-ARCH / REWRITTEN / REMOVED-OBSOLETE | Restricted to facade fixed-point/orchestration and now proves SAFE planner rejection cannot be bypassed by legacy metadata. |
+| 35 | `TestRuleBasedElasticsearchMetadata.java` | CURRENT-ARCH / REWRITTEN / REMOVED-OBSOLETE | Restricted to facade fixed-point/orchestration; proves SAFE planner rejection cannot be bypassed and repeated `applyFilter` preserves independent document-scope ranges. |
 | 36 | `client/TestExtractAddress.java` | INDEPENDENT | Client address parsing unaffected; keep and rerun. |
 | 37 | `client/TestKeywordSubfield.java` | CURRENT-SEMANTIC | Exact-predicate safety of keyword sub-fields directly affects planner field selection. |
 
@@ -164,18 +164,34 @@ partial OR          -> no remote OR; whole subtree is owned residual
 
 An APPROXIMATE branch is allowed only under explicit UNSAFE policy. A residual does not convert an approximation into a safe candidate.
 
-### 5. Exact numeric range normalization is conservative
+### 5. Document-scope ranges are deliberately not fused globally
 
-`ElasticsearchRemotePredicateNormalizer` now intersects compatible direct exact numeric ranges on the same field for `LONG` and `DOUBLE` values.
+The audit briefly introduced global same-field numeric range intersection, then rejected it after checking Elasticsearch multi-value semantics.
 
-It deliberately does not merge:
+For a document containing remote values `[5, 25]`, these independent clauses both match:
 
-- different fields;
-- `Enforced` ranges;
-- STRING/timestamp-like values without an ordering proof;
-- contradictory ranges.
+```text
+field > 10
+field < 20
+```
 
-Contradictory ranges remain as independent clauses because the IR has no permanent `MatchNone` node. P1.2 does not introduce a temporary `Exists AND NOT Exists` encoding merely to canonicalize them.
+because `25` satisfies the first and `5` satisfies the second. Globally rewriting them to a single `10 < field < 20` range would eliminate that document and introduce a false negative.
+
+The permanent rule is therefore:
+
+```text
+Remote Predicate IR normalizer
+  -> may flatten/deduplicate document-scope AND/OR
+  -> MUST preserve independent same-field Range clauses
+
+same-value semantic scope
+  -> may fuse ranges only after explicit proof
+  -> existing example: any_match lambda translator
+```
+
+`TestElasticsearchRemotePredicateNormalizer` and `TestRuleBasedElasticsearchMetadata` now lock this behavior, including repeated `applyFilter` calls over an existing remote predicate.
+
+This decision intentionally avoids a temporary `MatchNone` workaround for contradictory independent ranges. A permanent `MatchNone` node can be added later only if a planner scope has enough proof to use it correctly; it is not needed to complete P1.2.
 
 ### 6. Legacy QueryBuilder full-text transport removed from current coverage
 
@@ -207,7 +223,7 @@ No new P1.2 feature is implemented on top of these compatibility paths.
 
 ## Architecture-sensitive test groups to pass before completion
 
-The final squashed P1.2 head must pass:
+The final P1.2 head must pass:
 
 1. Translation and IR
    - `TestElasticsearchPredicateTranslation`
@@ -254,5 +270,5 @@ P1.2 must not be marked complete until all of these are true:
 - Elasticsearch 7 cumulative acceptance passes;
 - Elasticsearch 8 cumulative acceptance passes;
 - Error Prone/compile checks pass;
-- final CI is run on a cleaned/squashed branch history;
+- final CI is run on the cleaned/squashed branch history;
 - P1.3 can consume `ElasticsearchPredicateTranslation`, composer, normalized IR, enforcement and reason metadata without replacing the P1.2 model.
