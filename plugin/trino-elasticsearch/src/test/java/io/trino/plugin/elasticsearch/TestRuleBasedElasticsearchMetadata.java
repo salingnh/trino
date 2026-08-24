@@ -127,7 +127,7 @@ public class TestRuleBasedElasticsearchMetadata
     }
 
     @Test
-    public void testRepeatedApplyFilterMergesCompatibleExactRanges()
+    public void testRepeatedApplyFilterPreservesIndependentDocumentScopeRanges()
     {
         ElasticsearchTableHandle lower = (ElasticsearchTableHandle) metadata.applyFilter(
                         session,
@@ -142,10 +142,15 @@ public class TestRuleBasedElasticsearchMetadata
                 .orElseThrow()
                 .getHandle();
 
-        assertThat(bounded.remotePredicate()).contains(new ElasticsearchRemotePredicate.Range(
-                "UserID",
-                Optional.of(new ElasticsearchRemotePredicate.Bound(10L, false)),
-                Optional.of(new ElasticsearchRemotePredicate.Bound(20L, false))));
+        assertThat(bounded.remotePredicate()).contains(new ElasticsearchRemotePredicate.And(List.of(
+                new ElasticsearchRemotePredicate.Range(
+                        "UserID",
+                        Optional.of(new ElasticsearchRemotePredicate.Bound(10L, false)),
+                        Optional.empty()),
+                new ElasticsearchRemotePredicate.Range(
+                        "UserID",
+                        Optional.empty(),
+                        Optional.of(new ElasticsearchRemotePredicate.Bound(20L, false))))));
     }
 
     @Test
