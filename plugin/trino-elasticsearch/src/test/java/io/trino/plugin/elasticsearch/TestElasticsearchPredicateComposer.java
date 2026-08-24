@@ -74,7 +74,7 @@ public class TestElasticsearchPredicateComposer
     }
 
     @Test
-    public void testPartialOrIsNeverPushed()
+    public void testPartialOrBecomesPlannerOwnedResidual()
     {
         ConnectorExpression source = ConnectorExpressions.or(List.of(A, B));
         ElasticsearchPredicateTranslation<ConnectorExpression> exact = ElasticsearchPredicateTranslation.exact(
@@ -90,8 +90,8 @@ public class TestElasticsearchPredicateComposer
 
         assertThat(result.remotePredicate()).isEmpty();
         assertThat(result.enforcement()).isEmpty();
-        assertThat(result.remaining()).contains(source);
-        assertThat(result.residual()).isEmpty();
+        assertThat(result.remaining()).isEmpty();
+        assertThat(result.residual()).contains(source);
     }
 
     @Test
@@ -137,12 +137,12 @@ public class TestElasticsearchPredicateComposer
     }
 
     @Test
-    public void testNotUsesPermanentUnsupportedOutcomeUntilSemanticsAreProven()
+    public void testNotBecomesPlannerOwnedResidualUntilSemanticsAreProven()
     {
         ElasticsearchPredicateTranslation<ConnectorExpression> result = ElasticsearchPredicateComposer.not(A);
 
         assertThat(result.remotePredicate()).isEmpty();
-        assertThat(result.remaining()).contains(A);
-        assertThat(result.residual()).isEmpty();
+        assertThat(result.remaining()).isEmpty();
+        assertThat(result.residual()).contains(A);
     }
 }
