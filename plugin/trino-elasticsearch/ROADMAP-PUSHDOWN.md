@@ -12,6 +12,10 @@ This roadmap tracks the staged implementation of the Elasticsearch connector pus
 6. Dynamic filters must be exact: join re-checking can remove false positives but cannot recover rows lost to approximate false negatives.
 7. Avoid Elasticsearch scripts for generic predicate pushdown unless there is no index-native equivalent and the performance/correctness trade-off is demonstrated.
 8. Keep upstream contribution in mind: isolate performance changes from architectural refactors where possible.
+9. **No throwaway phase architecture.** Every roadmap phase must implement against the intended long-lived architecture. A phase must not introduce a temporary representation, API, execution path, planner abstraction, or compatibility mechanism with the expectation that a later phase will replace it. Later phases may extend, specialize, optimize, or generalize an earlier design, but must not invalidate or supersede its architectural foundation.
+10. If a planned later capability reveals that the current architecture cannot support it cleanly, stop implementation and revise the roadmap and architecture first. Fix or generalize the current foundation before marking the phase complete; do not knowingly ship an intermediate design solely to unblock the next phase.
+11. Compatibility bridges are allowed only when required to coexist with legacy state or an external interface that cannot be migrated atomically. Such bridges are migration boundaries, not target architecture: new roadmap phases must not build new functionality on top of a bridge that is already planned for removal.
+12. Before implementation of each phase, the planner must verify architectural continuity: identify the permanent abstractions the phase uses, show how subsequent known phases extend them, and explicitly reject any design whose planned lifecycle is “implement now, replace later.”
 
 ## Test gate used for every implementation stage
 
