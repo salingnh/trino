@@ -120,10 +120,10 @@ final class ElasticsearchPredicatePushdownPlanner
             FullTextPushdownMode fullTextMode)
     {
         boolean exactPredicate = column.supportsPredicates();
-        boolean fullTextDiscretePredicate = fullTextMode != DISABLED
+        boolean approximateFullTextPredicate = fullTextMode == UNSAFE
                 && isAnalyzedTextOnly(column)
                 && domain.getValues().isDiscreteSet();
-        if (!exactPredicate && !fullTextDiscretePredicate) {
+        if (!exactPredicate && !approximateFullTextPredicate) {
             return ElasticsearchPredicateTranslation.unsupported(domain, Reason.UNSUPPORTED_DOMAIN);
         }
 
@@ -136,13 +136,7 @@ final class ElasticsearchPredicatePushdownPlanner
         if (exactPredicate) {
             return ElasticsearchPredicateTranslation.exact(predicate, Reason.EXACT_DOMAIN);
         }
-        if (fullTextMode == SAFE) {
-            return ElasticsearchPredicateTranslation.prefilter(predicate, domain, Reason.FULL_TEXT_SAFE_PREFILTER);
-        }
-        if (fullTextMode == UNSAFE) {
-            return ElasticsearchPredicateTranslation.approximate(predicate, Reason.FULL_TEXT_UNSAFE_APPROXIMATE);
-        }
-        return ElasticsearchPredicateTranslation.unsupported(domain, Reason.UNSUPPORTED_DOMAIN);
+        return ElasticsearchPredicateTranslation.approximate(predicate, Reason.FULL_TEXT_UNSAFE_APPROXIMATE);
     }
 
     private static ElasticsearchPredicateTranslation<ConnectorExpression> translateExpression(
@@ -295,28 +289,24 @@ final class ElasticsearchPredicatePushdownPlanner
             return Optional.of(ElasticsearchPredicateTranslation.exact(predicate, Reason.EXACT_LIKE));
         }
 
-        if (fullTextMode == DISABLED || !isAnalyzedTextOnly(column)) {
+        if (fullTextMode != UNSAFE || !isAnalyzedTextOnly(column)) {
             return Optional.of(ElasticsearchPredicateTranslation.unsupported(expression, Reason.UNSUPPORTED_EXPRESSION));
         }
 
-        if (fullTextMode == UNSAFE) {
-            Optional<ElasticsearchExpressionRewrite> rewrite = EXPRESSION_TRANSLATOR.rewrite(session, expression, assignments);
-            if (rewrite.isPresent()) {
-                ElasticsearchExpressionRewrite translated = rewrite.orElseThrow();
-                return switch (translated.queryType()) {
-                    case MATCH_PHRASE -> Optional.of(ElasticsearchPredicateTranslation.approximate(
-                            new ElasticsearchRemotePredicate.MatchPhrase(translated.column().remoteName(), translated.value()),
-                            Reason.FULL_TEXT_UNSAFE_APPROXIMATE));
-                };
-            }
+        Optional<ElasticsearchExpressionRewrite> rewrite = EXPRESSION_TRANSLATOR.rewrite(session, expression, assignments);
+        if (rewrite.isPresent()) {
+            ElasticsearchExpressionRewrite translated = rewrite.orElseThrow();
+            return switch (translated.queryType()) {
+                case MATCH_PHRASE -> Optional.of(ElasticsearchPredicateTranslation.approximate(
+                        new ElasticsearchRemotePredicate.MatchPhrase(translated.column().remoteName(), translated.value()),
+                        Reason.FULL_TEXT_UNSAFE_APPROXIMATE));
+            };
         }
 
         Optional<String> prefix = ElasticsearchMetadata.likePrefix(pattern, escape);
         if (prefix.isPresent()) {
             ElasticsearchRemotePredicate predicate = new ElasticsearchRemotePredicate.MatchPhrasePrefix(column.remoteName(), prefix.orElseThrow());
-            return Optional.of(fullTextMode == SAFE
-                    ? ElasticsearchPredicateTranslation.prefilter(predicate, expression, Reason.FULL_TEXT_SAFE_PREFILTER)
-                    : ElasticsearchPredicateTranslation.approximate(predicate, Reason.FULL_TEXT_UNSAFE_APPROXIMATE));
+            return Optional.of(ElasticsearchPredicateTranslation.approximate(predicate, Reason.FULL_TEXT_UNSAFE_APPROXIMATE));
         }
 
         if (patternSpansTokens(pattern)) {
@@ -326,9 +316,7 @@ final class ElasticsearchPredicatePushdownPlanner
         ElasticsearchRemotePredicate predicate = new ElasticsearchRemotePredicate.Regexp(
                 column.remoteName(),
                 ElasticsearchMetadata.likeToRegexp(pattern, escape));
-        return Optional.of(fullTextMode == SAFE
-                ? ElasticsearchPredicateTranslation.prefilter(predicate, expression, Reason.FULL_TEXT_SAFE_PREFILTER)
-                : ElasticsearchPredicateTranslation.approximate(predicate, Reason.FULL_TEXT_UNSAFE_APPROXIMATE));
+        return Optional.of(ElasticsearchPredicateTranslation.approximate(predicate, Reason.FULL_TEXT_UNSAFE_APPROXIMATE));
     }
 
     private static Optional<ElasticsearchRemotePredicate> translateExactPrefixCall(
