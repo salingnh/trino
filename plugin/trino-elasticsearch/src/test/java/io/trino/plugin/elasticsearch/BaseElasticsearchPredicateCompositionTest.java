@@ -24,7 +24,6 @@ import org.intellij.lang.annotations.Language;
 import org.junit.jupiter.api.Test;
 
 import java.io.IOException;
-import java.util.List;
 import java.util.Map;
 
 import static io.trino.testing.TestingNames.randomNameSuffix;
@@ -35,8 +34,8 @@ import static org.assertj.core.api.Assertions.assertThat;
  * P1.2 acceptance contract for permanent document-scope predicate composition.
  *
  * <p>These tests intentionally keep document-scope array conjunction separate from P1.1 same-element
- * {@code any_match} semantics. They also verify that an unsafe partial OR is retained by Trino while a SAFE
- * full-text OR may use Elasticsearch only as a no-false-negative candidate filter.</p>
+ * {@code any_match} semantics. Partial OR never pushes only a subset of branches, SAFE never uses an unproven lossy
+ * analyzed-text candidate, and UNSAFE may compose explicitly approximate full-text predicates.</p>
  */
 public abstract class BaseElasticsearchPredicateCompositionTest
         extends BaseElasticsearchAnyMatchPushdownTest
@@ -94,23 +93,20 @@ public abstract class BaseElasticsearchPredicateCompositionTest
                     "numbers", ImmutableList.of(1, 2),
                     "tags", ImmutableList.of("c")));
 
-            // Exact OR is translated by the permanent composer and normalized to one native Terms predicate.
             assertThat(query("SELECT id FROM " + indexName + " WHERE contains(tags, 'a') OR contains(tags, 'b')"))
                     .matches("VALUES VARCHAR '1', VARCHAR '2', VARCHAR '3'")
                     .isFullyPushedDown();
 
-            // Top-level conjunction is document-scope: different array elements may satisfy the independent terms.
+            // Document-scope conjunction allows different array elements to satisfy independent predicates.
             assertThat(query("SELECT id FROM " + indexName + " WHERE contains(numbers, 1) AND contains(numbers, 2)"))
                     .matches("VALUES VARCHAR '1', VARCHAR '4'")
                     .isFullyPushedDown();
 
-            // P1.1's same-element boundary remains intact under the new document-scope composer.
+            // P1.1 same-element semantics remain encapsulated inside any_match translation.
             assertThat(query("SELECT id FROM " + indexName + " WHERE any_match(numbers, x -> x > 1 AND x < 3)"))
                     .matches("VALUES VARCHAR '1', VARCHAR '3', VARCHAR '4'")
                     .isFullyPushedDown();
 
-            // A translatable branch cannot be pushed alone under OR because it could remove rows satisfying only the
-            // untranslatable branch.
             assertThat(query("SELECT id FROM " + indexName + " WHERE contains(tags, 'a') OR cardinality(numbers) = 1"))
                     .matches("VALUES VARCHAR '1', VARCHAR '2', VARCHAR '3'")
                     .isNotFullyPushedDown(FilterNode.class);
@@ -119,11 +115,69 @@ public abstract class BaseElasticsearchPredicateCompositionTest
             Session safe = Session.builder(getSession())
                     .setCatalogSessionProperty(catalogName, "full_text_pushdown_mode", "SAFE")
                     .build();
+            Session unsafe = Session.builder(getSession())
+                    .setCatalogSessionProperty(catalogName, "full_text_pushdown_mode", "UNSAFE")
+                    .build();
 
-            // Every SAFE OR branch has a no-false-negative remote candidate, but the complete SQL OR remains as the
-            // authoritative Trino residual. The document with a missing message must not leak through SQL NULL logic.
+            // Analyzed-text LIKE has no general no-false-negative proof. SAFE keeps the complete OR in Trino instead of
+            // relying on the residual to repair rows that a lossy remote candidate may already have removed.
             assertThat(query(safe, "SELECT id FROM " + indexName + " WHERE message LIKE 'fatal%' OR message LIKE 'error%'"))
                     .matches("VALUES VARCHAR '1', VARCHAR '2'")
+                    .isNotFullyPushedDown(FilterNode.class);
+
+            // UNSAFE explicitly accepts analyzer semantics. Both same-field predicates coexist under one document-scope
+            // And instead of overwriting each other in a legacy one-predicate-per-field map.
+            assertThat(query(unsafe, "SELECT id FROM " + indexName + " WHERE message LIKE '%fatal%' AND message LIKE '%alpha%'"))
+                    .matches("VALUES VARCHAR '1'")
+                    .isFullyPushedDown();
+        }
+        finally {
+            deleteIndex(indexName);
+        }
+    }
+
+    @Test
+    public void testSafeAnalyzedTextDoesNotUseLossyCandidate()
+            throws IOException
+    {
+        String indexName = "p1_safe_analyzed_lossless_" + randomNameSuffix();
+        @Language("JSON")
+        String body =
+                """
+                {
+                  "settings": {
+                    "analysis": {
+                      "analyzer": {
+                        "folded_text": {
+                          "type": "custom",
+                          "tokenizer": "standard",
+                          "filter": ["lowercase", "asciifolding"]
+                        }
+                      }
+                    }
+                  },
+                  "mappings": {
+                    "properties": {
+                      "name": { "type": "text", "analyzer": "folded_text" },
+                      "id": { "type": "keyword" }
+                    }
+                  }
+                }
+                """;
+        createIndexBody(indexName, body);
+        try {
+            index(indexName, ImmutableMap.of("name", "ngô văn", "id", "1"));
+            index(indexName, ImmutableMap.of("name", "ngo van", "id", "2"));
+
+            String catalogName = getSession().getCatalog().orElseThrow();
+            Session safe = Session.builder(getSession())
+                    .setCatalogSessionProperty(catalogName, "full_text_pushdown_mode", "SAFE")
+                    .build();
+
+            // The analyzer indexes "ngô" as "ngo". A remote regexp containing "ngô" would produce a false negative
+            // before Trino could run its residual. SAFE therefore keeps this predicate local and must still return id=1.
+            assertThat(query(safe, "SELECT id FROM " + indexName + " WHERE name LIKE '%ngô%'"))
+                    .matches("VALUES VARCHAR '1'")
                     .isNotFullyPushedDown(FilterNode.class);
         }
         finally {
@@ -134,8 +188,14 @@ public abstract class BaseElasticsearchPredicateCompositionTest
     private void createIndex(String indexName, @Language("JSON") String mapping)
             throws IOException
     {
+        createIndexBody(indexName, "{\"mappings\": " + mapping + "}");
+    }
+
+    private void createIndexBody(String indexName, @Language("JSON") String body)
+            throws IOException
+    {
         Request request = new Request("PUT", "/" + indexName);
-        request.setJsonEntity("{\"mappings\": " + mapping + "}");
+        request.setJsonEntity(body);
         client.performRequest(request);
     }
 
