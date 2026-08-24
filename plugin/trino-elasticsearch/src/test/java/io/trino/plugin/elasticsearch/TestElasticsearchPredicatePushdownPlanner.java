@@ -166,7 +166,7 @@ public class TestElasticsearchPredicatePushdownPlanner
     }
 
     @Test
-    public void testSafeAnalyzedDiscreteDomainKeepsResidual()
+    public void testSafeAnalyzedDiscreteDomainRemainsInTrino()
     {
         ElasticsearchColumnHandle column = analyzedTextColumn();
         Domain domain = Domain.singleValue(VARCHAR, utf8Slice("Alpha Beta"));
@@ -180,10 +180,32 @@ public class TestElasticsearchPredicatePushdownPlanner
                 constraint,
                 SAFE);
 
-        assertThat(result.remainingConstraint().getSummary().isAll()).isTrue();
-        assertThat(result.residualFilter()).isEqualTo(TupleDomain.withColumnDomains(Map.<ColumnHandle, Domain>of(column, domain)));
+        assertThat(result.remainingConstraint().getSummary())
+                .isEqualTo(TupleDomain.withColumnDomains(Map.<ColumnHandle, Domain>of(column, domain)));
+        assertThat(result.residualFilter().isAll()).isTrue();
+        assertThat(result.remotePredicate()).isEmpty();
+    }
+
+    @Test
+    public void testSafeKeywordRegexpUsesLosslessCandidateAndResidual()
+    {
+        ElasticsearchColumnHandle column = keywordColumn();
+        Call regexp = new Call(
+                BOOLEAN,
+                new FunctionName("regexp_like"),
+                ImmutableList.of(
+                        new Variable("value", VARCHAR),
+                        new Constant(utf8Slice("foo"), VARCHAR)));
+
+        ElasticsearchPredicatePushdownPlanner.Result result = ElasticsearchPredicatePushdownPlanner.plan(
+                TestingConnectorSession.builder().build(),
+                expressionConstraint(column, regexp),
+                SAFE);
+
+        assertThat(result.remainingConstraint().getExpression()).isEqualTo(TRUE);
+        assertThat(result.residualExpressions()).containsExactly(regexp);
         assertThat(result.remotePredicate()).contains(new ElasticsearchRemotePredicate.Enforced(
-                new ElasticsearchRemotePredicate.MatchPhrase("value", "Alpha Beta"),
+                new ElasticsearchRemotePredicate.Regexp("value", ".*(foo).*"),
                 PREFILTER));
     }
 
