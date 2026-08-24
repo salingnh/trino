@@ -39,7 +39,6 @@ import static io.airlift.slice.Slices.utf8Slice;
 import static io.trino.plugin.elasticsearch.ElasticsearchRemotePredicateTranslator.withRemotePredicate;
 import static io.trino.plugin.elasticsearch.ElasticsearchTableHandle.Type.SCAN;
 import static io.trino.plugin.elasticsearch.FullTextPushdownMode.SAFE;
-import static io.trino.plugin.elasticsearch.expression.ElasticsearchRemotePredicate.Enforcement.PREFILTER;
 import static io.trino.spi.expression.Constant.TRUE;
 import static io.trino.spi.type.IntegerType.INTEGER;
 import static io.trino.spi.type.VarcharType.VARCHAR;
@@ -126,7 +125,7 @@ public class TestRuleBasedElasticsearchMetadata
     }
 
     @Test
-    public void testSafeFullTextResidualIsPreservedAtFixedPoint()
+    public void testSafeAnalyzedDomainCannotBypassPlannerThroughLegacyMetadata()
     {
         ElasticsearchColumnHandle column = analyzedTextColumn();
         Domain domain = Domain.singleValue(VARCHAR, utf8Slice("fatal error"));
@@ -135,15 +134,7 @@ public class TestRuleBasedElasticsearchMetadata
                 TRUE,
                 Map.of());
 
-        ConstraintApplicationResult<ConnectorTableHandle> first = metadata.applyFilter(session, emptyTable(), constraint)
-                .orElseThrow();
-        ElasticsearchTableHandle pushed = (ElasticsearchTableHandle) first.getHandle();
-
-        assertThat(pushed.remotePredicate()).contains(new ElasticsearchRemotePredicate.Enforced(
-                new ElasticsearchRemotePredicate.MatchPhrase("value", "fatal error"),
-                PREFILTER));
-        assertThat(first.getRemainingFilter()).isEqualTo(TupleDomain.withColumnDomains(Map.<ColumnHandle, Domain>of(column, domain)));
-        assertThat(metadata.applyFilter(session, pushed, constraint)).isEmpty();
+        assertThat(metadata.applyFilter(session, emptyTable(), constraint)).isEmpty();
     }
 
     private static Constraint exactConstraint(long value)
