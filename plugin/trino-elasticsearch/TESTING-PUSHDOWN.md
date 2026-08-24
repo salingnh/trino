@@ -20,6 +20,45 @@ When a change modifies an architectural contract, the phase owner must perform a
 6. Re-run the complete connector test suite after the audit, including both Elasticsearch 7 and Elasticsearch 8 integration suites.
 7. Review test coverage after execution. A passing suite that no longer exercises a migrated behavior is a regression in test quality.
 
+## Pushdown correctness invariants
+
+These invariants apply to every architecture phase and are stronger than a simple “keep a residual” rule.
+
+### Remote candidate must be lossless
+
+A Trino residual can eliminate false positives returned by Elasticsearch. It cannot recover a row that an Elasticsearch pre-filter already removed.
+
+Therefore:
+
+```text
+PREFILTER
+  => remote predicate may be a superset of SQL matches
+  => remote predicate MUST NOT introduce false negatives
+  => Trino residual remains authoritative
+
+APPROXIMATE
+  => false positives and/or false negatives may exist
+  => allowed only under explicit UNSAFE semantics
+```
+
+The presence of a residual never makes a lossy remote predicate safe. Analyzer-dependent text transformations, stop-word removal, stemming, case folding, ASCII folding, tokenization, or other index-time rewriting require an explicit no-false-negative proof before they can be used as PREFILTER candidates.
+
+### Planner ownership cannot be bypassed by compatibility code
+
+`remaining` and `residual` are different architectural outcomes:
+
+```text
+remaining
+  => planner does not own the subtree
+  => compatibility boundary may inspect/translate it
+
+residual
+  => planner owns the subtree and deliberately keeps Trino authoritative
+  => compatibility boundary MUST NOT retry or reinterpret it
+```
+
+Partial OR, unproven NOT, resource-budget rejection, and recognized full-text forms deliberately rejected by SAFE are planner-owned residuals. A legacy path must never get a second chance to push a predicate that the permanent planner rejected for correctness.
+
 ## Required coverage layers
 
 Architecture-changing PRs must cover all applicable layers:
@@ -40,12 +79,14 @@ Validate:
 
 - complete and partial AND;
 - complete and partial OR;
+- EXACT/PREFILTER/APPROXIMATE composition matrix;
 - residual retention/removal;
 - repeated `applyFilter` fixed points;
 - existing remote predicate composition;
 - document-scope versus same-element array semantics;
 - resource-budget fallback;
-- unsupported NOT behavior until NULL/missing equivalence is proven.
+- unsupported NOT behavior until NULL/missing equivalence is proven;
+- rejected planner-owned predicates cannot fall back through legacy metadata.
 
 ### 3. Metadata boundary tests
 
@@ -65,8 +106,9 @@ Required regression families include:
 
 - scalar equality/range/LIKE/regexp;
 - keyword and analyzed-text behavior;
+- analyzers that rewrite source text, specifically to detect false-negative PREFILTER behavior;
 - same-field and cross-field conjunctions;
-- exact and prefilter OR;
+- exact and proven-prefilter OR;
 - mixed translatable/untranslatable OR;
 - primitive-array membership;
 - `any_match` same-element constraints;
@@ -81,10 +123,12 @@ Required regression families include:
 P1.2 changes the predicate translation/composition architecture. The following audit decisions therefore apply:
 
 - `ElasticsearchPredicateTranslation` and `ElasticsearchPredicateComposer` are the primary semantic test targets.
-- Partial OR and unproven NOT are planner-owned residuals. Tests must not expect them to return through the legacy compatibility boundary.
-- `ElasticsearchRemotePredicateNormalizer` performs semantic normalization only. Request-shape compaction/batching belongs to the composer policy so dynamic-filter batching cannot be undone accidentally.
-- `TestRuleBasedElasticsearchMetadata` is restricted to facade/runtime fixed-point and residual orchestration tests.
-- Historical tests for synthetic `TupleDomain` full-text lowering are obsolete once runtime lowering targets Remote Predicate IR directly; those tests must not be preserved as architectural requirements.
+- Partial OR, unproven NOT, resource rejection, and recognized but unproven SAFE full-text translations are planner-owned residuals. Tests must not expect them to return through the legacy compatibility boundary.
+- SAFE analyzed-text equality/LIKE is not remotely prefiltered without a no-false-negative proof. UNSAFE remains the explicit approximation boundary.
+- `ElasticsearchRemotePredicateNormalizer` performs deterministic semantic normalization. It may flatten/deduplicate and intersect compatible exact numeric ranges. Request-shape compaction/batching belongs to the composer policy so dynamic-filter batching cannot be undone accidentally.
+- Contradictory ranges are not encoded using a temporary fake match-none expression. They remain semantically valid independent range clauses until a permanent IR representation is justified.
+- `TestRuleBasedElasticsearchMetadata` is restricted to facade/runtime fixed-point, residual orchestration, and compatibility-bypass regression tests.
+- Historical tests for synthetic `TupleDomain` full-text lowering are obsolete once runtime lowering targets Remote Predicate IR directly; those tests and their test-only production helper must not be preserved as architectural requirements.
 - P0 and P1.1 acceptance tests remain mandatory regression inputs and are inherited by the P1.2 Elasticsearch 7/8 suites.
 
 ## Completion commands
