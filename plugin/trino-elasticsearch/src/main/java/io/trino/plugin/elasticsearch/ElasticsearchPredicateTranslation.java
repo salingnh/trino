@@ -29,9 +29,9 @@ import static java.util.Objects.requireNonNull;
  * Permanent semantic result of translating a connector-owned predicate subtree.
  *
  * <p>{@code remaining} is predicate state that this planner does not own and may still be offered to the legacy
- * compatibility boundary. {@code residual} is predicate state that this planner does own, but Trino must re-check
- * after Elasticsearch has applied a safe candidate predicate. Keeping these concepts separate is required for
- * correct boolean composition, especially OR.</p>
+ * compatibility boundary. {@code residual} is predicate state that this planner does own and Trino remains
+ * authoritative for. A residual may exist with or without a remote candidate: partial OR, unproven NOT semantics and
+ * resource-budget fallbacks must not be handed back to a legacy path that could bypass the composer's decision.</p>
  */
 record ElasticsearchPredicateTranslation<R>(
         Optional<ElasticsearchRemotePredicate> remotePredicate,
@@ -71,9 +71,6 @@ record ElasticsearchPredicateTranslation<R>(
         }
         if (enforcement.isPresent() && enforcement.orElseThrow() == PREFILTER) {
             checkArgument(remaining.isPresent() || residual.isPresent(), "PREFILTER translation requires remaining or residual state");
-        }
-        if (remotePredicate.isEmpty()) {
-            checkArgument(residual.isEmpty(), "translation without a remote predicate cannot have connector-owned residual state");
         }
     }
 
@@ -116,6 +113,16 @@ record ElasticsearchPredicateTranslation<R>(
                 Optional.empty(),
                 Optional.of(requireNonNull(remaining, "remaining is null")),
                 Optional.empty(),
+                reason);
+    }
+
+    static <R> ElasticsearchPredicateTranslation<R> residual(R residual, Reason reason)
+    {
+        return new ElasticsearchPredicateTranslation<>(
+                Optional.empty(),
+                Optional.empty(),
+                Optional.empty(),
+                Optional.of(requireNonNull(residual, "residual is null")),
                 reason);
     }
 
