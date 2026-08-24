@@ -120,7 +120,7 @@ public class TestElasticsearchPredicateCompositionPlanner
     }
 
     @Test
-    public void testSafeFullTextOrKeepsWholeOrResidual()
+    public void testSafeAnalyzedFullTextOrRemainsPlannerOwnedResidual()
     {
         ElasticsearchColumnHandle column = analyzedTextColumn("message");
         Call first = like("message", "fatal%");
@@ -131,22 +131,16 @@ public class TestElasticsearchPredicateCompositionPlanner
 
         assertThat(result.remainingConstraint().getExpression()).isEqualTo(TRUE);
         assertThat(result.residualExpressions()).containsExactly(expression);
-        assertThat(result.remotePredicate()).contains(new ElasticsearchRemotePredicate.Or(List.of(
-                new ElasticsearchRemotePredicate.Enforced(
-                        new ElasticsearchRemotePredicate.MatchPhrasePrefix("message", "fatal"),
-                        PREFILTER),
-                new ElasticsearchRemotePredicate.Enforced(
-                        new ElasticsearchRemotePredicate.MatchPhrasePrefix("message", "error"),
-                        PREFILTER))));
+        assertThat(result.remotePredicate()).isEmpty();
     }
 
     @Test
-    public void testMixedExactAndSafePrefilterOrKeepsWholeOrResidual()
+    public void testMixedExactAndProvenSafePrefilterOrKeepsWholeOrResidual()
     {
         ElasticsearchColumnHandle status = keywordColumn("status");
-        ElasticsearchColumnHandle message = analyzedTextColumn("message");
+        ElasticsearchColumnHandle message = keywordColumn("message");
         Call exact = like("status", "active%");
-        Call prefilter = like("message", "fatal%");
+        Call prefilter = regexp("message", "fatal");
         Call expression = new Call(BOOLEAN, OR_FUNCTION_NAME, List.of(exact, prefilter));
 
         ElasticsearchPredicatePushdownPlanner.Result result = plan(expression, Map.of(
@@ -161,7 +155,7 @@ public class TestElasticsearchPredicateCompositionPlanner
                 .containsExactly(
                         new ElasticsearchRemotePredicate.Prefix("status", "active"),
                         new ElasticsearchRemotePredicate.Enforced(
-                                new ElasticsearchRemotePredicate.MatchPhrasePrefix("message", "fatal"),
+                                new ElasticsearchRemotePredicate.Regexp("message", ".*(fatal).*"),
                                 PREFILTER));
     }
 
@@ -205,6 +199,16 @@ public class TestElasticsearchPredicateCompositionPlanner
         return new Call(
                 BOOLEAN,
                 LIKE_FUNCTION_NAME,
+                List.of(
+                        new Variable(variableName, VARCHAR),
+                        new Constant(utf8Slice(pattern), VARCHAR)));
+    }
+
+    private static Call regexp(String variableName, String pattern)
+    {
+        return new Call(
+                BOOLEAN,
+                new FunctionName("regexp_like"),
                 List.of(
                         new Variable(variableName, VARCHAR),
                         new Constant(utf8Slice(pattern), VARCHAR)));
