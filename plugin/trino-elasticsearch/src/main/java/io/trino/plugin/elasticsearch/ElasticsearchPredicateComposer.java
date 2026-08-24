@@ -17,11 +17,18 @@ import io.trino.plugin.base.expression.ConnectorExpressions;
 import io.trino.plugin.elasticsearch.ElasticsearchPredicateTranslation.Reason;
 import io.trino.plugin.elasticsearch.expression.ElasticsearchRemotePredicate;
 import io.trino.plugin.elasticsearch.expression.ElasticsearchRemotePredicate.Enforcement;
+import io.trino.plugin.elasticsearch.expression.ElasticsearchRemotePredicate.Term;
+import io.trino.plugin.elasticsearch.expression.ElasticsearchRemotePredicate.Terms;
+import io.trino.plugin.elasticsearch.expression.ElasticsearchRemotePredicate.Value;
 import io.trino.spi.expression.ConnectorExpression;
 
 import java.util.ArrayList;
+import java.util.LinkedHashMap;
+import java.util.LinkedHashSet;
 import java.util.List;
+import java.util.Map;
 import java.util.Optional;
+import java.util.Set;
 
 import static io.trino.plugin.elasticsearch.expression.ElasticsearchRemotePredicate.Enforcement.APPROXIMATE;
 import static io.trino.plugin.elasticsearch.expression.ElasticsearchRemotePredicate.Enforcement.EXACT;
@@ -98,8 +105,17 @@ final class ElasticsearchPredicateComposer
             ConnectorExpression source,
             List<ElasticsearchPredicateTranslation<ConnectorExpression>> children)
     {
+        return or(source, children, ElasticsearchPredicateCompositionPolicy.DEFAULT);
+    }
+
+    static ElasticsearchPredicateTranslation<ConnectorExpression> or(
+            ConnectorExpression source,
+            List<ElasticsearchPredicateTranslation<ConnectorExpression>> children,
+            ElasticsearchPredicateCompositionPolicy policy)
+    {
         requireNonNull(source, "source is null");
         requireNonNull(children, "children is null");
+        requireNonNull(policy, "policy is null");
 
         // Every OR branch needs a no-false-negative remote candidate. A single unowned branch makes partial OR
         // pushdown unsafe because Elasticsearch could remove rows that satisfy only that branch.
@@ -110,7 +126,14 @@ final class ElasticsearchPredicateComposer
         List<ElasticsearchRemotePredicate> remotePredicates = children.stream()
                 .map(child -> child.remotePredicate().orElseThrow())
                 .toList();
-        Optional<ElasticsearchRemotePredicate> remotePredicate = ElasticsearchRemotePredicateNormalizer.or(remotePredicates);
+        Optional<List<ElasticsearchRemotePredicate>> compacted = compactExactTerms(remotePredicates, policy);
+        if (compacted.isEmpty()) {
+            // Exceeding the local request-shape budget is a safe performance fallback. Do not manufacture a remote OR
+            // that is likely to exceed Elasticsearch terms/bool limits.
+            return ElasticsearchPredicateTranslation.unsupported(source, Reason.BOOLEAN_OR);
+        }
+
+        Optional<ElasticsearchRemotePredicate> remotePredicate = ElasticsearchRemotePredicateNormalizer.or(compacted.orElseThrow());
         if (remotePredicate.isEmpty()) {
             return ElasticsearchPredicateTranslation.unsupported(source, Reason.BOOLEAN_OR);
         }
@@ -137,6 +160,80 @@ final class ElasticsearchPredicateComposer
         return ElasticsearchPredicateTranslation.unsupported(
                 requireNonNull(source, "source is null"),
                 Reason.BOOLEAN_NOT_UNPROVEN);
+    }
+
+    private static Optional<List<ElasticsearchRemotePredicate>> compactExactTerms(
+            List<ElasticsearchRemotePredicate> predicates,
+            ElasticsearchPredicateCompositionPolicy policy)
+    {
+        Optional<ElasticsearchRemotePredicate> normalized = ElasticsearchRemotePredicateNormalizer.or(predicates);
+        if (normalized.isEmpty()) {
+            return Optional.of(List.of());
+        }
+        List<ElasticsearchRemotePredicate> disjuncts = normalized.orElseThrow() instanceof ElasticsearchRemotePredicate.Or or
+                ? or.predicates()
+                : List.of(normalized.orElseThrow());
+
+        Map<String, Set<Value>> valuesByField = new LinkedHashMap<>();
+        Map<String, Integer> firstIndexByField = new LinkedHashMap<>();
+        int totalTermValues = 0;
+        for (int index = 0; index < disjuncts.size(); index++) {
+            ElasticsearchRemotePredicate predicate = disjuncts.get(index);
+            if (predicate instanceof Term term) {
+                Set<Value> values = valuesByField.computeIfAbsent(term.field(), _ -> new LinkedHashSet<>());
+                if (values.add(term.value())) {
+                    totalTermValues++;
+                }
+                firstIndexByField.putIfAbsent(term.field(), index);
+            }
+            else if (predicate instanceof Terms terms) {
+                Set<Value> values = valuesByField.computeIfAbsent(terms.field(), _ -> new LinkedHashSet<>());
+                for (Value value : terms.values()) {
+                    if (values.add(value)) {
+                        totalTermValues++;
+                    }
+                }
+                firstIndexByField.putIfAbsent(terms.field(), index);
+            }
+            if (totalTermValues > policy.maxTermsValues()) {
+                return Optional.empty();
+            }
+        }
+
+        List<ElasticsearchRemotePredicate> result = new ArrayList<>();
+        Set<String> emittedFields = new LinkedHashSet<>();
+        for (int index = 0; index < disjuncts.size(); index++) {
+            ElasticsearchRemotePredicate predicate = disjuncts.get(index);
+            String field = switch (predicate) {
+                case Term term -> term.field();
+                case Terms terms -> terms.field();
+                default -> null;
+            };
+            if (field == null) {
+                result.add(predicate);
+                continue;
+            }
+            if (index != firstIndexByField.get(field) || !emittedFields.add(field)) {
+                continue;
+            }
+
+            List<Value> values = List.copyOf(valuesByField.get(field));
+            for (int offset = 0; offset < values.size(); offset += policy.termsBatchSize()) {
+                int end = Math.min(offset + policy.termsBatchSize(), values.size());
+                List<Value> batch = values.subList(offset, end);
+                if (batch.size() == 1) {
+                    result.add(new Term(field, batch.getFirst()));
+                }
+                else {
+                    result.add(new Terms(field, batch));
+                }
+            }
+        }
+
+        if (result.size() > policy.maxBooleanClauses()) {
+            return Optional.empty();
+        }
+        return Optional.of(List.copyOf(result));
     }
 
     private static Optional<ConnectorExpression> andExpressions(List<ConnectorExpression> expressions)
