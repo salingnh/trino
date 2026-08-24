@@ -97,6 +97,12 @@ public abstract class BaseElasticsearchPredicateCompositionTest
                     .matches("VALUES VARCHAR '1', VARCHAR '2', VARCHAR '3'")
                     .isFullyPushedDown();
 
+            // Two exact predicates on the same scalar field must coexist in the Remote Predicate IR. A legacy
+            // one-entry-per-field map would overwrite one of these clauses.
+            assertThat(query("SELECT id FROM " + indexName + " WHERE id LIKE '1%' AND id LIKE '%1'"))
+                    .matches("VALUES VARCHAR '1'")
+                    .isFullyPushedDown();
+
             // Document-scope conjunction allows different array elements to satisfy independent predicates.
             assertThat(query("SELECT id FROM " + indexName + " WHERE contains(numbers, 1) AND contains(numbers, 2)"))
                     .matches("VALUES VARCHAR '1', VARCHAR '4'")
