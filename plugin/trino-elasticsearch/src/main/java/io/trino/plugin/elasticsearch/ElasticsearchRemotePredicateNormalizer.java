@@ -14,25 +14,19 @@
 package io.trino.plugin.elasticsearch;
 
 import io.trino.plugin.elasticsearch.expression.ElasticsearchRemotePredicate;
-import io.trino.plugin.elasticsearch.expression.ElasticsearchRemotePredicate.Term;
-import io.trino.plugin.elasticsearch.expression.ElasticsearchRemotePredicate.Terms;
-import io.trino.plugin.elasticsearch.expression.ElasticsearchRemotePredicate.Value;
 
 import java.util.ArrayList;
-import java.util.LinkedHashMap;
-import java.util.LinkedHashSet;
 import java.util.List;
-import java.util.Map;
 import java.util.Optional;
-import java.util.Set;
 
 import static java.util.Objects.requireNonNull;
 
 /**
- * Canonicalizes Remote Predicate IR without changing predicate semantics.
+ * Canonicalizes Remote Predicate IR without changing predicate semantics or request shape.
  *
- * <p>This is the permanent normalization layer shared by planner composition, legacy canonicalization and dynamic
- * filtering. New normalizations belong here rather than in individual predicate translators.</p>
+ * <p>This is the permanent semantic normalization layer shared by planner composition, legacy canonicalization and
+ * dynamic filtering. Resource-sensitive rewrites, such as compacting an OR of terms into bounded {@code terms}
+ * batches, belong to the predicate composer because they require an explicit resource policy.</p>
  */
 final class ElasticsearchRemotePredicateNormalizer
 {
@@ -61,7 +55,6 @@ final class ElasticsearchRemotePredicateNormalizer
         for (ElasticsearchRemotePredicate predicate : predicates) {
             addDisjunct(flattened, normalize(requireNonNull(predicate, "predicate is null")));
         }
-        flattened = mergeExactTerms(flattened);
         if (flattened.isEmpty()) {
             return Optional.empty();
         }
@@ -105,53 +98,5 @@ final class ElasticsearchRemotePredicateNormalizer
         if (!disjuncts.contains(predicate)) {
             disjuncts.add(predicate);
         }
-    }
-
-    private static List<ElasticsearchRemotePredicate> mergeExactTerms(List<ElasticsearchRemotePredicate> predicates)
-    {
-        Map<String, Set<Value>> valuesByField = new LinkedHashMap<>();
-        Map<String, Integer> firstIndexByField = new LinkedHashMap<>();
-
-        for (int index = 0; index < predicates.size(); index++) {
-            ElasticsearchRemotePredicate predicate = predicates.get(index);
-            if (predicate instanceof Term term) {
-                valuesByField.computeIfAbsent(term.field(), _ -> new LinkedHashSet<>()).add(term.value());
-                firstIndexByField.putIfAbsent(term.field(), index);
-            }
-            else if (predicate instanceof Terms terms) {
-                valuesByField.computeIfAbsent(terms.field(), _ -> new LinkedHashSet<>()).addAll(terms.values());
-                firstIndexByField.putIfAbsent(terms.field(), index);
-            }
-        }
-
-        if (valuesByField.isEmpty()) {
-            return predicates;
-        }
-
-        List<ElasticsearchRemotePredicate> result = new ArrayList<>();
-        Set<String> emittedFields = new LinkedHashSet<>();
-        for (int index = 0; index < predicates.size(); index++) {
-            ElasticsearchRemotePredicate predicate = predicates.get(index);
-            String field = switch (predicate) {
-                case Term term -> term.field();
-                case Terms terms -> terms.field();
-                default -> null;
-            };
-            if (field == null) {
-                result.add(predicate);
-                continue;
-            }
-            if (index != firstIndexByField.get(field) || !emittedFields.add(field)) {
-                continue;
-            }
-            List<Value> values = List.copyOf(valuesByField.get(field));
-            if (values.size() == 1) {
-                result.add(new Term(field, values.getFirst()));
-            }
-            else {
-                result.add(new Terms(field, values));
-            }
-        }
-        return result;
     }
 }
