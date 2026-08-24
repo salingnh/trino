@@ -1,0 +1,153 @@
+/*
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *     http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+package io.trino.plugin.elasticsearch;
+
+import io.trino.plugin.base.expression.ConnectorExpressions;
+import io.trino.plugin.elasticsearch.ElasticsearchPredicateTranslation.Reason;
+import io.trino.plugin.elasticsearch.expression.ElasticsearchRemotePredicate;
+import io.trino.plugin.elasticsearch.expression.ElasticsearchRemotePredicate.Enforcement;
+import io.trino.spi.expression.ConnectorExpression;
+
+import java.util.ArrayList;
+import java.util.List;
+import java.util.Optional;
+
+import static io.trino.plugin.elasticsearch.expression.ElasticsearchRemotePredicate.Enforcement.APPROXIMATE;
+import static io.trino.plugin.elasticsearch.expression.ElasticsearchRemotePredicate.Enforcement.EXACT;
+import static io.trino.plugin.elasticsearch.expression.ElasticsearchRemotePredicate.Enforcement.PREFILTER;
+import static io.trino.spi.expression.Constant.TRUE;
+import static java.util.Objects.requireNonNull;
+
+/**
+ * Permanent document-scope boolean composition layer for Elasticsearch predicate translations.
+ *
+ * <p>This class deliberately does not descend into array lambdas. Same-element semantics are proved by
+ * {@link ElasticsearchArrayPredicateTranslator} before an array predicate reaches this document-scope composer.</p>
+ */
+final class ElasticsearchPredicateComposer
+{
+    private ElasticsearchPredicateComposer() {}
+
+    static ElasticsearchPredicateTranslation<ConnectorExpression> and(
+            ConnectorExpression source,
+            List<ElasticsearchPredicateTranslation<ConnectorExpression>> children)
+    {
+        requireNonNull(source, "source is null");
+        requireNonNull(children, "children is null");
+
+        List<ElasticsearchRemotePredicate> remotePredicates = new ArrayList<>();
+        List<ConnectorExpression> remaining = new ArrayList<>();
+        List<ConnectorExpression> residual = new ArrayList<>();
+        boolean approximate = false;
+
+        for (ElasticsearchPredicateTranslation<ConnectorExpression> child : children) {
+            requireNonNull(child, "child is null");
+            child.remotePredicate().ifPresent(remotePredicates::add);
+            child.remaining().ifPresent(remaining::add);
+            child.residual().ifPresent(residual::add);
+            approximate |= child.enforcement().filter(value -> value == APPROXIMATE).isPresent();
+        }
+
+        Optional<ElasticsearchRemotePredicate> remotePredicate = ElasticsearchRemotePredicateNormalizer.and(remotePredicates);
+        Optional<ConnectorExpression> remainingExpression = andExpressions(remaining);
+        Optional<ConnectorExpression> residualExpression = andExpressions(residual);
+
+        if (remotePredicate.isEmpty()) {
+            if (remainingExpression.isEmpty() && residualExpression.isEmpty()) {
+                return ElasticsearchPredicateTranslation.noop(Reason.BOOLEAN_AND);
+            }
+            return ElasticsearchPredicateTranslation.composed(
+                    Optional.empty(),
+                    Optional.empty(),
+                    remainingExpression.isPresent() ? remainingExpression : Optional.of(source),
+                    Optional.empty(),
+                    Reason.BOOLEAN_AND);
+        }
+
+        Enforcement enforcement;
+        if (approximate) {
+            enforcement = APPROXIMATE;
+        }
+        else if (remainingExpression.isPresent() || residualExpression.isPresent()) {
+            enforcement = PREFILTER;
+        }
+        else {
+            enforcement = EXACT;
+        }
+
+        return ElasticsearchPredicateTranslation.composed(
+                remotePredicate,
+                Optional.of(enforcement),
+                remainingExpression,
+                residualExpression,
+                Reason.BOOLEAN_AND);
+    }
+
+    static ElasticsearchPredicateTranslation<ConnectorExpression> or(
+            ConnectorExpression source,
+            List<ElasticsearchPredicateTranslation<ConnectorExpression>> children)
+    {
+        requireNonNull(source, "source is null");
+        requireNonNull(children, "children is null");
+
+        // Every OR branch needs a no-false-negative remote candidate. A single unowned branch makes partial OR
+        // pushdown unsafe because Elasticsearch could remove rows that satisfy only that branch.
+        if (children.stream().anyMatch(child -> child.remaining().isPresent() || child.remotePredicate().isEmpty())) {
+            return ElasticsearchPredicateTranslation.unsupported(source, Reason.BOOLEAN_OR);
+        }
+
+        List<ElasticsearchRemotePredicate> remotePredicates = children.stream()
+                .map(child -> child.remotePredicate().orElseThrow())
+                .toList();
+        Optional<ElasticsearchRemotePredicate> remotePredicate = ElasticsearchRemotePredicateNormalizer.or(remotePredicates);
+        if (remotePredicate.isEmpty()) {
+            return ElasticsearchPredicateTranslation.unsupported(source, Reason.BOOLEAN_OR);
+        }
+
+        boolean approximate = children.stream()
+                .anyMatch(child -> child.enforcement().filter(value -> value == APPROXIMATE).isPresent());
+        boolean needsResidual = children.stream().anyMatch(child -> child.residual().isPresent());
+        Enforcement enforcement = approximate
+                ? APPROXIMATE
+                : needsResidual ? PREFILTER : EXACT;
+
+        return ElasticsearchPredicateTranslation.composed(
+                remotePredicate,
+                Optional.of(enforcement),
+                Optional.empty(),
+                needsResidual ? Optional.of(source) : Optional.empty(),
+                Reason.BOOLEAN_OR);
+    }
+
+    static ElasticsearchPredicateTranslation<ConnectorExpression> not(ConnectorExpression source)
+    {
+        // The permanent API exists now, but no document-scope NOT form is enabled until SQL three-valued logic,
+        // missing-field behavior and multi-valued-field semantics are proven equivalent.
+        return ElasticsearchPredicateTranslation.unsupported(
+                requireNonNull(source, "source is null"),
+                Reason.BOOLEAN_NOT_UNPROVEN);
+    }
+
+    private static Optional<ConnectorExpression> andExpressions(List<ConnectorExpression> expressions)
+    {
+        if (expressions.isEmpty()) {
+            return Optional.empty();
+        }
+        ConnectorExpression expression = ConnectorExpressions.and(expressions);
+        if (expression.equals(TRUE)) {
+            return Optional.empty();
+        }
+        return Optional.of(expression);
+    }
+}
