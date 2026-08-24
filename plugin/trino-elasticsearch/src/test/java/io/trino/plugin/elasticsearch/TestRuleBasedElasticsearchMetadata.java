@@ -24,7 +24,9 @@ import io.trino.spi.connector.ConnectorTableHandle;
 import io.trino.spi.connector.Constraint;
 import io.trino.spi.connector.ConstraintApplicationResult;
 import io.trino.spi.predicate.Domain;
+import io.trino.spi.predicate.Range;
 import io.trino.spi.predicate.TupleDomain;
+import io.trino.spi.predicate.ValueSet;
 import io.trino.testing.TestingConnectorSession;
 import org.junit.jupiter.api.AfterAll;
 import org.junit.jupiter.api.BeforeAll;
@@ -125,6 +127,28 @@ public class TestRuleBasedElasticsearchMetadata
     }
 
     @Test
+    public void testRepeatedApplyFilterMergesCompatibleExactRanges()
+    {
+        ElasticsearchTableHandle lower = (ElasticsearchTableHandle) metadata.applyFilter(
+                        session,
+                        emptyTable(),
+                        rangeConstraint(Range.greaterThan(INTEGER, 10L)))
+                .orElseThrow()
+                .getHandle();
+        ElasticsearchTableHandle bounded = (ElasticsearchTableHandle) metadata.applyFilter(
+                        session,
+                        lower,
+                        rangeConstraint(Range.lessThan(INTEGER, 20L)))
+                .orElseThrow()
+                .getHandle();
+
+        assertThat(bounded.remotePredicate()).contains(new ElasticsearchRemotePredicate.Range(
+                "UserID",
+                Optional.of(new ElasticsearchRemotePredicate.Bound(10L, false)),
+                Optional.of(new ElasticsearchRemotePredicate.Bound(20L, false))));
+    }
+
+    @Test
     public void testSafeAnalyzedDomainCannotBypassPlannerThroughLegacyMetadata()
     {
         ElasticsearchColumnHandle column = analyzedTextColumn();
@@ -141,6 +165,16 @@ public class TestRuleBasedElasticsearchMetadata
     {
         return new Constraint(
                 TupleDomain.withColumnDomains(Map.<ColumnHandle, Domain>of(USER_ID, Domain.singleValue(INTEGER, value))),
+                TRUE,
+                Map.of());
+    }
+
+    private static Constraint rangeConstraint(Range range)
+    {
+        return new Constraint(
+                TupleDomain.withColumnDomains(Map.<ColumnHandle, Domain>of(
+                        USER_ID,
+                        Domain.create(ValueSet.ofRanges(range), false))),
                 TRUE,
                 Map.of());
     }
