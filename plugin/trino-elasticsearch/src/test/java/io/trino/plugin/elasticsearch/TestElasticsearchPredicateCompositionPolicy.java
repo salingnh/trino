@@ -30,6 +30,7 @@ public class TestElasticsearchPredicateCompositionPolicy
     private static final ConnectorExpression A = new Variable("a", BOOLEAN);
     private static final ConnectorExpression B = new Variable("b", BOOLEAN);
     private static final ConnectorExpression C = new Variable("c", BOOLEAN);
+    private static final int LARGE_QUERY_BUDGET = 1_048_576;
 
     @Test
     public void testExactTermsAreBatchedWithoutChangingSemanticNormalizer()
@@ -42,15 +43,17 @@ public class TestElasticsearchPredicateCompositionPolicy
         ElasticsearchPredicateTranslation<ConnectorExpression> result = ElasticsearchPredicateComposer.or(
                 ConnectorExpressions.or(List.of(A, B, C)),
                 children,
-                new ElasticsearchPredicateCompositionPolicy(10, 2, 10));
+                new ElasticsearchPredicateCompositionPolicy(10, 2, 10, LARGE_QUERY_BUDGET));
 
         assertThat(result.remotePredicate()).contains(new ElasticsearchRemotePredicate.Or(List.of(
                 new ElasticsearchRemotePredicate.Terms("status", List.of("a", "b")),
                 new ElasticsearchRemotePredicate.Term("status", "c"))));
+        assertThat(result.remaining()).isEmpty();
+        assertThat(result.residual()).isEmpty();
     }
 
     @Test
-    public void testTermsValueBudgetFallsBackToResidual()
+    public void testTermsValueBudgetFallsBackToOwnedResidual()
     {
         ConnectorExpression source = ConnectorExpressions.or(List.of(A, B, C));
         List<ElasticsearchPredicateTranslation<ConnectorExpression>> children = List.of(
@@ -61,14 +64,15 @@ public class TestElasticsearchPredicateCompositionPolicy
         ElasticsearchPredicateTranslation<ConnectorExpression> result = ElasticsearchPredicateComposer.or(
                 source,
                 children,
-                new ElasticsearchPredicateCompositionPolicy(2, 2, 10));
+                new ElasticsearchPredicateCompositionPolicy(2, 2, 10, LARGE_QUERY_BUDGET));
 
         assertThat(result.remotePredicate()).isEmpty();
-        assertThat(result.remaining()).contains(source);
+        assertThat(result.remaining()).isEmpty();
+        assertThat(result.residual()).contains(source);
     }
 
     @Test
-    public void testBooleanClauseBudgetFallsBackToResidual()
+    public void testBooleanClauseBudgetFallsBackToOwnedResidual()
     {
         ConnectorExpression source = ConnectorExpressions.or(List.of(A, B, C));
         List<ElasticsearchPredicateTranslation<ConnectorExpression>> children = List.of(
@@ -79,10 +83,11 @@ public class TestElasticsearchPredicateCompositionPolicy
         ElasticsearchPredicateTranslation<ConnectorExpression> result = ElasticsearchPredicateComposer.or(
                 source,
                 children,
-                new ElasticsearchPredicateCompositionPolicy(10, 2, 2));
+                new ElasticsearchPredicateCompositionPolicy(10, 2, 2, LARGE_QUERY_BUDGET));
 
         assertThat(result.remotePredicate()).isEmpty();
-        assertThat(result.remaining()).contains(source);
+        assertThat(result.remaining()).isEmpty();
+        assertThat(result.residual()).contains(source);
     }
 
     @Test
