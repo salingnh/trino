@@ -46,6 +46,7 @@ import io.trino.plugin.elasticsearch.decoders.TimestampDecoder;
 import io.trino.plugin.elasticsearch.decoders.TinyintDecoder;
 import io.trino.plugin.elasticsearch.decoders.VarbinaryDecoder;
 import io.trino.plugin.elasticsearch.decoders.VarcharDecoder;
+import io.trino.plugin.elasticsearch.expression.ElasticsearchRemotePredicate;
 import io.trino.plugin.elasticsearch.ptf.RawQuery.RawQueryFunctionHandle;
 import io.trino.spi.TrinoException;
 import io.trino.spi.connector.AggregateFunction;
@@ -526,11 +527,12 @@ public class ElasticsearchMetadata
     public TableStatistics getTableStatistics(ConnectorSession session, ConnectorTableHandle table)
     {
         ElasticsearchTableHandle handle = (ElasticsearchTableHandle) table;
-        if (!statisticsEnabled || isPassthroughQuery(handle)) {
+        if (!statisticsEnabled || isPassthroughQuery(handle) || handle.aggregation().isPresent()
+                || handle.remotePredicate().filter(predicate -> !predicate.isExact()).isPresent()) {
             return TableStatistics.empty();
         }
 
-        JsonNode query = buildSearchQuery(handle.constraint().transformKeys(ElasticsearchColumnHandle.class::cast), handle.query(), handle.regexes(), handle.prefixes(), handle.matchPhrasePrefixes());
+        JsonNode query = buildSearchQuery(handle);
 
         // The row count is cheap (no aggregations) and always valuable to the optimizer; fetch it first, and fall back to
         // no statistics if even that fails rather than failing query planning.
@@ -544,11 +546,23 @@ public class ElasticsearchMetadata
         TableStatistics.Builder tableStatistics = TableStatistics.builder()
                 .setRowCount(Estimate.of(rowCount));
 
-        // Per-column statistics scan every document. value_count (null fraction) and min/max (range) are relatively cheap
-        // and always attempted; the expensive cardinality (distinct count) is included only under the document threshold.
+        if (handle.limit().isPresent()) {
+            return TableStatistics.builder().setRowCount(Estimate.of(Math.min(rowCount, handle.limit().orElseThrow()))).build();
+        }
+        if (rowCount > statisticsMaxIndexDocuments) {
+            return tableStatistics.build();
+        }
+
+        // Per-column statistics scan every matching document and are attempted only below the document threshold.
         // The request has a short timeout and no retries, so a slow aggregation degrades to the row count instead of
         // blocking planning for minutes.
-        List<ElasticsearchColumnHandle> columns = statisticsColumns(handle, getKeywordSubfieldPushdownWithIgnoreAbove(session));
+        List<ElasticsearchColumnHandle> columns;
+        try {
+            columns = statisticsColumns(handle, getKeywordSubfieldPushdownWithIgnoreAbove(session));
+        }
+        catch (RuntimeException e) {
+            return tableStatistics.build();
+        }
         if (!columns.isEmpty()) {
             // Text fields with a safe keyword sub-field are aggregated on the sub-field, so use the predicate field name
             List<String> fields = columns.stream()
@@ -558,9 +572,8 @@ public class ElasticsearchMetadata
                     .filter(column -> hasRange(column.type()))
                     .map(ElasticsearchColumnHandle::predicateName)
                     .collect(toImmutableSet());
-            boolean includeCardinality = rowCount <= statisticsMaxIndexDocuments;
             try {
-                IndexStatistics indexStatistics = client.getIndexStatistics(handle.index(), query, fields, rangeFields, includeCardinality);
+                IndexStatistics indexStatistics = client.getIndexStatistics(handle.index(), query, fields, rangeFields, true);
                 for (ElasticsearchColumnHandle column : columns) {
                     FieldStatistics fieldStatistics = indexStatistics.fields().get(column.predicateName());
                     if (fieldStatistics != null) {
@@ -585,13 +598,16 @@ public class ElasticsearchMetadata
         if (referenced.isEmpty()) {
             return ImmutableList.of();
         }
-        return makeInternalTableMetadata(handle.schema(), handle.index(), useBoundedKeyword).columnHandles().values().stream()
+        IndexMetadata metadata = client.getIndexMetadataForStatistics(handle.index(), useBoundedKeyword);
+        return makeColumnHandles(getColumnFields(metadata)).values().stream()
                 .map(ElasticsearchColumnHandle.class::cast)
                 .filter(column -> column.path().size() == 1)
                 // Array columns are excluded: value_count aggregates every array element and can exceed the row count
                 .filter(column -> !(column.type() instanceof ArrayType))
                 .filter(column -> !BuiltinColumns.isBuiltinColumn(column.name()))
                 .filter(column -> isAggregatable(column.elasticsearchType()))
+                // Statistics must describe the values returned from _source, not rounded doc values.
+                .filter(column -> !(column.elasticsearchType() instanceof ScaledFloatType))
                 .filter(column -> referenced.contains(column.name()) || referenced.contains(column.predicateName()))
                 .limit(statisticsMaxColumns)
                 .collect(toImmutableList());
@@ -615,7 +631,26 @@ public class ElasticsearchMetadata
         fields.addAll(handle.prefixes().keySet());
         fields.addAll(handle.matchPhrasePrefixes().keySet());
         handle.sortOrder().forEach(sort -> fields.add(sort.field()));
+        handle.remotePredicate().ifPresent(predicate -> addReferencedFields(predicate, fields));
         return fields.build();
+    }
+
+    private static void addReferencedFields(ElasticsearchRemotePredicate predicate, ImmutableSet.Builder<String> fields)
+    {
+        switch (predicate) {
+            case ElasticsearchRemotePredicate.And and -> and.predicates().forEach(child -> addReferencedFields(child, fields));
+            case ElasticsearchRemotePredicate.Or or -> or.predicates().forEach(child -> addReferencedFields(child, fields));
+            case ElasticsearchRemotePredicate.Not not -> addReferencedFields(not.predicate(), fields);
+            case ElasticsearchRemotePredicate.Enforced enforced -> addReferencedFields(enforced.predicate(), fields);
+            case ElasticsearchRemotePredicate.Term term -> fields.add(term.field());
+            case ElasticsearchRemotePredicate.Terms terms -> fields.add(terms.field());
+            case ElasticsearchRemotePredicate.Range range -> fields.add(range.field());
+            case ElasticsearchRemotePredicate.Prefix prefix -> fields.add(prefix.field());
+            case ElasticsearchRemotePredicate.Regexp regexp -> fields.add(regexp.field());
+            case ElasticsearchRemotePredicate.MatchPhrase match -> fields.add(match.field());
+            case ElasticsearchRemotePredicate.MatchPhrasePrefix match -> fields.add(match.field());
+            case ElasticsearchRemotePredicate.Exists exists -> fields.add(exists.field());
+        }
     }
 
     private static boolean isAggregatable(IndexMetadata.Type type)
@@ -718,13 +753,20 @@ public class ElasticsearchMetadata
         ImmutableList.Builder<ElasticsearchColumnSort> sortOrder = ImmutableList.builder();
         for (SortItem sortItem : sortItems) {
             ElasticsearchColumnHandle column = (ElasticsearchColumnHandle) assignments.get(sortItem.getName());
-            if (column == null || BuiltinColumns.isBuiltinColumn(column.name()) || !isAggregatable(column.elasticsearchType())) {
+            if (column == null || BuiltinColumns.isBuiltinColumn(column.name()) || !isAggregatable(column.elasticsearchType())
+                    || column.elasticsearchType() instanceof ScaledFloatType
+                    || !(isSupportedGroupingType(column.type()) || column.type().equals(TIMESTAMP_MILLIS))) {
                 return Optional.empty();
             }
             SortOrder order = sortItem.getSortOrder();
             sortOrder.add(new ElasticsearchColumnSort(column.predicateName(), order.isAscending(), order.isNullsFirst()));
         }
         List<ElasticsearchColumnSort> newSortOrder = sortOrder.build();
+
+        // Sorting above an already limited relation must not select a different subset of the original table.
+        if (handle.limit().isPresent() && (!handle.sortOrder().equals(newSortOrder) || handle.limit().orElseThrow() < topNCount)) {
+            return Optional.empty();
+        }
 
         if (handle.sortOrder().equals(newSortOrder) && handle.limit().equals(OptionalLong.of(topNCount))) {
             return Optional.empty();
@@ -766,7 +808,8 @@ public class ElasticsearchMetadata
         for (ColumnHandle columnHandle : groupingSets.get(0)) {
             ElasticsearchColumnHandle column = (ElasticsearchColumnHandle) columnHandle;
             // Grouping keys become composite terms sources: the field must be aggregatable (doc_values), exact, and a type we can decode
-            if (BuiltinColumns.isBuiltinColumn(column.name()) || !isAggregatable(column.elasticsearchType()) || !isSupportedGroupingType(column.type())) {
+            if (BuiltinColumns.isBuiltinColumn(column.name()) || !isAggregatable(column.elasticsearchType())
+                    || column.elasticsearchType() instanceof ScaledFloatType || !isSupportedGroupingType(column.type())) {
                 return Optional.empty();
             }
             // Grouping columns pass through unchanged: they belong only in the grouping-column mapping,
@@ -856,7 +899,9 @@ public class ElasticsearchMetadata
     private static Optional<ElasticsearchAggregate> numericAggregate(String outputName, Function function, List<ConnectorExpression> arguments, Map<String, ColumnHandle> assignments, Type outputType)
     {
         Optional<ElasticsearchColumnHandle> column = aggregateColumn(arguments, assignments);
-        if (column.isEmpty() || !isAggregatable(column.get().elasticsearchType()) || !supportsNumericAggregate(function, column.get().type())) {
+        // scaled_float doc values are rounded, while the scan decoder returns the original _source value.
+        if (column.isEmpty() || !isAggregatable(column.get().elasticsearchType())
+                || column.get().elasticsearchType() instanceof ScaledFloatType || !supportsNumericAggregate(function, column.get().type())) {
             return Optional.empty();
         }
         return Optional.of(new ElasticsearchAggregate(outputName, function, Optional.of(column.get().predicateName()), outputType));

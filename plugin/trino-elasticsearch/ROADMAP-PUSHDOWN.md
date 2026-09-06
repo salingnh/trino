@@ -428,7 +428,13 @@ This release boundary does not include runtime observability, metrics, execution
 
 ## P1.3 — Permanent Pushdown Diagnostics and Observability
 
-**Status:** NOT STARTED
+**Status:** COMPLETE — IMPLEMENTATION GATE GREEN
+
+Implementation is in PR #24 on `feature/elasticsearch-p1.3-observability`.
+The [phase design and release audit](P1.3-OBSERVABILITY-DESIGN.md) tracks the
+architectural contract, verified hardening checkpoints, and remaining gates.
+Implementation and local release checks pass. Release tagging must use a final
+candidate whose documentation and exact SHA also pass CI.
 
 ### Objective
 
@@ -452,15 +458,39 @@ Pushdown diagnostics
 
 ### Scope
 
-- [ ] Translation/composition diagnostic events use stable structured reason codes, not ad-hoc log strings.
-- [ ] Remote Predicate IR -> Elasticsearch DSL diagnostics use the same model.
-- [ ] EXACT / PREFILTER / APPROXIMATE / residual counts.
-- [ ] `terms` values, batches, and request-byte estimates.
-- [ ] Array-membership and `any_match` pushdown counts.
-- [ ] Dynamic-filter values received/pushed/compacted/batched/rejected.
-- [ ] Remote requests, rows, bytes, pages, retries, cancellations, and failures where available.
-- [ ] Debug logging can render diagnostics without changing planner behavior.
-- [ ] Metrics/JMX consumers read the same counters/events.
+- [x] Translation/composition diagnostic events use stable structured reason codes, not ad-hoc log strings.
+- [x] Remote Predicate IR -> Elasticsearch DSL diagnostics use the same model.
+- [x] EXACT / PREFILTER / APPROXIMATE / residual counts.
+- [x] `terms` values, batches, and request-byte estimates.
+- [x] Array-membership and `any_match` pushdown counts.
+- [x] Dynamic-filter values received/pushed/compacted/batched/rejected.
+- [x] Remote requests, rows, bytes, pages, retries, cancellations, and failures where available.
+- [x] Debug logging can render diagnostics without changing planner behavior.
+- [x] Metrics/JMX consumers read the same counters/events.
+
+### Release validation
+
+Implementation commit `4ccc14f68d8de08deed7d1d196bf70dcee190b68` passes
+`./mvnw -nsu -pl :trino-elasticsearch -Perrorprone-compiler clean verify`:
+830 tests, zero failures/errors, 340 capability skips, both ES7/ES8 connector and
+metadata suites, and plugin JAR/ZIP packaging. The artifact manifest identifies
+the exact commit. Structured normalization and immutable snapshots, live JMX and
+debug equivalence, actual HTTP retries, count responses, initial-scroll ownership,
+failure cleanup, repeated close, no-scroll responses, and LIMIT completion all
+have focused acceptance coverage. Commit history is consolidated to one tested
+implementation commit; the earlier history remains on a backup branch.
+
+GitHub run `34008876905` validates the identical merge tree. Its initial attempt
+passed all connector, Maven, Error Prone, and artifact checks but timed out starting
+the Hive cross-realm impersonation environment during Kerberos tool installation.
+Attempt 2 passed all jobs on the same SHA, including the HDFS impersonation suite.
+The phase implementation gate is complete. Documentation candidate
+`8f97986301ae026de53c4246d0ec5a020a575186` additionally passes local
+`./mvnw -nsu -pl :trino-elasticsearch,:trino-docs -Perrorprone-compiler clean verify`
+with all 830 tests, documentation build, and packaging. Final release evidence is
+tracked on PR #24 against its current head, not inferred from an earlier green SHA.
+P1.4 and P2 were outside that historical P1.3 release; their current implementation
+and local acceptance are tracked below.
 
 ### Architectural continuity
 
@@ -470,7 +500,15 @@ P1.4 search execution strategies and P2 aggregation/statistics paths must emit i
 
 ## P1.4 — Search Execution Framework and Large-scan Optimization
 
-**Status:** NOT STARTED
+**Status:** IMPLEMENTED — REVIEW FIXES AND LOCAL ACCEPTANCE COMPLETE
+
+Implementation and measurements are recorded in [the execution audit](P1.4-P2-EXECUTION-DESIGN.md).
+Checklist entries distinguish implementation, correctness tests, measurements,
+and conditional decisions in the execution audit. Historical green gates do not
+certify the review fixes. The final code passes clean verification with Error Prone,
+AirStyle and both expanded benchmarks: 1,515 tests, zero failures/errors and 680
+unsupported-capability skips. External CI/PR review is outside the current task
+and is not claimed here. Default promotion of streaming remains explicitly rejected.
 
 ### Objective
 
@@ -491,28 +529,28 @@ SearchExecutionStrategy
 └── close query context
 ```
 
-- [ ] Adapt current Scroll execution to this contract without semantic changes.
-- [ ] Centralize clear-scroll/close behavior.
-- [ ] Centralize cancellation and failure cleanup.
-- [ ] Emit P1.3 diagnostics/accounting from the common lifecycle.
-- [ ] Preserve ES-version capability handling explicitly.
+- [x] Adapt current Scroll execution to this contract without semantic changes.
+- [x] Centralize clear-scroll/close behavior.
+- [x] Centralize cancellation and failure cleanup.
+- [x] Emit P1.3 diagnostics/accounting from the common lifecycle.
+- [x] Preserve ES-version capability handling explicitly.
 
 ### P1.4b — Stable hit-decoding contract
 
 Define one hit/page decoding interface consumed by all search strategies.
 
-- [ ] Existing JsonNode/materialized decoding works through the interface first.
-- [ ] Add Jackson streaming decoding as another implementation when benchmark/tests prove benefit.
-- [ ] Decoder selection must not change planner or search-strategy contracts.
-- [ ] Validate nested objects, arrays, NULL/missing, timestamps, binary, and raw JSON.
+- [x] Existing JsonNode/materialized decoding works through the interface first.
+- [x] Evaluate Jackson streaming decoding behind the same interface: implementation and equivalence tests delivered; benchmarks show workload-dependent benefit, so default promotion is rejected and the alternative remains opt-in (see execution audit).
+- [x] Decoder selection must not change planner or search-strategy contracts.
+- [x] Validate nested objects, arrays, NULL/missing, timestamps, binary, and raw JSON.
 
 ### P1.4c — PIT + `search_after` as an additional strategy
 
-- [ ] Benchmark Scroll through the common execution contract.
-- [ ] Implement PIT + `search_after` through the same contract where supported.
-- [ ] Benchmark throughput, heap, GC, request count, failure recovery, cancellation, and long-query stability.
-- [ ] Add capability/configuration-based selection policy.
-- [ ] Keep Scroll as a valid fallback strategy unless a future compatibility decision explicitly removes support; removing an implementation must not alter the execution contract.
+- [x] Benchmark Scroll through the common execution contract.
+- [x] Implement PIT + `search_after` through the same contract where supported.
+- [x] Benchmark throughput, heap, GC, request count, failure recovery, cancellation, and long-query stability.
+- [x] Add capability/configuration-based selection policy.
+- [x] Keep Scroll as a valid fallback strategy unless a future compatibility decision explicitly removes support; removing an implementation must not alter the execution contract.
 
 ### Acceptance criteria
 
@@ -522,30 +560,47 @@ Define one hit/page decoding interface consumed by all search strategies.
 - Accounting is comparable across Scroll and PIT.
 - No optimization requires a later phase to replace the P1.4 execution abstraction.
 
+Local measurement protocol: ES 7.17.27 and 8.11.3, 50,000 documents, three shards,
+100-hit pages, three throughput rounds and a scan lasting at least 60 seconds
+against a one-second keep-alive. Require exact ID coverage, zero duplicate IDs,
+and zero remote open contexts after exhaustion, LIMIT, cancellation and injected
+next-page failure. A new query must succeed after failure; transparent replay of
+the failed snapshot remains forbidden. Report allocation bytes, heap-pool peak
+upper bounds and GC counts/time separately, not as interchangeable memory metrics.
+Decoder measurements use 100/1,000/10,000-hit pages, warm-up and both execution
+orders. Workload-specific benefits do not authorize changing production defaults.
+
 ---
 
 # P2 — Query-shape, Aggregation, and Statistics Hardening
 
-**Status:** NOT STARTED
+**Status:** IMPLEMENTED — REVIEW FIXES AND LOCAL ACCEPTANCE COMPLETE
 
 P2 extends the permanent P0/P1 planner and execution contracts. It does not introduce a second predicate model, diagnostics path, or scan lifecycle.
 
 ## P2.1 — LIMIT and TopN execution hardening
 
-- [ ] Review shard-aware LIMIT/TopN over-fetch correctness.
-- [ ] Express early termination through the P1.4 execution lifecycle.
-- [ ] Ensure remote predicate, sort, and limit state are preserved consistently in table handles.
-- [ ] Add cancellation as soon as the exact required row set is known.
-- [ ] Measure request/page/byte reduction through P1.3 accounting.
-- [ ] Keep fallback behavior exact when a remote TopN cannot be represented safely.
+- [x] Review shard-aware LIMIT/TopN over-fetch correctness.
+- [x] Express early termination through the P1.4 execution lifecycle.
+- [x] Ensure remote predicate, sort, and limit state are preserved consistently in table handles.
+- [x] Add cancellation as soon as the exact required row set is known.
+- [x] Measure request/page/byte reduction through P1.3 accounting.
+- [x] Keep fallback behavior exact when a remote TopN cannot be represented safely.
+
+Exactness includes mapping semantics, not only Trino types: rounded `scaled_float`
+doc values cannot implement ordering/grouping/numeric metrics on original `_source`
+values. Regression coverage must assert fallback and compare SQL results.
+Measure LIMIT and TopN against the same full scan: require three search/page
+requests for shard-local N=10, fewer decoded source bytes, and the correct merged
+global TopN. These byte counters describe decoded source, not compressed wire I/O.
 
 ## P2.2 — Aggregation execution hardening
 
-- [ ] Use the same Remote Predicate IR renderer for aggregation query filters.
-- [ ] Add common request/byte/page/resource accounting through P1.3 diagnostics.
-- [ ] Make composite aggregation page size configurable only if benchmarks justify it.
-- [ ] Centralize aggregation pagination/resource cleanup behind a stable aggregation execution contract if more than one execution mode is required; do not add an abstraction speculatively.
-- [ ] Preserve correctness restrictions for filtered, ordered, and exact DISTINCT aggregates.
+- [x] Use the same Remote Predicate IR renderer for aggregation query filters.
+- [x] Add common request/byte/page/resource accounting through P1.3 diagnostics.
+- [x] Make composite aggregation page size configurable only if benchmarks justify it.
+- [x] Centralize aggregation pagination/resource cleanup behind a stable aggregation execution contract if more than one execution mode is required; do not add an abstraction speculatively.
+- [x] Preserve correctness restrictions for filtered, ordered, and exact DISTINCT aggregates.
 
 ## P2.3 — Statistics with Remote Predicate IR
 
@@ -560,28 +615,43 @@ Cannot prove statistics semantics or cost is unsafe
 
 The conservative fallback remains valid permanently. This phase extends the set of handles for which useful statistics can be produced.
 
-- [ ] Render supported exact Remote Predicate IR into statistics/count requests.
-- [ ] Never ignore a table handle's remote predicate.
-- [ ] Keep PREFILTER/APPROXIMATE statistics conservative unless semantics are explicitly defined.
-- [ ] Add request/document-count bounds.
-- [ ] Measure planning overhead before adding caches.
-- [ ] Add caching/selectivity improvements only through the same statistics contract.
+- [x] Render supported exact Remote Predicate IR into statistics/count requests.
+- [x] Never ignore a table handle's remote predicate.
+- [x] Keep PREFILTER/APPROXIMATE statistics conservative unless semantics are explicitly defined.
+- [x] Add request/document-count bounds.
+- [x] Measure planning overhead before adding caches.
+- [x] Add caching/selectivity improvements only through the same statistics contract.
+
+The document threshold gates per-column aggregations, not the initial exact-count
+work. Count, optional mapping lookup and optional column statistics are at most
+three logical requests; transport timeouts are per request, not an end-to-end
+planning deadline. Both mapping and statistics calls bypass backpressure retries;
+search requests additionally carry an Elasticsearch query timeout. Test the
+per-column branch, column limit, rounded mappings, timeout/partial-response and
+mapping-failure fallbacks. Measure warmed row-only and per-column planning calls
+(20 samples, median/p95, request counts and allocations) before considering cache
+work. Cache, page-size configuration and a second aggregation strategy remain
+explicitly not justified, rather than unimplemented mandatory features.
 
 ## P2.4 — Cross-feature invariants
 
-- [ ] Predicate + LIMIT.
-- [ ] Predicate + TopN.
-- [ ] Predicate + aggregation.
-- [ ] Predicate + statistics.
-- [ ] Dynamic filter + LIMIT/TopN where planner order permits.
-- [ ] Projection/handle rewrites preserve all remote state.
-- [ ] ES7/ES8 result equivalence and resource cleanup.
+- [x] Predicate + LIMIT.
+- [x] Predicate + TopN.
+- [x] Predicate + aggregation.
+- [x] Predicate + statistics.
+- [x] Dynamic filter + LIMIT/TopN where planner order permits.
+- [x] Projection/handle rewrites preserve all remote state.
+- [x] ES7/ES8 result equivalence and resource cleanup.
 
 ---
 
 # P3 — Optional SPI Extensions
 
-**Status:** NOT STARTED
+**Status:** RESEARCH DISPOSITION RECORDED — NO PRODUCTION PUSHDOWN
+
+The [execution audit](P1.4-P2-EXECUTION-DESIGN.md#p3-disposition) records why sample
+and generic join pushdown remain disabled. These were optional research items,
+not commitments to enable unproven SQL semantics.
 
 ## `applySample`
 
@@ -619,15 +689,15 @@ P1.2 Predicate Composition + Translation Contract   <- COMPLETE / MERGED / GREEN
 PRODUCTION-STABLE BASELINE                          <- P0 + P1.1 + P1.2 + TEST HARDENING
   │
   ▼
-P1.3 Permanent Diagnostics / Observability          <- NEXT AFTER P1.2 GATE
+P1.3 Permanent Diagnostics / Observability          <- COMPLETE / GREEN
   │
   ▼
-P1.4 Stable Search Execution Framework
+P1.4 Stable Search Execution Framework              <- IMPLEMENTED / LOCAL ACCEPTANCE COMPLETE
   │       ├── Scroll strategy
   │       ├── stable decoder contract
   │       └── PIT + search_after strategy after benchmarks
   ▼
-P2 Query-shape / Aggregation / Statistics Hardening
+P2 Query-shape / Aggregation / Statistics Hardening  <- IMPLEMENTED / LOCAL ACCEPTANCE COMPLETE
   │
   ▼
 P3 Optional SPI Extensions

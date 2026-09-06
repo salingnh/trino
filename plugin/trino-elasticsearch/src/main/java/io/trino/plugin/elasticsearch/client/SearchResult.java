@@ -13,6 +13,7 @@
  */
 package io.trino.plugin.elasticsearch.client;
 
+import com.fasterxml.jackson.databind.JsonNode;
 import com.google.common.collect.ImmutableList;
 
 import java.util.List;
@@ -22,11 +23,20 @@ import static java.util.Objects.requireNonNull;
 
 public record SearchResult(
         Optional<String> scrollId,
-        List<SearchDocument> hits)
+        List<SearchDocument> hits,
+        Optional<String> pointInTimeId,
+        List<JsonNode> searchAfter)
 {
+    public SearchResult(Optional<String> scrollId, List<SearchDocument> hits)
+    {
+        this(scrollId, hits, Optional.empty(), ImmutableList.of());
+    }
+
     public SearchResult
     {
         requireNonNull(scrollId, "scrollId is null");
         hits = ImmutableList.copyOf(hits);
+        requireNonNull(pointInTimeId, "pointInTimeId is null");
+        searchAfter = ImmutableList.copyOf(searchAfter);
     }
 }

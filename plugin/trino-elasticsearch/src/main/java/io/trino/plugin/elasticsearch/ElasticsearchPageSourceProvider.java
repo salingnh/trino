@@ -43,18 +43,30 @@ public class ElasticsearchPageSourceProvider
 {
     private final ElasticsearchClient client;
     private final TypeManager typeManager;
+    private final ElasticsearchPushdownDiagnostics diagnostics;
     private final ElasticsearchDynamicFilterPlanner dynamicFilterPlanner;
 
-    @Inject
     public ElasticsearchPageSourceProvider(ElasticsearchClient client, TypeManager typeManager, ElasticsearchConfig config)
+    {
+        this(client, typeManager, config, new ElasticsearchPushdownDiagnostics());
+    }
+
+    @Inject
+    public ElasticsearchPageSourceProvider(
+            ElasticsearchClient client,
+            TypeManager typeManager,
+            ElasticsearchConfig config,
+            ElasticsearchPushdownDiagnostics diagnostics)
     {
         this.client = requireNonNull(client, "client is null");
         this.typeManager = requireNonNull(typeManager, "typeManager is null");
         requireNonNull(config, "config is null");
+        this.diagnostics = requireNonNull(diagnostics, "diagnostics is null");
         this.dynamicFilterPlanner = new ElasticsearchDynamicFilterPlanner(
                 config.getDynamicFilteringMaxValues(),
                 config.getDynamicFilteringTermsBatchSize(),
-                config.getDynamicFilteringMaxQueryBytes());
+                config.getDynamicFilteringMaxQueryBytes(),
+                diagnostics);
     }
 
     @Override
@@ -84,17 +96,18 @@ public class ElasticsearchPageSourceProvider
                     elasticsearchTable,
                     columns.stream()
                             .map(ElasticsearchColumnHandle.class::cast)
-                            .collect(toImmutableList()));
+                            .collect(toImmutableList()),
+                    diagnostics);
         }
 
         // Dynamic filters are runtime join filters. Only exact Elasticsearch predicates are allowed here: join
         // re-checking can remove false positives, but cannot recover rows lost to an approximate false negative.
         TupleDomain<ElasticsearchColumnHandle> dynamicFilterPredicate = dynamicFilter.getCurrentPredicate()
                 .transformKeys(ElasticsearchColumnHandle.class::cast);
+        Optional<ElasticsearchRemotePredicate> plannedDynamicFilter = dynamicFilterPlanner.plan(dynamicFilterPredicate);
         if (dynamicFilterPredicate.isNone()) {
             return new EmptyPageSource();
         }
-        Optional<ElasticsearchRemotePredicate> plannedDynamicFilter = dynamicFilterPlanner.plan(dynamicFilterPredicate);
         if (plannedDynamicFilter.isPresent()) {
             elasticsearchTable = withRemotePredicate(
                     elasticsearchTable,
@@ -106,7 +119,7 @@ public class ElasticsearchPageSourceProvider
         }
 
         if (columns.isEmpty()) {
-            return new CountQueryPageSource(client, elasticsearchTable, elasticsearchSplit);
+            return new CountQueryPageSource(client, elasticsearchTable, elasticsearchSplit, diagnostics);
         }
 
         return new ScanQueryPageSource(
@@ -116,6 +129,7 @@ public class ElasticsearchPageSourceProvider
                 elasticsearchSplit,
                 columns.stream()
                         .map(ElasticsearchColumnHandle.class::cast)
-                        .collect(toImmutableList()));
+                        .collect(toImmutableList()),
+                diagnostics);
     }
 }

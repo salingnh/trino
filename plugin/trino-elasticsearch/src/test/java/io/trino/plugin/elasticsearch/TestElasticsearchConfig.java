@@ -15,17 +15,21 @@ package io.trino.plugin.elasticsearch;
 
 import com.google.common.collect.ImmutableMap;
 import io.airlift.units.Duration;
+import io.airlift.units.MinDuration;
 import org.junit.jupiter.api.Test;
 
 import java.io.IOException;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.Arrays;
+import java.util.List;
 import java.util.Map;
 
 import static io.airlift.configuration.testing.ConfigAssertions.assertFullMapping;
 import static io.airlift.configuration.testing.ConfigAssertions.assertRecordedDefaults;
 import static io.airlift.configuration.testing.ConfigAssertions.recordDefaults;
+import static io.airlift.testing.ValidationAssertions.assertFailsValidation;
+import static io.airlift.testing.ValidationAssertions.assertValidates;
 import static io.trino.plugin.elasticsearch.ElasticsearchConfig.Security.AWS;
 import static java.util.concurrent.TimeUnit.MILLISECONDS;
 import static java.util.concurrent.TimeUnit.MINUTES;
@@ -41,6 +45,8 @@ public class TestElasticsearchConfig
                 .setPort(9200)
                 .setDefaultSchema("default")
                 .setScrollSize(1000)
+                .setSearchStrategy(ElasticsearchConfig.SearchStrategy.SCROLL)
+                .setResponseDecoder(ElasticsearchConfig.ResponseDecoder.MATERIALIZED)
                 .setScrollTimeout(new Duration(1, MINUTES))
                 .setRequestTimeout(new Duration(10, SECONDS))
                 .setConnectTimeout(new Duration(1, SECONDS))
@@ -83,6 +89,8 @@ public class TestElasticsearchConfig
                 .put("elasticsearch.port", "9999")
                 .put("elasticsearch.default-schema-name", "test")
                 .put("elasticsearch.scroll-size", "4000")
+                .put("elasticsearch.search-strategy", "PIT")
+                .put("elasticsearch.response-decoder", "STREAMING")
                 .put("elasticsearch.scroll-timeout", "20s")
                 .put("elasticsearch.request-timeout", "1s")
                 .put("elasticsearch.connect-timeout", "10s")
@@ -118,6 +126,8 @@ public class TestElasticsearchConfig
                 .setPort(9999)
                 .setDefaultSchema("test")
                 .setScrollSize(4000)
+                .setSearchStrategy(ElasticsearchConfig.SearchStrategy.PIT)
+                .setResponseDecoder(ElasticsearchConfig.ResponseDecoder.STREAMING)
                 .setScrollTimeout(new Duration(20, SECONDS))
                 .setRequestTimeout(new Duration(1, SECONDS))
                 .setConnectTimeout(new Duration(10, SECONDS))
@@ -148,5 +158,30 @@ public class TestElasticsearchConfig
                 .setFullTextPushdownMode(FullTextPushdownMode.SAFE);
 
         assertFullMapping(properties, expected);
+    }
+
+    @Test
+    public void testStatisticsRequestTimeoutValidation()
+    {
+        assertFailsValidation(
+                new ElasticsearchConfig()
+                        .setHosts(List.of("localhost"))
+                        .setStatisticsRequestTimeout(new Duration(0, MILLISECONDS)),
+                "statisticsRequestTimeout",
+                "must be greater than or equal to 1ms",
+                MinDuration.class);
+
+        assertFailsValidation(
+                new ElasticsearchConfig()
+                        .setHosts(List.of("localhost"))
+                        .setStatisticsRequestTimeout(new Duration(0.1, MILLISECONDS)),
+                "statisticsRequestTimeout",
+                "must be greater than or equal to 1ms",
+                MinDuration.class);
+
+        assertValidates(
+                new ElasticsearchConfig()
+                        .setHosts(List.of("localhost"))
+                        .setStatisticsRequestTimeout(new Duration(1, MILLISECONDS)));
     }
 }

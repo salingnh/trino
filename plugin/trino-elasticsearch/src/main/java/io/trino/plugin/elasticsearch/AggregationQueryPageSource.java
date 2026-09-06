@@ -32,6 +32,8 @@ import java.util.Optional;
 import static io.airlift.slice.Slices.utf8Slice;
 import static io.trino.plugin.elasticsearch.ElasticsearchAggregate.Function.COUNT_ALL;
 import static io.trino.plugin.elasticsearch.ElasticsearchAggregate.Function.SUM;
+import static io.trino.plugin.elasticsearch.ElasticsearchErrorCode.ELASTICSEARCH_INVALID_RESPONSE;
+import static io.trino.plugin.elasticsearch.ElasticsearchPushdownDiagnostics.RemoteRequestKind.AGGREGATION;
 import static io.trino.plugin.elasticsearch.ElasticsearchQueryBuilder.buildAggregationQuery;
 import static io.trino.plugin.elasticsearch.ElasticsearchQueryBuilder.buildSearchQuery;
 import static io.trino.spi.StandardErrorCode.TYPE_MISMATCH;
@@ -62,6 +64,7 @@ class AggregationQueryPageSource
     private final List<ElasticsearchColumnHandle> groupingColumns;
     private final List<ElasticsearchAggregate> aggregates;
     private final List<Output> outputs;
+    private final ElasticsearchPushdownDiagnostics diagnostics;
 
     private long readTimeNanos;
     private Optional<JsonNode> afterKey = Optional.empty();
@@ -69,10 +72,16 @@ class AggregationQueryPageSource
 
     public AggregationQueryPageSource(ElasticsearchClient client, ElasticsearchTableHandle table, List<ElasticsearchColumnHandle> columns)
     {
+        this(client, table, columns, new ElasticsearchPushdownDiagnostics());
+    }
+
+    public AggregationQueryPageSource(ElasticsearchClient client, ElasticsearchTableHandle table, List<ElasticsearchColumnHandle> columns, ElasticsearchPushdownDiagnostics diagnostics)
+    {
         this.client = requireNonNull(client, "client is null");
+        this.diagnostics = requireNonNull(diagnostics, "diagnostics is null");
         requireNonNull(table, "table is null");
         this.index = table.index();
-        this.filterQuery = buildSearchQuery(table);
+        this.filterQuery = buildSearchQuery(table, diagnostics);
         ElasticsearchAggregation aggregation = table.aggregation().orElseThrow(() -> new IllegalArgumentException("table handle has no aggregation"));
         this.groupingColumns = aggregation.groupingColumns();
         this.aggregates = aggregation.aggregates();
@@ -112,15 +121,29 @@ class AggregationQueryPageSource
             return null;
         }
         long start = System.nanoTime();
-        SourcePage page = groupingColumns.isEmpty() ? globalPage() : groupedPage();
-        readTimeNanos += System.nanoTime() - start;
-        return page;
+        try {
+            SourcePage page = groupingColumns.isEmpty() ? globalPage() : groupedPage();
+            diagnostics.recordPageReturned();
+            diagnostics.recordAggregationOutput(page.getPositionCount(), page.getSizeInBytes());
+            return page;
+        }
+        catch (RuntimeException e) {
+            finished = true;
+            diagnostics.recordFailure();
+            throw e;
+        }
+        finally {
+            readTimeNanos += System.nanoTime() - start;
+        }
     }
 
     private SourcePage globalPage()
     {
         JsonNode body = buildAggregationQuery(filterQuery, groupingColumns, aggregates, COMPOSITE_SIZE, Optional.empty());
-        JsonNode response = client.aggregate(index, body);
+        JsonNode response = request(body);
+        if (!response.path("hits").path("total").path("relation").asText().equals("eq")) {
+            throw new TrinoException(ELASTICSEARCH_INVALID_RESPONSE, "Aggregation returned an inexact document count");
+        }
         long totalHits = response.path("hits").path("total").path("value").asLong();
         JsonNode metrics = response.path("aggregations");
 
@@ -136,8 +159,11 @@ class AggregationQueryPageSource
     private SourcePage groupedPage()
     {
         JsonNode body = buildAggregationQuery(filterQuery, groupingColumns, aggregates, COMPOSITE_SIZE, afterKey);
-        JsonNode groups = client.aggregate(index, body).path("aggregations").path("groups");
+        JsonNode groups = request(body).path("aggregations").path("groups");
         JsonNode buckets = groups.path("buckets");
+        if (!buckets.isArray()) {
+            throw new TrinoException(ELASTICSEARCH_INVALID_RESPONSE, "Aggregation response has no bucket array");
+        }
 
         BlockBuilder[] builders = createBuilders(buckets.size());
         for (JsonNode bucket : buckets) {
@@ -159,9 +185,25 @@ class AggregationQueryPageSource
             finished = true;
         }
         else {
-            afterKey = Optional.of(groups.path("after_key"));
+            JsonNode nextKey = groups.path("after_key");
+            if (!nextKey.isObject() || afterKey.filter(nextKey::equals).isPresent()) {
+                throw new TrinoException(ELASTICSEARCH_INVALID_RESPONSE, "Aggregation returned an invalid or non-progressing after_key");
+            }
+            afterKey = Optional.of(nextKey);
         }
         return page(builders);
+    }
+
+    private JsonNode request(JsonNode body)
+    {
+        diagnostics.recordRemoteRequest(AGGREGATION);
+        JsonNode response = client.aggregate(index, body);
+        if (response.path("timed_out").asBoolean() || response.path("_shards").path("failed").asInt() > 0
+                || (body.has("aggs") && !response.path("aggregations").isObject())) {
+            throw new TrinoException(ELASTICSEARCH_INVALID_RESPONSE, "Aggregation returned incomplete results");
+        }
+        diagnostics.recordRemotePageReceived();
+        return response;
     }
 
     private static void appendMetric(BlockBuilder builder, Output output, JsonNode metrics, long count)
@@ -268,7 +310,13 @@ class AggregationQueryPageSource
     }
 
     @Override
-    public void close() {}
+    public void close()
+    {
+        if (!finished) {
+            diagnostics.recordCancellation();
+            finished = true;
+        }
+    }
 
     private record Output(Type type, String key, Optional<ElasticsearchAggregate.Function> function) {}
 }

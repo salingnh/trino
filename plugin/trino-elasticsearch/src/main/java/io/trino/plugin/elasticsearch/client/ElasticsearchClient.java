@@ -32,6 +32,7 @@ import io.airlift.stats.TimeStat;
 import io.airlift.units.Duration;
 import io.trino.plugin.elasticsearch.AwsSecurityConfig;
 import io.trino.plugin.elasticsearch.ElasticsearchConfig;
+import io.trino.plugin.elasticsearch.ElasticsearchPushdownDiagnostics;
 import io.trino.plugin.elasticsearch.PasswordConfig;
 import io.trino.spi.TrinoException;
 import jakarta.annotation.PostConstruct;
@@ -70,10 +71,8 @@ import java.io.File;
 import java.io.IOException;
 import java.io.InputStream;
 import java.security.GeneralSecurityException;
-import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.Iterator;
-import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Map.Entry;
@@ -84,6 +83,7 @@ import java.util.Set;
 import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicReference;
+import java.util.function.Consumer;
 import java.util.function.Function;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
@@ -101,6 +101,7 @@ import static io.trino.plugin.elasticsearch.ElasticsearchErrorCode.ELASTICSEARCH
 import static java.lang.StrictMath.toIntExact;
 import static java.lang.String.format;
 import static java.nio.charset.StandardCharsets.UTF_8;
+import static java.util.Objects.requireNonNull;
 import static java.util.concurrent.Executors.newSingleThreadScheduledExecutor;
 import static java.util.concurrent.TimeUnit.MILLISECONDS;
 
@@ -118,7 +119,11 @@ public class ElasticsearchClient
     private static final Set<String> NODE_ROLES = ImmutableSet.of("data", "data_content", "data_hot", "data_warm", "data_cold", "data_frozen");
 
     private final BackpressureRestClient client;
+    private final ElasticsearchPushdownDiagnostics diagnostics;
+    private final SearchResponseDecoder searchResponseDecoder;
     private final int scrollSize;
+    private final boolean pointInTimeSearchEnabled;
+    private volatile boolean pointInTimeSupported;
     private final Duration scrollTimeout;
     private final int statisticsRequestTimeoutMillis;
 
@@ -135,16 +140,31 @@ public class ElasticsearchClient
     private final TimeStat countStats = new TimeStat(MILLISECONDS);
     private final TimeStat backpressureStats = new TimeStat(MILLISECONDS);
 
-    @Inject
     public ElasticsearchClient(
             ElasticsearchConfig config,
             Optional<AwsSecurityConfig> awsSecurityConfig,
             Optional<PasswordConfig> passwordConfig)
     {
-        client = createClient(config, awsSecurityConfig, passwordConfig, backpressureStats);
+        this(config, awsSecurityConfig, passwordConfig, new ElasticsearchPushdownDiagnostics());
+    }
+
+    @Inject
+    public ElasticsearchClient(
+            ElasticsearchConfig config,
+            Optional<AwsSecurityConfig> awsSecurityConfig,
+            Optional<PasswordConfig> passwordConfig,
+            ElasticsearchPushdownDiagnostics diagnostics)
+    {
+        client = createClient(config, awsSecurityConfig, passwordConfig, backpressureStats, diagnostics);
+        this.diagnostics = requireNonNull(diagnostics, "diagnostics is null");
 
         this.ignorePublishAddress = config.isIgnorePublishAddress();
         this.scrollSize = config.getScrollSize();
+        this.pointInTimeSearchEnabled = config.getSearchStrategy() == ElasticsearchConfig.SearchStrategy.PIT;
+        this.searchResponseDecoder = switch (config.getResponseDecoder()) {
+            case MATERIALIZED -> new MaterializedSearchResponseDecoder();
+            case STREAMING -> new StreamingSearchResponseDecoder();
+        };
         this.scrollTimeout = config.getScrollTimeout();
         this.statisticsRequestTimeoutMillis = toIntExact(config.getStatisticsRequestTimeout().toMillis());
         this.refreshInterval = config.getNodeRefreshInterval();
@@ -201,7 +221,8 @@ public class ElasticsearchClient
             ElasticsearchConfig config,
             Optional<AwsSecurityConfig> awsSecurityConfig,
             Optional<PasswordConfig> passwordConfig,
-            TimeStat backpressureStats)
+            TimeStat backpressureStats,
+            ElasticsearchPushdownDiagnostics diagnostics)
     {
         RestClientBuilder builder = RestClient.builder(
                 config.getHosts().stream()
@@ -247,7 +268,7 @@ public class ElasticsearchClient
             return clientBuilder;
         });
 
-        return new BackpressureRestClient(builder.build(), config, backpressureStats);
+        return new BackpressureRestClient(builder.build(), config, backpressureStats, diagnostics);
     }
 
     private static AwsCredentialsProvider getAwsCredentialsProvider(AwsSecurityConfig config)
@@ -458,9 +479,19 @@ public class ElasticsearchClient
 
     public IndexMetadata getIndexMetadata(String index, boolean useBoundedKeyword)
     {
+        return getIndexMetadata(index, useBoundedKeyword, false);
+    }
+
+    public IndexMetadata getIndexMetadataForStatistics(String index, boolean useBoundedKeyword)
+    {
+        return getIndexMetadata(index, useBoundedKeyword, true);
+    }
+
+    private IndexMetadata getIndexMetadata(String index, boolean useBoundedKeyword, boolean statisticsRequest)
+    {
         String path = format("/%s/_mappings", index);
 
-        return doRequest(path, body -> {
+        return doRequest(path, statisticsRequest, body -> {
             try {
                 JsonNode mappings = JSON_MAPPER.readTree(body)
                         .elements().next()
@@ -512,6 +543,8 @@ public class ElasticsearchClient
             JsonNode metaNode = nullSafeNode(metaProperties, name);
             boolean isArray = !metaNode.isNull() && metaNode.has("isArray") && metaNode.get("isArray").asBoolean();
             boolean asRawJson = !metaNode.isNull() && metaNode.has("asRawJson") && metaNode.get("asRawJson").asBoolean();
+            boolean normalizedKeyword = type.equals("keyword") && value.get("normalizer") != null;
+            boolean sourceValueSemanticsExact = !value.has("null_value") && !normalizedKeyword;
 
             // While it is possible to handle isArray and asRawJson in the same column by creating a ARRAY(VARCHAR) type, we chose not to take
             // this route, as it will likely lead to confusion in dealing with array syntax in Trino and potentially nested array and other
@@ -528,12 +561,12 @@ public class ElasticsearchClient
                     if (value.has("format")) {
                         formats = Arrays.asList(value.get("format").asText().split("\\|\\|"));
                     }
-                    boolean aggregatable = !value.has("doc_values") || value.get("doc_values").asBoolean();
-                    result.add(new IndexMetadata.Field(asRawJson, isArray, name, new IndexMetadata.DateTimeType(formats, aggregatable)));
+                    boolean aggregatable = sourceValueSemanticsExact && (!value.has("doc_values") || value.get("doc_values").asBoolean());
+                    result.add(new IndexMetadata.Field(asRawJson, isArray, name, new IndexMetadata.DateTimeType(formats, aggregatable, sourceValueSemanticsExact)));
                 }
                 case "scaled_float" -> {
-                    boolean aggregatable = !value.has("doc_values") || value.get("doc_values").asBoolean();
-                    result.add(new IndexMetadata.Field(asRawJson, isArray, name, new IndexMetadata.ScaledFloatType(value.get("scaling_factor").asDouble(), aggregatable)));
+                    boolean aggregatable = sourceValueSemanticsExact && (!value.has("doc_values") || value.get("doc_values").asBoolean());
+                    result.add(new IndexMetadata.Field(asRawJson, isArray, name, new IndexMetadata.ScaledFloatType(value.get("scaling_factor").asDouble(), aggregatable, sourceValueSemanticsExact)));
                 }
                 case "nested", "object" -> {
                     if (value.has("properties")) {
@@ -544,7 +577,7 @@ public class ElasticsearchClient
                     }
                 }
                 default -> {
-                    boolean aggregatable = !value.has("doc_values") || value.get("doc_values").asBoolean();
+                    boolean aggregatable = sourceValueSemanticsExact && (!value.has("doc_values") || value.get("doc_values").asBoolean());
                     IndexMetadata.PrimitiveType primitiveType;
                     if (type.equals("text")) {
                         Optional<String> keyword = keywordSubfield(value, useBoundedKeyword);
@@ -552,15 +585,19 @@ public class ElasticsearchClient
                                 .map(keywordName -> value.path("fields").path(keywordName))
                                 .map(ElasticsearchClient::hasDocValues)
                                 .orElse(false);
-                        primitiveType = new IndexMetadata.PrimitiveType(type, keyword, keywordAggregatable);
+                        primitiveType = new IndexMetadata.PrimitiveType(type, keyword, keywordAggregatable && sourceValueSemanticsExact, sourceValueSemanticsExact);
                     }
-                    else if (type.equals("keyword") && value.get("normalizer") != null) {
-                        // A keyword field with a normalizer stores a rewritten (for example lowercased) value, not the
-                        // verbatim source, so it is not exact for predicate/sort/aggregation pushdown; treat it as analyzed text
-                        primitiveType = new IndexMetadata.PrimitiveType("text", Optional.empty(), false);
+                    else if (type.equals("keyword") && !sourceValueSemanticsExact) {
+                        // A normalizer or null_value rewrites the indexed value while _source remains unchanged. Treat the
+                        // field as analyzed text so exact predicate/sort/aggregation paths cannot claim source semantics.
+                        primitiveType = new IndexMetadata.PrimitiveType("text", Optional.empty(), false, false);
                     }
                     else {
-                        primitiveType = new IndexMetadata.PrimitiveType(type, Optional.empty(), aggregatable && IndexMetadata.PrimitiveType.isDocValueType(type));
+                        primitiveType = new IndexMetadata.PrimitiveType(
+                                type,
+                                Optional.empty(),
+                                aggregatable && IndexMetadata.PrimitiveType.isDocValueType(type),
+                                sourceValueSemanticsExact);
                     }
                     result.add(new IndexMetadata.Field(asRawJson, isArray, name, primitiveType));
                 }
@@ -584,9 +621,9 @@ public class ElasticsearchClient
             if (type == null || !"keyword".equals(type.asText())) {
                 continue;
             }
-            // A normalizer rewrites the value (for example lowercasing), so the sub-field is not a verbatim copy of the
-            // source and is unsafe for exact predicate/sort/aggregation pushdown
-            if (subfieldNode.get("normalizer") != null) {
+            // A normalizer or null_value rewrites the indexed value while _source remains unchanged, so the sub-field
+            // cannot be used as an exact source-value predicate/sort/aggregation target.
+            if (subfieldNode.get("normalizer") != null || subfieldNode.has("null_value")) {
                 continue;
             }
             // Exact term/prefix predicates use the inverted index and do not require doc values. A keyword field with
@@ -657,6 +694,40 @@ public class ElasticsearchClient
 
     public SearchResult beginSearch(String index, int shard, JsonNode query, Optional<List<String>> fields, List<String> documentFields, List<JsonNode> sort, OptionalLong limit)
     {
+        return beginSearch(index, shard, query, fields, documentFields, sort, limit, _ -> {});
+    }
+
+    public SearchResult beginSearch(String index, int shard, JsonNode query, Optional<List<String>> fields, List<String> documentFields, List<JsonNode> sort, OptionalLong limit, Consumer<String> context)
+    {
+        ObjectNode searchBody = searchBody(query, fields, documentFields, sort, limit);
+
+        LOG.debug("Begin search: %s:%s, query: %s", index, shard, searchBody);
+
+        String endpoint = format("/%s/_search?preference=_shards:%s&scroll=%sms", index, shard, scrollTimeout.toMillis());
+
+        long start = System.nanoTime();
+        try {
+            Response response = client.performRequest(
+                    "POST",
+                    endpoint,
+                    ImmutableMap.of(),
+                    new StringEntity(searchBody.toString(), UTF_8),
+                    new BasicHeader("Content-Type", "application/json"));
+            return parseSearchResponse(response, context, _ -> {});
+        }
+        catch (ResponseException e) {
+            throw propagate(e);
+        }
+        catch (IOException e) {
+            throw new TrinoException(ELASTICSEARCH_CONNECTION_ERROR, e);
+        }
+        finally {
+            searchStats.add(Duration.nanosSince(start));
+        }
+    }
+
+    private ObjectNode searchBody(JsonNode query, Optional<List<String>> fields, List<String> documentFields, List<JsonNode> sort, OptionalLong limit)
+    {
         ObjectNode searchBody = JSON.objectNode();
         searchBody.set("query", query);
 
@@ -692,19 +763,68 @@ public class ElasticsearchClient
             searchBody.set("docvalue_fields", docFields);
         }
 
-        LOG.debug("Begin search: %s:%s, query: %s", index, shard, searchBody);
+        return searchBody;
+    }
 
-        String endpoint = format("/%s/_search?preference=_shards:%s&scroll=%sms", index, shard, scrollTimeout.toMillis());
+    public boolean isPointInTimeSearchEnabled()
+    {
+        return pointInTimeSearchEnabled;
+    }
 
-        long start = System.nanoTime();
+    public String openPointInTime(String index, int shard)
+    {
+        if (!pointInTimeSupported) {
+            JsonNode info = pointInTimeRequest("GET", "/", JSON.objectNode());
+            String[] version = info.path("version").path("number").asText().split("\\.");
+            if (version.length < 2 || !(version[0].equals("8") || (version[0].equals("7") && Integer.parseInt(version[1]) >= 17))) {
+                throw new TrinoException(ELASTICSEARCH_QUERY_FAILURE, "PIT search requires Elasticsearch 7.17 or 8.x; use SCROLL for this cluster");
+            }
+            pointInTimeSupported = true;
+        }
+        JsonNode response = pointInTimeRequest(
+                "POST",
+                format("/%s/_pit?keep_alive=%sms&preference=_shards:%s", index, scrollTimeout.toMillis(), shard),
+                JSON.objectNode());
+        String id = response.path("id").asText();
+        if (id.isEmpty()) {
+            throw new TrinoException(ELASTICSEARCH_INVALID_RESPONSE, "Missing point-in-time identifier");
+        }
+        return id;
+    }
+
+    public SearchResult searchPointInTime(
+            String id,
+            JsonNode query,
+            Optional<List<String>> fields,
+            List<String> documentFields,
+            List<JsonNode> sort,
+            OptionalLong limit,
+            List<JsonNode> searchAfter,
+            Consumer<String> context)
+    {
+        ObjectNode body = searchBody(query, fields, documentFields, sort, limit);
+        body.set("pit", JSON.objectNode().put("id", id).put("keep_alive", scrollTimeout.toMillis() + "ms"));
+        body.put("track_total_hits", false);
+        // Stable within the PIT, unlike _doc across independently executed requests.
+        ArrayNode sorts = JSON.arrayNode();
+        sort.stream().filter(value -> !value.asText().equals("_doc") && !value.has("_doc")).forEach(sorts::add);
+        if (sort.isEmpty()) {
+            sorts.add(JSON.objectNode().put("_score", "desc"));
+        }
+        sorts.add(JSON.objectNode().put("_shard_doc", "asc"));
+        body.set("sort", sorts);
+        if (!searchAfter.isEmpty()) {
+            ArrayNode values = JSON.arrayNode();
+            searchAfter.forEach(values::add);
+            body.set("search_after", values);
+        }
         try {
-            Response response = client.performRequest(
+            return parseSearchResponse(client.performRequest(
                     "POST",
-                    endpoint,
+                    "/_search?allow_partial_search_results=false",
                     ImmutableMap.of(),
-                    new StringEntity(searchBody.toString(), UTF_8),
-                    new BasicHeader("Content-Type", "application/json"));
-            return parseSearchResponse(response);
+                    new StringEntity(body.toString(), UTF_8),
+                    new BasicHeader("Content-Type", "application/json")), _ -> {}, context);
         }
         catch (ResponseException e) {
             throw propagate(e);
@@ -712,12 +832,40 @@ public class ElasticsearchClient
         catch (IOException e) {
             throw new TrinoException(ELASTICSEARCH_CONNECTION_ERROR, e);
         }
-        finally {
-            searchStats.add(Duration.nanosSince(start));
+    }
+
+    public void closePointInTime(String id)
+    {
+        pointInTimeRequest("DELETE", "/_pit", JSON.objectNode().put("id", id));
+    }
+
+    private JsonNode pointInTimeRequest(String method, String endpoint, JsonNode body)
+    {
+        try {
+            Response response = client.performRequest(
+                    method,
+                    endpoint,
+                    ImmutableMap.of(),
+                    body.isEmpty() ? null : new StringEntity(body.toString(), UTF_8),
+                    new BasicHeader("Content-Type", "application/json"));
+            try (InputStream input = response.getEntity().getContent()) {
+                return JSON_MAPPER.readTree(input);
+            }
+        }
+        catch (ResponseException e) {
+            throw propagate(e);
+        }
+        catch (IOException e) {
+            throw new TrinoException(ELASTICSEARCH_CONNECTION_ERROR, e);
         }
     }
 
     public SearchResult nextPage(String scrollId)
+    {
+        return nextPage(scrollId, _ -> {});
+    }
+
+    public SearchResult nextPage(String scrollId, Consumer<String> context)
     {
         LOG.debug("Next page: %s", scrollId);
 
@@ -733,7 +881,7 @@ public class ElasticsearchClient
                     ImmutableMap.of(),
                     new StringEntity(scrollBody.toString(), UTF_8),
                     new BasicHeader("Content-Type", "application/json"));
-            return parseSearchResponse(response);
+            return parseSearchResponse(response, context, _ -> {});
         }
         catch (ResponseException e) {
             throw propagate(e);
@@ -786,8 +934,21 @@ public class ElasticsearchClient
 
     public IndexStatistics getIndexStatistics(String index, JsonNode query, List<String> fields, Set<String> rangeFields, boolean includeCardinality)
     {
+        diagnostics.recordRemoteRequest(ElasticsearchPushdownDiagnostics.RemoteRequestKind.STATISTICS);
+        try {
+            return fetchIndexStatistics(index, query, fields, rangeFields, includeCardinality);
+        }
+        catch (RuntimeException e) {
+            diagnostics.recordFailure();
+            throw e;
+        }
+    }
+
+    private IndexStatistics fetchIndexStatistics(String index, JsonNode query, List<String> fields, Set<String> rangeFields, boolean includeCardinality)
+    {
         ObjectNode body = JSON.objectNode();
         body.put("size", 0);
+        body.put("timeout", statisticsRequestTimeoutMillis + "ms");
         body.put("track_total_hits", true);
         body.set("query", query);
 
@@ -828,6 +989,10 @@ public class ElasticsearchClient
 
         try (InputStream input = response.getEntity().getContent()) {
             JsonNode root = JSON_MAPPER.readTree(input);
+            if (root.path("timed_out").asBoolean() || root.path("_shards").path("failed").asInt() > 0
+                    || !root.path("hits").path("total").path("relation").asText().equals("eq")) {
+                throw new TrinoException(ELASTICSEARCH_INVALID_RESPONSE, "Statistics returned incomplete results");
+            }
             long documentCount = root.path("hits").path("total").path("value").asLong();
 
             JsonNode aggregationResults = root.path("aggregations");
@@ -910,70 +1075,14 @@ public class ElasticsearchClient
         }
     }
 
-    private SearchResult parseSearchResponse(Response response)
+    private SearchResult parseSearchResponse(Response response, Consumer<String> scrollContext, Consumer<String> pointInTimeContext)
     {
-        try {
-            String responseBody = EntityUtils.toString(response.getEntity());
-            JsonNode root = JSON_MAPPER.readTree(responseBody);
-
-            Optional<String> scrollId = Optional.ofNullable(root.get("_scroll_id"))
-                    .map(JsonNode::asText);
-
-            JsonNode hitsNode = root.get("hits").get("hits");
-            ImmutableList.Builder<SearchDocument> hits = ImmutableList.builder();
-
-            for (JsonNode hitNode : hitsNode) {
-                String id = hitNode.get("_id").asText();
-                float score = hitNode.has("_score") && !hitNode.get("_score").isNull()
-                        ? hitNode.get("_score").floatValue()
-                        : Float.NaN;
-
-                JsonNode sourceNode = hitNode.get("_source");
-                String sourceAsString = sourceNode != null ? sourceNode.toString() : "{}";
-                long sourceLength = sourceAsString.getBytes(UTF_8).length;
-                @SuppressWarnings("unchecked")
-                Map<String, Object> sourceAsMap = sourceNode != null
-                        ? JSON_MAPPER.convertValue(sourceNode, Map.class)
-                        : ImmutableMap.of();
-
-                Map<String, List<Object>> fields = ImmutableMap.of();
-                if (hitNode.has("fields")) {
-                    Map<String, List<Object>> fieldsMap = new LinkedHashMap<>();
-                    for (Entry<String, JsonNode> fieldEntry : hitNode.get("fields").properties()) {
-                        List<Object> values = new ArrayList<>();
-                        for (JsonNode valueNode : fieldEntry.getValue()) {
-                            values.add(nodeToValue(valueNode));
-                        }
-                        fieldsMap.put(fieldEntry.getKey(), values);
-                    }
-                    fields = ImmutableMap.copyOf(fieldsMap);
-                }
-
-                hits.add(new SearchDocument(id, score, sourceAsMap, sourceAsString, sourceLength, fields));
-            }
-
-            return new SearchResult(scrollId, hits.build());
+        try (InputStream input = response.getEntity().getContent()) {
+            return searchResponseDecoder.decode(input, scrollContext, pointInTimeContext);
         }
         catch (IOException e) {
             throw new TrinoException(ELASTICSEARCH_INVALID_RESPONSE, e);
         }
-    }
-
-    private static Object nodeToValue(JsonNode node)
-    {
-        if (node.isTextual()) {
-            return node.asText();
-        }
-        if (node.isNumber()) {
-            return node.numberValue();
-        }
-        if (node.isBoolean()) {
-            return node.booleanValue();
-        }
-        if (node.isNull()) {
-            return null;
-        }
-        throw new IllegalArgumentException("Unsupported node type: " + node.getClass());
     }
 
     @Managed
@@ -1006,11 +1115,18 @@ public class ElasticsearchClient
 
     private <T> T doRequest(String path, ResponseHandler<T> handler)
     {
+        return doRequest(path, false, handler);
+    }
+
+    private <T> T doRequest(String path, boolean statisticsRequest, ResponseHandler<T> handler)
+    {
         checkArgument(path.startsWith("/"), "path must be an absolute path");
 
         Response response;
         try {
-            response = client.performRequest("GET", path);
+            response = statisticsRequest
+                    ? client.performRequestWithTimeout("GET", path, ImmutableMap.of(), null, statisticsRequestTimeoutMillis)
+                    : client.performRequest("GET", path);
         }
         catch (IOException e) {
             throw new TrinoException(ELASTICSEARCH_CONNECTION_ERROR, e);

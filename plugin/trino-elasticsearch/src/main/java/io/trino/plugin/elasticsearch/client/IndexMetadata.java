@@ -52,14 +52,25 @@ public record IndexMetadata(ObjectType schema)
             @JsonSubTypes.Type(value = PrimitiveType.class, name = "primitive"),
             @JsonSubTypes.Type(value = ScaledFloatType.class, name = "scaled_float"),
     })
-    public interface Type {}
+    public interface Type
+    {
+        default boolean sourceValueSemanticsExact()
+        {
+            return true;
+        }
+    }
 
-    public record PrimitiveType(String name, Optional<String> keyword, boolean aggregatable)
+    public record PrimitiveType(String name, Optional<String> keyword, boolean aggregatable, boolean sourceValueSemanticsExact)
             implements Type
     {
+        public PrimitiveType(String name, Optional<String> keyword, boolean aggregatable)
+        {
+            this(name, keyword, aggregatable, true);
+        }
+
         public PrimitiveType(String name, Optional<String> keyword)
         {
-            this(name, keyword, isDocValueType(name) || keyword.isPresent());
+            this(name, keyword, isDocValueType(name) || keyword.isPresent(), true);
         }
 
         public PrimitiveType(String name)
@@ -82,12 +93,17 @@ public record IndexMetadata(ObjectType schema)
         }
     }
 
-    public record DateTimeType(List<String> formats, boolean aggregatable)
+    public record DateTimeType(List<String> formats, boolean aggregatable, boolean sourceValueSemanticsExact)
             implements Type
     {
+        public DateTimeType(List<String> formats, boolean aggregatable)
+        {
+            this(formats, aggregatable, true);
+        }
+
         public DateTimeType(List<String> formats)
         {
-            this(formats, true);
+            this(formats, true, true);
         }
 
         public DateTimeType
@@ -107,12 +123,17 @@ public record IndexMetadata(ObjectType schema)
         }
     }
 
-    public record ScaledFloatType(double scale, boolean aggregatable)
+    public record ScaledFloatType(double scale, boolean aggregatable, boolean sourceValueSemanticsExact)
             implements Type
     {
+        public ScaledFloatType(double scale, boolean aggregatable)
+        {
+            this(scale, aggregatable, true);
+        }
+
         public ScaledFloatType(double scale)
         {
-            this(scale, true);
+            this(scale, true, true);
         }
     }
 }

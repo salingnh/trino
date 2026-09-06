@@ -32,6 +32,7 @@ import static io.airlift.slice.Slices.utf8Slice;
 import static io.trino.spi.type.IntegerType.INTEGER;
 import static io.trino.spi.type.TimestampType.TIMESTAMP_MILLIS;
 import static io.trino.spi.type.VarcharType.VARCHAR;
+import static io.trino.type.JsonType.JSON;
 import static org.assertj.core.api.Assertions.assertThat;
 
 public class TestElasticsearchDynamicFilterPlanner
@@ -54,6 +55,47 @@ public class TestElasticsearchDynamicFilterPlanner
             new PrimitiveType("date"),
             new TimestampDecoder.Descriptor("EventTime"),
             true);
+
+    @Test
+    public void testDynamicFilterOutcomes()
+    {
+        ElasticsearchPushdownDiagnostics diagnostics = new ElasticsearchPushdownDiagnostics();
+        ElasticsearchDynamicFilterPlanner planner = new ElasticsearchDynamicFilterPlanner(100, 10, 10_000, diagnostics);
+        assertThat(planner.plan(TupleDomain.all())).isEmpty();
+        assertThat(planner.plan(TupleDomain.none())).isEmpty();
+        assertThat(planner.plan(TupleDomain.withColumnDomains(Map.of(ID, Domain.singleValue(INTEGER, 1L))))).isPresent();
+        assertThat(planner.plan(TupleDomain.withColumnDomains(Map.of(ANALYZED_TEXT, Domain.singleValue(VARCHAR, utf8Slice("value")))))).isEmpty();
+        assertThat(planner.plan(TupleDomain.withColumnDomains(Map.of(
+                ID, Domain.singleValue(INTEGER, 1L),
+                ANALYZED_TEXT, Domain.singleValue(VARCHAR, utf8Slice("value")))))).isPresent();
+
+        assertThat(diagnostics.getDynamicFilterOutcomes()).containsExactlyInAnyOrderEntriesOf(Map.of(
+                "UNRESTRICTED", 1L,
+                "EMPTY", 1L,
+                "PUSHED", 1L,
+                "REJECTED", 1L,
+                "PARTIALLY_PUSHED", 1L));
+        assertThat(diagnostics.snapshot().dynamicFilterOutcomes()).isEqualTo(diagnostics.getDynamicFilterOutcomes());
+        assertThat(diagnostics.getDynamicFilterPlans()).isEqualTo(5);
+    }
+
+    @Test
+    public void testDiagnosticsDoNotRequireOrderableUnsupportedDomain()
+    {
+        ElasticsearchPushdownDiagnostics diagnostics = new ElasticsearchPushdownDiagnostics();
+        ElasticsearchDynamicFilterPlanner planner = new ElasticsearchDynamicFilterPlanner(100, 10, 10_000, diagnostics);
+        ElasticsearchColumnHandle column = new ElasticsearchColumnHandle(
+                List.of("payload"),
+                JSON,
+                new PrimitiveType("text"),
+                new VarcharDecoder.Descriptor("payload"),
+                false);
+
+        assertThat(planner.plan(TupleDomain.withColumnDomains(Map.of(column, Domain.onlyNull(JSON))))).isEmpty();
+        assertThat(diagnostics.snapshot().dynamicFilterDomainsReceived()).isEqualTo(1);
+        assertThat(diagnostics.snapshot().dynamicFilterDomainsRejected()).isEqualTo(1);
+        assertThat(diagnostics.snapshot().dynamicFilterValuesReceived()).isZero();
+    }
 
     @Test
     public void testSmallDiscreteFilterUsesTermsAndPreservesCase()
@@ -144,6 +186,46 @@ public class TestElasticsearchDynamicFilterPlanner
 
         // Dynamic filtering must never use approximate analyzed-text matching: false negatives would corrupt join results.
         assertThat(planner.plan(TupleDomain.withColumnDomains(Map.of(ANALYZED_TEXT, domain)))).isEmpty();
+    }
+
+    @Test
+    public void testDynamicFilterDiagnosticsAccountBatchesAndValues()
+    {
+        ElasticsearchPushdownDiagnostics diagnostics = new ElasticsearchPushdownDiagnostics();
+        ElasticsearchDynamicFilterPlanner planner = new ElasticsearchDynamicFilterPlanner(10_000, 1_000, 1_048_576, diagnostics);
+        Domain domain = Domain.multipleValues(INTEGER, values(2_500));
+
+        assertThat(planner.plan(TupleDomain.withColumnDomains(Map.of(ID, domain)))).isPresent();
+
+        ElasticsearchPushdownDiagnostics.Snapshot snapshot = diagnostics.snapshot();
+        assertThat(snapshot.dynamicFilterPlans()).isEqualTo(1);
+        assertThat(snapshot.dynamicFilterDomainsReceived()).isEqualTo(1);
+        assertThat(snapshot.dynamicFilterValuesReceived()).isEqualTo(2_500);
+        assertThat(snapshot.dynamicFilterPredicatesPushed()).isEqualTo(1);
+        assertThat(snapshot.dynamicFilterValuesPushed()).isEqualTo(2_500);
+        assertThat(snapshot.dynamicFilterTermsBatches()).isEqualTo(3);
+        assertThat(snapshot.dynamicFilterDomainsRejected()).isZero();
+        assertThat(snapshot.dynamicFilterEstimatedQueryBytes()).isPositive();
+    }
+
+    @Test
+    public void testDynamicFilterDiagnosticsAccountRejectedDomain()
+    {
+        ElasticsearchPushdownDiagnostics diagnostics = new ElasticsearchPushdownDiagnostics();
+        ElasticsearchDynamicFilterPlanner planner = new ElasticsearchDynamicFilterPlanner(5, 2, 1_048_576, diagnostics);
+        Domain domain = Domain.multipleValues(INTEGER, values(6));
+
+        assertThat(planner.plan(TupleDomain.withColumnDomains(Map.of(ID, domain)))).isEmpty();
+
+        ElasticsearchPushdownDiagnostics.Snapshot snapshot = diagnostics.snapshot();
+        assertThat(snapshot.dynamicFilterPlans()).isEqualTo(1);
+        assertThat(snapshot.dynamicFilterDomainsReceived()).isEqualTo(1);
+        assertThat(snapshot.dynamicFilterValuesReceived()).isEqualTo(6);
+        assertThat(snapshot.dynamicFilterPredicatesPushed()).isZero();
+        assertThat(snapshot.dynamicFilterValuesPushed()).isZero();
+        assertThat(snapshot.dynamicFilterTermsBatches()).isZero();
+        assertThat(snapshot.dynamicFilterDomainsRejected()).isEqualTo(1);
+        assertThat(snapshot.dynamicFilterEstimatedQueryBytes()).isZero();
     }
 
     private static List<Long> values(int count)

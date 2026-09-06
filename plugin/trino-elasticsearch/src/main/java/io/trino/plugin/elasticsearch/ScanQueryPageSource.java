@@ -13,13 +13,9 @@
  */
 package io.trino.plugin.elasticsearch;
 
-import com.fasterxml.jackson.databind.JsonNode;
-import com.google.common.collect.AbstractIterator;
 import com.google.common.collect.ImmutableList;
-import io.airlift.log.Logger;
 import io.trino.plugin.elasticsearch.client.ElasticsearchClient;
 import io.trino.plugin.elasticsearch.client.SearchDocument;
-import io.trino.plugin.elasticsearch.client.SearchResult;
 import io.trino.plugin.elasticsearch.decoders.Decoder;
 import io.trino.spi.Page;
 import io.trino.spi.block.Block;
@@ -37,14 +33,10 @@ import java.util.List;
 import java.util.Map;
 import java.util.Map.Entry;
 import java.util.Optional;
-import java.util.OptionalLong;
-import java.util.function.Supplier;
 
 import static com.google.common.collect.ImmutableList.toImmutableList;
 import static io.trino.plugin.elasticsearch.BuiltinColumns.SOURCE;
 import static io.trino.plugin.elasticsearch.BuiltinColumns.isBuiltinColumn;
-import static io.trino.plugin.elasticsearch.ElasticsearchQueryBuilder.buildSearchQuery;
-import static io.trino.plugin.elasticsearch.ElasticsearchQueryBuilder.buildSort;
 import static io.trino.spi.type.TimestampType.TIMESTAMP_MILLIS;
 import static java.util.Objects.requireNonNull;
 import static java.util.function.Predicate.isEqual;
@@ -53,15 +45,13 @@ import static java.util.stream.Collectors.toList;
 public class ScanQueryPageSource
         implements ConnectorPageSource
 {
-    private static final Logger LOG = Logger.get(ScanQueryPageSource.class);
-
     private final List<Decoder> decoders;
 
-    private final SearchDocumentIterator iterator;
+    private final SearchExecution iterator;
     private final BlockBuilder[] columnBuilders;
     private final List<ElasticsearchColumnHandle> columns;
+    private final ElasticsearchPushdownDiagnostics diagnostics;
     private long totalBytes;
-    private long readTimeNanos;
 
     public ScanQueryPageSource(
             ElasticsearchClient client,
@@ -70,9 +60,21 @@ public class ScanQueryPageSource
             ElasticsearchSplit split,
             List<ElasticsearchColumnHandle> columns)
     {
+        this(client, typeManager, table, split, columns, new ElasticsearchPushdownDiagnostics());
+    }
+
+    ScanQueryPageSource(
+            ElasticsearchClient client,
+            TypeManager typeManager,
+            ElasticsearchTableHandle table,
+            ElasticsearchSplit split,
+            List<ElasticsearchColumnHandle> columns,
+            ElasticsearchPushdownDiagnostics diagnostics)
+    {
         requireNonNull(client, "client is null");
         requireNonNull(typeManager, "typeManager is null");
         requireNonNull(columns, "columns is null");
+        this.diagnostics = requireNonNull(diagnostics, "diagnostics is null");
 
         this.columns = ImmutableList.copyOf(columns);
 
@@ -101,19 +103,10 @@ public class ScanQueryPageSource
                 .filter(name -> !isBuiltinColumn(name))
                 .collect(toList());
 
-        List<JsonNode> sort = buildSort(table.sortOrder(), table.query().isPresent());
-
-        long start = System.nanoTime();
-        SearchResult searchResult = client.beginSearch(
-                split.index(),
-                split.shard(),
-                buildSearchQuery(table),
-                needAllFields ? Optional.empty() : Optional.of(requiredFields),
-                documentFields,
-                sort,
-                table.limit());
-        readTimeNanos += System.nanoTime() - start;
-        this.iterator = new SearchDocumentIterator(client, () -> searchResult, table.limit());
+        this.iterator = new SearchExecution(
+                SearchExecutionStrategies.create(client, table, split, needAllFields ? Optional.empty() : Optional.of(requiredFields), documentFields, diagnostics),
+                table.limit(),
+                diagnostics);
     }
 
     @Override
@@ -125,13 +118,13 @@ public class ScanQueryPageSource
     @Override
     public long getReadTimeNanos()
     {
-        return readTimeNanos + iterator.getReadTimeNanos();
+        return iterator.getReadTimeNanos();
     }
 
     @Override
     public boolean isFinished()
     {
-        return !iterator.hasNext();
+        return iterator.isClosed() || !iterator.hasNext();
     }
 
     @Override
@@ -142,6 +135,20 @@ public class ScanQueryPageSource
 
     @Override
     public SourcePage getNextSourcePage()
+    {
+        if (iterator.isClosed()) {
+            return null;
+        }
+        try {
+            return readPage();
+        }
+        catch (RuntimeException e) {
+            iterator.fail();
+            throw e;
+        }
+    }
+
+    private SourcePage readPage()
     {
         long size = 0;
         while (size < PageBuilderStatus.DEFAULT_MAX_PAGE_SIZE_IN_BYTES && iterator.hasNext()) {
@@ -163,6 +170,8 @@ public class ScanQueryPageSource
             }
 
             totalBytes += document.sourceLength();
+            diagnostics.recordDecodedRows(1, document.sourceLength());
+            iterator.documentDecoded();
 
             size = Arrays.stream(columnBuilders)
                     .mapToLong(BlockBuilder::getSizeInBytes)
@@ -175,6 +184,7 @@ public class ScanQueryPageSource
             columnBuilders[i] = columnBuilders[i].newBlockBuilderLike(null);
         }
 
+        diagnostics.recordPageReturned();
         return SourcePage.create(new Page(blocks));
     }
 
@@ -254,85 +264,5 @@ public class ScanQueryPageSource
         }
 
         return base + "." + element;
-    }
-
-    private static class SearchDocumentIterator
-            extends AbstractIterator<SearchDocument>
-    {
-        private final ElasticsearchClient client;
-        private final Supplier<SearchResult> first;
-        private final OptionalLong limit;
-
-        private List<SearchDocument> currentHits;
-        private String scrollId;
-        private int currentPosition;
-
-        private long readTimeNanos;
-        private long totalRecordCount;
-
-        public SearchDocumentIterator(ElasticsearchClient client, Supplier<SearchResult> first, OptionalLong limit)
-        {
-            this.client = client;
-            this.first = first;
-            this.limit = limit;
-            this.totalRecordCount = 0;
-        }
-
-        public long getReadTimeNanos()
-        {
-            return readTimeNanos;
-        }
-
-        @Override
-        protected SearchDocument computeNext()
-        {
-            if (limit.isPresent() && totalRecordCount == limit.orElseThrow()) {
-                // No more record is necessary.
-                return endOfData();
-            }
-
-            if (scrollId == null) {
-                long start = System.nanoTime();
-                SearchResult result = first.get();
-                readTimeNanos += System.nanoTime() - start;
-                reset(result);
-            }
-            else if (currentPosition == currentHits.size()) {
-                long start = System.nanoTime();
-                SearchResult result = client.nextPage(scrollId);
-                readTimeNanos += System.nanoTime() - start;
-                reset(result);
-            }
-
-            if (currentPosition == currentHits.size()) {
-                return endOfData();
-            }
-
-            SearchDocument document = currentHits.get(currentPosition);
-            currentPosition++;
-            totalRecordCount++;
-
-            return document;
-        }
-
-        private void reset(SearchResult result)
-        {
-            scrollId = result.scrollId().orElse(null);
-            currentHits = result.hits();
-            currentPosition = 0;
-        }
-
-        public void close()
-        {
-            if (scrollId != null) {
-                try {
-                    client.clearScroll(scrollId);
-                }
-                catch (Exception e) {
-                    // ignore
-                    LOG.debug(e, "Error clearing scroll");
-                }
-            }
-        }
     }
 }

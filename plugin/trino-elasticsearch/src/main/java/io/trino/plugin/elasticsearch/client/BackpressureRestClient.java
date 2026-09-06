@@ -23,6 +23,7 @@ import dev.failsafe.function.CheckedSupplier;
 import io.airlift.log.Logger;
 import io.airlift.stats.TimeStat;
 import io.trino.plugin.elasticsearch.ElasticsearchConfig;
+import io.trino.plugin.elasticsearch.ElasticsearchPushdownDiagnostics;
 import org.apache.http.Header;
 import org.apache.http.HttpEntity;
 import org.apache.http.HttpHost;
@@ -56,10 +57,11 @@ public class BackpressureRestClient
     private final TimeStat backpressureStats;
     private final ThreadLocal<Stopwatch> stopwatch = ThreadLocal.withInitial(Stopwatch::createUnstarted);
 
-    public BackpressureRestClient(RestClient delegate, ElasticsearchConfig config, TimeStat backpressureStats)
+    public BackpressureRestClient(RestClient delegate, ElasticsearchConfig config, TimeStat backpressureStats, ElasticsearchPushdownDiagnostics diagnostics)
     {
         this.delegate = requireNonNull(delegate, "restClient is null");
         this.backpressureStats = requireNonNull(backpressureStats, "backpressureStats is null");
+        requireNonNull(diagnostics, "diagnostics is null");
         retryPolicy = RetryPolicy.<Response>builder()
                 .withMaxAttempts(-1)
                 .withMaxDuration(Duration.ofMillis(config.getMaxRetryTime().toMillis()))
@@ -67,6 +69,7 @@ public class BackpressureRestClient
                 .withJitter(0.125)
                 .handleIf(BackpressureRestClient::isBackpressure)
                 .onFailedAttempt(this::onFailedAttempt)
+                .onRetry(_ -> diagnostics.recordRetryAttempt())
                 .onSuccess(this::onComplete)
                 .onFailure(this::onComplete)
                 .build();
@@ -98,7 +101,11 @@ public class BackpressureRestClient
     {
         Request request = toRequest(method, endpoint, params, entity, headers);
         request.setOptions(request.getOptions().toBuilder()
-                .setRequestConfig(RequestConfig.custom().setSocketTimeout(socketTimeoutMillis).build()));
+                .setRequestConfig(RequestConfig.custom()
+                        .setConnectionRequestTimeout(socketTimeoutMillis)
+                        .setConnectTimeout(socketTimeoutMillis)
+                        .setSocketTimeout(socketTimeoutMillis)
+                        .build()));
         return delegate.performRequest(request);
     }
 

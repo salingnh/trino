@@ -14,6 +14,7 @@
 package io.trino.plugin.elasticsearch;
 
 import com.google.common.collect.ImmutableList;
+import io.trino.plugin.elasticsearch.ElasticsearchPredicateTranslation.Reason;
 import io.trino.plugin.elasticsearch.client.IndexMetadata.PrimitiveType;
 import io.trino.plugin.elasticsearch.decoders.IntegerDecoder;
 import io.trino.plugin.elasticsearch.decoders.VarcharDecoder;
@@ -23,11 +24,14 @@ import io.trino.spi.connector.Constraint;
 import io.trino.spi.expression.Call;
 import io.trino.spi.expression.Constant;
 import io.trino.spi.expression.FunctionName;
+import io.trino.spi.expression.Lambda;
 import io.trino.spi.expression.Variable;
 import io.trino.spi.predicate.Domain;
 import io.trino.spi.predicate.Range;
 import io.trino.spi.predicate.TupleDomain;
 import io.trino.spi.predicate.ValueSet;
+import io.trino.spi.type.ArrayType;
+import io.trino.spi.type.FunctionType;
 import io.trino.testing.TestingConnectorSession;
 import org.junit.jupiter.api.Test;
 
@@ -77,6 +81,9 @@ public class TestElasticsearchPredicatePushdownPlanner
         ElasticsearchRemotePredicate predicate = result.remotePredicate().orElseThrow();
         assertThat(predicate).isEqualTo(new ElasticsearchRemotePredicate.Terms("UserID", List.of(1L, 2L, 3L)));
         assertThat(predicate.enforcement()).isEqualTo(EXACT);
+        assertThat(result.decisions()).hasSize(2);
+        assertThat(result.decisions().get(0).reason()).isEqualTo(Reason.EXACT_DOMAIN);
+        assertThat(result.decisions().get(1).reason()).isEqualTo(Reason.NOOP);
     }
 
     @Test
@@ -166,6 +173,43 @@ public class TestElasticsearchPredicatePushdownPlanner
     }
 
     @Test
+    public void testAnyMatchUsesDedicatedDiagnosticReason()
+    {
+        ArrayType arrayType = new ArrayType(INTEGER);
+        ElasticsearchColumnHandle column = new ElasticsearchColumnHandle(
+                ImmutableList.of("Numbers"),
+                arrayType,
+                new PrimitiveType("integer"),
+                new IntegerDecoder.Descriptor("Numbers"),
+                false);
+        Variable element = new Variable("element", INTEGER);
+        Lambda lambda = new Lambda(
+                new FunctionType(List.of(INTEGER), BOOLEAN),
+                List.of(element),
+                new Call(
+                        BOOLEAN,
+                        EQUAL_OPERATOR_FUNCTION_NAME,
+                        List.of(element, new Constant(42L, INTEGER))));
+        Call anyMatch = new Call(
+                BOOLEAN,
+                new FunctionName("any_match"),
+                List.of(new Variable("numbers", arrayType), lambda));
+        Constraint constraint = new Constraint(
+                TupleDomain.all(),
+                anyMatch,
+                Map.of("numbers", column));
+
+        ElasticsearchPredicatePushdownPlanner.Result result = ElasticsearchPredicatePushdownPlanner.plan(
+                TestingConnectorSession.builder().build(),
+                constraint,
+                SAFE);
+
+        assertThat(result.remotePredicate()).contains(new ElasticsearchRemotePredicate.Term("Numbers", 42L));
+        assertThat(result.decisions()).singleElement()
+                .satisfies(decision -> assertThat(decision.reason()).isEqualTo(Reason.EXACT_ANY_MATCH));
+    }
+
+    @Test
     public void testSafeAnalyzedDiscreteDomainIsPlannerOwnedResidual()
     {
         ElasticsearchColumnHandle column = analyzedTextColumn();
@@ -184,6 +228,9 @@ public class TestElasticsearchPredicatePushdownPlanner
         assertThat(result.residualFilter())
                 .isEqualTo(TupleDomain.withColumnDomains(Map.<ColumnHandle, Domain>of(column, domain)));
         assertThat(result.remotePredicate()).isEmpty();
+        assertThat(result.decisions()).hasSize(2);
+        assertThat(result.decisions().get(0).reason()).isEqualTo(Reason.FULL_TEXT_SAFE_UNPROVEN);
+        assertThat(result.decisions().get(1).reason()).isEqualTo(Reason.NOOP);
     }
 
     @Test
@@ -223,6 +270,12 @@ public class TestElasticsearchPredicatePushdownPlanner
         assertThat(result.remotePredicate()).contains(new ElasticsearchRemotePredicate.Enforced(
                 new ElasticsearchRemotePredicate.Regexp("value", ".*(foo).*"),
                 PREFILTER));
+        assertThat(result.decisions()).singleElement()
+                .satisfies(decision -> {
+                    assertThat(decision.reason()).isEqualTo(Reason.FULL_TEXT_SAFE_PREFILTER);
+                    assertThat(decision.enforcement()).contains(PREFILTER);
+                    assertThat(decision.residualPresent()).isTrue();
+                });
     }
 
     @Test

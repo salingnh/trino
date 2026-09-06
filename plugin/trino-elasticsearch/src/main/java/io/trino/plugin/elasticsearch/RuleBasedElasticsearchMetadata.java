@@ -38,6 +38,7 @@ import static io.trino.plugin.elasticsearch.ElasticsearchRemotePredicateTranslat
 import static io.trino.plugin.elasticsearch.ElasticsearchRemotePredicateTranslator.combine;
 import static io.trino.plugin.elasticsearch.ElasticsearchRemotePredicateTranslator.withRemotePredicate;
 import static io.trino.plugin.elasticsearch.ElasticsearchSessionProperties.getFullTextPushdownMode;
+import static java.util.Objects.requireNonNull;
 
 /**
  * Rule-based Elasticsearch metadata facade.
@@ -49,10 +50,22 @@ import static io.trino.plugin.elasticsearch.ElasticsearchSessionProperties.getFu
 public class RuleBasedElasticsearchMetadata
         extends CasePreservingElasticsearchMetadata
 {
-    @Inject
+    private final ElasticsearchPushdownDiagnostics diagnostics;
+
     public RuleBasedElasticsearchMetadata(TypeManager typeManager, ElasticsearchClient client, ElasticsearchConfig config)
     {
+        this(typeManager, client, config, new ElasticsearchPushdownDiagnostics());
+    }
+
+    @Inject
+    public RuleBasedElasticsearchMetadata(
+            TypeManager typeManager,
+            ElasticsearchClient client,
+            ElasticsearchConfig config,
+            ElasticsearchPushdownDiagnostics diagnostics)
+    {
         super(typeManager, client, config);
+        this.diagnostics = requireNonNull(diagnostics, "diagnostics is null");
     }
 
     @Override
@@ -62,10 +75,15 @@ public class RuleBasedElasticsearchMetadata
             Constraint constraint)
     {
         ElasticsearchTableHandle input = (ElasticsearchTableHandle) table;
+        if (input.limit().isPresent() || input.aggregation().isPresent()) {
+            // A predicate above LIMIT/TopN or aggregation cannot be moved below that query-shape boundary.
+            return Optional.empty();
+        }
         ElasticsearchPredicatePushdownPlanner.Result predicatePlan = ElasticsearchPredicatePushdownPlanner.plan(
                 session,
                 constraint,
                 getFullTextPushdownMode(session));
+        predicatePlan.decisions().forEach(diagnostics::recordTranslation);
         Constraint preparedConstraint = predicatePlan.remainingConstraint();
 
         Optional<ElasticsearchRemotePredicate> inheritedPredicate = combine(input.remotePredicate(), predicatePlan.remotePredicate());
@@ -135,9 +153,8 @@ public class RuleBasedElasticsearchMetadata
     public TableStatistics getTableStatistics(ConnectorSession session, ConnectorTableHandle table)
     {
         ElasticsearchTableHandle handle = (ElasticsearchTableHandle) table;
-        if (handle.remotePredicate().isPresent()) {
-            // The legacy statistics path does not yet render remotePredicate. Returning no statistics is conservative:
-            // an unfiltered estimate would be incorrect and can make the optimizer choose a bad join/order strategy.
+        if (handle.remotePredicate().filter(predicate -> !predicate.isExact()).isPresent()) {
+            // Candidate and approximate remote counts do not describe the rows after residual evaluation.
             return TableStatistics.empty();
         }
         return super.getTableStatistics(session, table);

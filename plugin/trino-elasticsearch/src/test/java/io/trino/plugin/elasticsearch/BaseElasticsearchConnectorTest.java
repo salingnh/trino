@@ -74,7 +74,23 @@ public abstract class BaseElasticsearchConnectorTest
         return ElasticsearchQueryRunner.builder(server)
                 .setInitialTables(REQUIRED_TPCH_TABLES)
                 .addConnectorProperties(Map.of("jmx.base-name", jmxBaseName))
+                .addConnectorProperties(connectorProperties())
                 .build();
+    }
+
+    protected Map<String, String> connectorProperties()
+    {
+        return Map.of();
+    }
+
+    @Test
+    public void testExecutionQueryShapeBoundaries()
+    {
+        assertQuery("SELECT orderkey FROM (SELECT orderkey, totalprice FROM orders ORDER BY orderkey LIMIT 25) WHERE totalprice > 5000");
+        assertQuery("SELECT orderkey FROM (SELECT orderkey, totalprice FROM orders ORDER BY orderkey LIMIT 25) ORDER BY totalprice, orderkey LIMIT 5");
+        assertQuery("SELECT orderkey FROM orders WHERE orderkey > 100 ORDER BY orderkey LIMIT 7");
+        assertQuery("SELECT orderstatus, count(*) FROM orders WHERE orderkey > 100 GROUP BY orderstatus");
+        assertQuery("SELECT o.orderkey FROM orders o JOIN nation n ON o.orderkey = n.nationkey WHERE n.regionkey = 1 ORDER BY o.orderkey LIMIT 3");
     }
 
     @AfterAll
@@ -1623,6 +1639,37 @@ public abstract class BaseElasticsearchConnectorTest
                         "(TIMESTAMP '1970-01-01 00:00:00.001')," +
                         "(TIMESTAMP '1970-01-01 01:01:00.000')")
                 .isFullyPushedDown();
+    }
+
+    @Test
+    public void testScaledFloatQueryShapesRemainEngineSide()
+            throws IOException
+    {
+        String indexName = "scaled_float_query_shapes";
+        createIndex(indexName, "{\"properties\":{\"amount\":{\"type\":\"scaled_float\",\"scaling_factor\":10},\"id\":{\"type\":\"integer\"}}}");
+        try {
+            // Distinct source values collapse to the same doc value (2.3). A second sort key makes
+            // remote TopN select the wrong row deterministically, even if Trino sorts the result again.
+            index(indexName, ImmutableMap.of("id", 1, "amount", 2.31));
+            index(indexName, ImmutableMap.of("id", 2, "amount", 2.34));
+            index(indexName, ImmutableMap.of("id", 3));
+            assertThat(query("SELECT amount FROM " + indexName + " ORDER BY amount DESC NULLS LAST, id ASC LIMIT 1"))
+                    .matches("VALUES DOUBLE '2.34'")
+                    .isNotFullyPushedDown(TopNNode.class);
+            assertThat(query("SELECT amount, count(*) FROM " + indexName + " GROUP BY amount"))
+                    .matches("VALUES (DOUBLE '2.31', BIGINT '1'), (DOUBLE '2.34', BIGINT '1'), (CAST(NULL AS double), BIGINT '1')")
+                    .isNotFullyPushedDown(AggregationNode.class);
+            for (String aggregate : List.of("sum", "avg", "min", "max")) {
+                assertThat(query("SELECT " + aggregate + "(amount) FROM " + indexName))
+                        .matches("SELECT " + aggregate + "(amount) FROM (VALUES DOUBLE '2.31', DOUBLE '2.34', CAST(NULL AS double)) t(amount)")
+                        .isNotFullyPushedDown(AggregationNode.class);
+            }
+            // Rounding does not affect presence: COUNT remains a safe optimization.
+            assertThat(query("SELECT count(amount) FROM " + indexName)).matches("VALUES BIGINT '2'").isFullyPushedDown();
+        }
+        finally {
+            deleteIndex(indexName);
+        }
     }
 
     @Test

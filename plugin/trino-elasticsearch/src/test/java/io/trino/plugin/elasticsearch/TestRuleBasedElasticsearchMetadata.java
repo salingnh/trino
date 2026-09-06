@@ -15,6 +15,7 @@ package io.trino.plugin.elasticsearch;
 
 import io.trino.plugin.elasticsearch.client.ElasticsearchClient;
 import io.trino.plugin.elasticsearch.client.IndexMetadata;
+import io.trino.plugin.elasticsearch.decoders.DoubleDecoder;
 import io.trino.plugin.elasticsearch.decoders.IntegerDecoder;
 import io.trino.plugin.elasticsearch.decoders.VarcharDecoder;
 import io.trino.plugin.elasticsearch.expression.ElasticsearchRemotePredicate;
@@ -23,6 +24,8 @@ import io.trino.spi.connector.ConnectorSession;
 import io.trino.spi.connector.ConnectorTableHandle;
 import io.trino.spi.connector.Constraint;
 import io.trino.spi.connector.ConstraintApplicationResult;
+import io.trino.spi.connector.SortItem;
+import io.trino.spi.connector.SortOrder;
 import io.trino.spi.predicate.Domain;
 import io.trino.spi.predicate.Range;
 import io.trino.spi.predicate.TupleDomain;
@@ -42,6 +45,7 @@ import static io.trino.plugin.elasticsearch.ElasticsearchRemotePredicateTranslat
 import static io.trino.plugin.elasticsearch.ElasticsearchTableHandle.Type.SCAN;
 import static io.trino.plugin.elasticsearch.FullTextPushdownMode.SAFE;
 import static io.trino.spi.expression.Constant.TRUE;
+import static io.trino.spi.type.DoubleType.DOUBLE;
 import static io.trino.spi.type.IntegerType.INTEGER;
 import static io.trino.spi.type.VarcharType.VARCHAR;
 import static io.trino.type.InternalTypeManager.TESTING_TYPE_MANAGER;
@@ -97,6 +101,32 @@ public class TestRuleBasedElasticsearchMetadata
 
         assertThat(pushed.remotePredicate()).contains(new ElasticsearchRemotePredicate.Term("UserID", 10L));
         assertThat(metadata.applyFilter(session, pushed, constraint)).isEmpty();
+    }
+
+    @Test
+    public void testTopNRejectsRoundedDocValues()
+    {
+        ElasticsearchColumnHandle rounded = new ElasticsearchColumnHandle(
+                List.of("amount"), DOUBLE, new IndexMetadata.ScaledFloatType(10), new DoubleDecoder.Descriptor("amount"), false);
+        for (SortOrder order : SortOrder.values()) {
+            assertThat(metadata.applyTopN(session, emptyTable(), 1, List.of(new SortItem("amount", order)), Map.of("amount", rounded))).isEmpty();
+        }
+    }
+
+    @Test
+    public void testTopNPreservesPredicateAndDoesNotReorderLimitedRelation()
+    {
+        ElasticsearchTableHandle input = withRemotePredicate(emptyTable(), Optional.of(new ElasticsearchRemotePredicate.Term("UserID", 10L)));
+        List<SortItem> sort = List.of(new SortItem("id", SortOrder.ASC_NULLS_LAST));
+        ElasticsearchTableHandle topN = (ElasticsearchTableHandle) metadata.applyTopN(session, input, 5, sort, Map.of("id", USER_ID)).orElseThrow().getHandle();
+        assertThat(topN.remotePredicate()).isEqualTo(input.remotePredicate());
+        assertThat(topN.limit().orElseThrow()).isEqualTo(5);
+        assertThat(metadata.applyTopN(session, input.withTopN(3, List.of()), 5, sort, Map.of("id", USER_ID))).isEmpty();
+        assertThat(metadata.applyTopN(session, topN, 10, sort, Map.of("id", USER_ID))).isEmpty();
+        assertThat(metadata.applyFilter(session, topN, exactConstraint(20L))).isEmpty();
+        ElasticsearchTableHandle limited = (ElasticsearchTableHandle) metadata.applyLimit(session, topN, 2).orElseThrow().getHandle();
+        assertThat(limited.remotePredicate()).isEqualTo(input.remotePredicate());
+        assertThat(limited.sortOrder()).isEqualTo(topN.sortOrder());
     }
 
     @Test
