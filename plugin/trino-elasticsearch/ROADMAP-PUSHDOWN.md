@@ -499,7 +499,13 @@ P1.4 search execution strategies and P2 aggregation/statistics paths must emit i
 
 ## P1.4 — Search Execution Framework and Large-scan Optimization
 
-**Status:** NOT STARTED
+**Status:** IMPLEMENTED — LOCAL GATE GREEN / CI PENDING
+
+Implementation and measurements are recorded in [the execution audit](P1.4-P2-EXECUTION-DESIGN.md).
+Checklist entries describe delivered code or explicit evidence-based decisions;
+Local validation passes 1,498 tests (zero failures/errors, 680 capability skips),
+including the opt-in benchmarks, AirStyle, Error Prone, ES7/ES8, docs and packaging.
+Release completion still requires exact-SHA CI; its result is tracked on the PR.
 
 ### Objective
 
@@ -520,28 +526,28 @@ SearchExecutionStrategy
 └── close query context
 ```
 
-- [ ] Adapt current Scroll execution to this contract without semantic changes.
-- [ ] Centralize clear-scroll/close behavior.
-- [ ] Centralize cancellation and failure cleanup.
-- [ ] Emit P1.3 diagnostics/accounting from the common lifecycle.
-- [ ] Preserve ES-version capability handling explicitly.
+- [x] Adapt current Scroll execution to this contract without semantic changes.
+- [x] Centralize clear-scroll/close behavior.
+- [x] Centralize cancellation and failure cleanup.
+- [x] Emit P1.3 diagnostics/accounting from the common lifecycle.
+- [x] Preserve ES-version capability handling explicitly.
 
 ### P1.4b — Stable hit-decoding contract
 
 Define one hit/page decoding interface consumed by all search strategies.
 
-- [ ] Existing JsonNode/materialized decoding works through the interface first.
-- [ ] Add Jackson streaming decoding as another implementation when benchmark/tests prove benefit.
-- [ ] Decoder selection must not change planner or search-strategy contracts.
-- [ ] Validate nested objects, arrays, NULL/missing, timestamps, binary, and raw JSON.
+- [x] Existing JsonNode/materialized decoding works through the interface first.
+- [x] Add Jackson streaming decoding as another implementation when benchmark/tests prove benefit.
+- [x] Decoder selection must not change planner or search-strategy contracts.
+- [x] Validate nested objects, arrays, NULL/missing, timestamps, binary, and raw JSON.
 
 ### P1.4c — PIT + `search_after` as an additional strategy
 
-- [ ] Benchmark Scroll through the common execution contract.
-- [ ] Implement PIT + `search_after` through the same contract where supported.
-- [ ] Benchmark throughput, heap, GC, request count, failure recovery, cancellation, and long-query stability.
-- [ ] Add capability/configuration-based selection policy.
-- [ ] Keep Scroll as a valid fallback strategy unless a future compatibility decision explicitly removes support; removing an implementation must not alter the execution contract.
+- [x] Benchmark Scroll through the common execution contract.
+- [x] Implement PIT + `search_after` through the same contract where supported.
+- [x] Benchmark throughput, heap, GC, request count, failure recovery, cancellation, and long-query stability.
+- [x] Add capability/configuration-based selection policy.
+- [x] Keep Scroll as a valid fallback strategy unless a future compatibility decision explicitly removes support; removing an implementation must not alter the execution contract.
 
 ### Acceptance criteria
 
@@ -555,26 +561,26 @@ Define one hit/page decoding interface consumed by all search strategies.
 
 # P2 — Query-shape, Aggregation, and Statistics Hardening
 
-**Status:** NOT STARTED
+**Status:** IMPLEMENTED — LOCAL GATE GREEN / CI PENDING
 
 P2 extends the permanent P0/P1 planner and execution contracts. It does not introduce a second predicate model, diagnostics path, or scan lifecycle.
 
 ## P2.1 — LIMIT and TopN execution hardening
 
-- [ ] Review shard-aware LIMIT/TopN over-fetch correctness.
-- [ ] Express early termination through the P1.4 execution lifecycle.
-- [ ] Ensure remote predicate, sort, and limit state are preserved consistently in table handles.
-- [ ] Add cancellation as soon as the exact required row set is known.
-- [ ] Measure request/page/byte reduction through P1.3 accounting.
-- [ ] Keep fallback behavior exact when a remote TopN cannot be represented safely.
+- [x] Review shard-aware LIMIT/TopN over-fetch correctness.
+- [x] Express early termination through the P1.4 execution lifecycle.
+- [x] Ensure remote predicate, sort, and limit state are preserved consistently in table handles.
+- [x] Add cancellation as soon as the exact required row set is known.
+- [x] Measure request/page/byte reduction through P1.3 accounting.
+- [x] Keep fallback behavior exact when a remote TopN cannot be represented safely.
 
 ## P2.2 — Aggregation execution hardening
 
-- [ ] Use the same Remote Predicate IR renderer for aggregation query filters.
-- [ ] Add common request/byte/page/resource accounting through P1.3 diagnostics.
-- [ ] Make composite aggregation page size configurable only if benchmarks justify it.
-- [ ] Centralize aggregation pagination/resource cleanup behind a stable aggregation execution contract if more than one execution mode is required; do not add an abstraction speculatively.
-- [ ] Preserve correctness restrictions for filtered, ordered, and exact DISTINCT aggregates.
+- [x] Use the same Remote Predicate IR renderer for aggregation query filters.
+- [x] Add common request/byte/page/resource accounting through P1.3 diagnostics.
+- [x] Make composite aggregation page size configurable only if benchmarks justify it.
+- [x] Centralize aggregation pagination/resource cleanup behind a stable aggregation execution contract if more than one execution mode is required; do not add an abstraction speculatively.
+- [x] Preserve correctness restrictions for filtered, ordered, and exact DISTINCT aggregates.
 
 ## P2.3 — Statistics with Remote Predicate IR
 
@@ -589,28 +595,32 @@ Cannot prove statistics semantics or cost is unsafe
 
 The conservative fallback remains valid permanently. This phase extends the set of handles for which useful statistics can be produced.
 
-- [ ] Render supported exact Remote Predicate IR into statistics/count requests.
-- [ ] Never ignore a table handle's remote predicate.
-- [ ] Keep PREFILTER/APPROXIMATE statistics conservative unless semantics are explicitly defined.
-- [ ] Add request/document-count bounds.
-- [ ] Measure planning overhead before adding caches.
-- [ ] Add caching/selectivity improvements only through the same statistics contract.
+- [x] Render supported exact Remote Predicate IR into statistics/count requests.
+- [x] Never ignore a table handle's remote predicate.
+- [x] Keep PREFILTER/APPROXIMATE statistics conservative unless semantics are explicitly defined.
+- [x] Add request/document-count bounds.
+- [x] Measure planning overhead before adding caches.
+- [x] Add caching/selectivity improvements only through the same statistics contract.
 
 ## P2.4 — Cross-feature invariants
 
-- [ ] Predicate + LIMIT.
-- [ ] Predicate + TopN.
-- [ ] Predicate + aggregation.
-- [ ] Predicate + statistics.
-- [ ] Dynamic filter + LIMIT/TopN where planner order permits.
-- [ ] Projection/handle rewrites preserve all remote state.
-- [ ] ES7/ES8 result equivalence and resource cleanup.
+- [x] Predicate + LIMIT.
+- [x] Predicate + TopN.
+- [x] Predicate + aggregation.
+- [x] Predicate + statistics.
+- [x] Dynamic filter + LIMIT/TopN where planner order permits.
+- [x] Projection/handle rewrites preserve all remote state.
+- [x] ES7/ES8 result equivalence and resource cleanup.
 
 ---
 
 # P3 — Optional SPI Extensions
 
-**Status:** NOT STARTED
+**Status:** RESEARCH DISPOSITION RECORDED — NO PRODUCTION PUSHDOWN
+
+The [execution audit](P1.4-P2-EXECUTION-DESIGN.md#p3-disposition) records why sample
+and generic join pushdown remain disabled. These were optional research items,
+not commitments to enable unproven SQL semantics.
 
 ## `applySample`
 
@@ -651,12 +661,12 @@ PRODUCTION-STABLE BASELINE                          <- P0 + P1.1 + P1.2 + TEST H
 P1.3 Permanent Diagnostics / Observability          <- COMPLETE / GREEN
   │
   ▼
-P1.4 Stable Search Execution Framework              <- NEXT PHASE, OUTSIDE THIS RELEASE
+P1.4 Stable Search Execution Framework              <- IMPLEMENTED / LOCAL GREEN / CI PENDING
   │       ├── Scroll strategy
   │       ├── stable decoder contract
   │       └── PIT + search_after strategy after benchmarks
   ▼
-P2 Query-shape / Aggregation / Statistics Hardening
+P2 Query-shape / Aggregation / Statistics Hardening  <- IMPLEMENTED / LOCAL GREEN / CI PENDING
   │
   ▼
 P3 Optional SPI Extensions

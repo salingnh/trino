@@ -52,6 +52,14 @@ The following table details all general configuration properties:
     [Elasticsearch scroll
     request](https://www.elastic.co/guide/en/elasticsearch/reference/current/search-request-scroll.html#scroll-search-context).
   - `1000`
+* - `elasticsearch.search-strategy`
+  - Pagination strategy: `SCROLL` or opt-in `PIT`. PIT requires Elasticsearch
+    7.17 or 8.x and permission to open and close point-in-time contexts.
+  - `SCROLL`
+* - `elasticsearch.response-decoder`
+  - Search response decoder: `MATERIALIZED` or opt-in `STREAMING`. Streaming
+    materializes one hit tree at a time, independently of pagination strategy.
+  - `MATERIALIZED`
 * - `elasticsearch.scroll-timeout`
   - [Duration](prop-type-duration) for Elasticsearch to keep the search context
     alive for scroll requests.
@@ -643,9 +651,9 @@ skips only affect plan quality, never correctness:
   not pushed to the connector), are not aggregated.
   `elasticsearch.statistics.max-statistics-columns` caps how many referenced columns
   are collected.
-- It computes the expensive distinct-count (cardinality) only for indices with at
-  most `elasticsearch.statistics.max-index-documents` documents. Larger indices still
-  get null fractions and ranges, and always the row count.
+- It collects per-column statistics only when the filtered document count is at
+  most `elasticsearch.statistics.max-index-documents`. Larger result sets get the
+  row count only.
 - Each statistics request uses a short timeout,
   `elasticsearch.statistics.request-timeout`, with no retry, so a slow aggregation
   falls back to the row count in seconds instead of blocking query planning.
@@ -657,6 +665,25 @@ your queries. For very large or slow indices, lower
 raise `elasticsearch.statistics.max-statistics-columns` if queries filter or group by
 many columns, or set `elasticsearch.statistics.enabled` to `false` to disable
 statistics collection entirely.
+
+Statistics requests include the table handle's exact remote predicates. Candidate
+and approximate predicates return unknown statistics, as do aggregated handles.
+Pushed limits bound the row estimate; per-column statistics are not inferred for
+the limited subset. Timed-out and partial-shard responses are not used as exact
+statistics.
+
+### Search execution
+
+Scroll and PIT share scan accounting, limit termination, failure cleanup and
+idempotent close. PIT uses a shard-restricted context, stable `search_after` sort
+tokens and the latest returned context ID. An expired or failed context fails the
+query; the connector does not reopen it or switch strategies after returning rows.
+Both strategies close remote contexts at observed exhaustion, a pushed limit, or
+downstream close. The existing scroll size and timeout configure both strategies.
+
+Scroll remains the default compatibility path. Evaluate PIT and streaming decoding
+on representative workloads before enabling them. Small local measurements do not
+establish a universal throughput or memory improvement.
 
 ### Dynamic filtering
 
@@ -694,6 +721,13 @@ concurrent updates.
   responses, including empty terminal responses; `PagesReturned` counts Trino
   scan/count output pages. `RowsDecoded` and `SourceBytesDecoded` cover decoded
   scan hits, not count results or network traffic.
+- `PointInTimeOpens` and `PointInTimeCloses` count PIT context attempts;
+  `AggregationRequests` and `StatisticsRequests` count logical attempts in those
+  paths. Aggregation responses and output pages also contribute to page counters.
+  `AggregationRows` and `AggregationOutputBytes` count produced rows and their
+  decoded Trino block bytes, not network bytes or source documents.
+  Statistics failures contribute to `Failures` even when planning safely falls
+  back to unknown statistics.
 - `Cancellations` counts downstream scan close before observed exhaustion or a
   pushed limit. It does not establish that a user cancelled a query. `Failures`
   counts scan/count failures and failed scroll cleanup; one failed scan can also
@@ -703,8 +737,8 @@ Enable debug logging for
 `io.trino.plugin.elasticsearch.ElasticsearchPushdownDiagnostics` to see planner,
 normalization, dynamic-filter, and rendering observations from the same model.
 These diagnostic events omit predicate values. Enabling logging does not change
-pushdown or residual decisions. Aggregation/statistics execution accounting and
-alternative pagination strategies are outside this diagnostics phase.
+pushdown or residual decisions. Aggregation early close also contributes to
+`Cancellations`; failed PIT cleanup contributes to `Failures`.
 
 [built-in date formats]: https://www.elastic.co/guide/en/elasticsearch/reference/current/mapping-date-format.html#built-in-date-formats
 [custom date formats]: https://www.elastic.co/guide/en/elasticsearch/reference/current/mapping-date-format.html#custom-date-formats

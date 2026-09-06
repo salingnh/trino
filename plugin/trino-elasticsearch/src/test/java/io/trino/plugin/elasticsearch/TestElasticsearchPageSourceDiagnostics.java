@@ -23,8 +23,12 @@ import org.junit.jupiter.api.Test;
 import java.io.IOException;
 import java.net.InetAddress;
 import java.net.InetSocketAddress;
+import java.util.Collections;
 import java.util.List;
+import java.util.Map;
 import java.util.Optional;
+import java.util.OptionalLong;
+import java.util.Set;
 import java.util.concurrent.CopyOnWriteArrayList;
 
 import static io.trino.plugin.elasticsearch.ElasticsearchTableHandle.Type.SCAN;
@@ -161,6 +165,67 @@ public class TestElasticsearchPageSourceDiagnostics
     }
 
     @Test
+    public void testAggregationAccountingAndClose()
+            throws Exception
+    {
+        try (SearchServer server = new SearchServer("42", false, false);
+                AggregationQueryPageSource source = server.aggregation()) {
+            assertThat(source.getNextSourcePage().getPositionCount()).isEqualTo(1);
+            assertThat(source.isFinished()).isTrue();
+            source.close();
+            assertThat(source.getNextSourcePage()).isNull();
+            assertThat(server.diagnostics.getAggregationRequests()).isEqualTo(1);
+            assertThat(server.diagnostics.getRemotePagesReceived()).isEqualTo(1);
+            assertThat(server.diagnostics.getPagesReturned()).isEqualTo(1);
+            assertThat(server.diagnostics.getCancellations()).isZero();
+        }
+    }
+
+    @Test
+    public void testAggregationCloseBeforeReading()
+            throws Exception
+    {
+        try (SearchServer server = new SearchServer("42", false, false);
+                AggregationQueryPageSource source = server.aggregation()) {
+            source.close();
+            source.close();
+            assertThat(source.getNextSourcePage()).isNull();
+            assertThat(server.requests).isEmpty();
+            assertThat(server.diagnostics.getCancellations()).isEqualTo(1);
+        }
+    }
+
+    @Test
+    public void testAggregationFailureEndsExecution()
+            throws Exception
+    {
+        try (SearchServer server = new SearchServer("42", true, false);
+                AggregationQueryPageSource source = server.aggregation()) {
+            assertThatThrownBy(source::getNextSourcePage).isInstanceOf(TrinoException.class);
+            assertThat(source.isFinished()).isTrue();
+            assertThat(source.getNextSourcePage()).isNull();
+            assertThat(server.diagnostics.getFailures()).isEqualTo(1);
+            assertThat(server.diagnostics.getCancellations()).isZero();
+        }
+    }
+
+    @Test
+    public void testCompositePaginationMustProgress()
+            throws Exception
+    {
+        try (SearchServer server = new SearchServer("42", false, false);
+                AggregationQueryPageSource source = server.aggregation(true)) {
+            String buckets = String.join(",", Collections.nCopies(1000, "{\"key\":{\"g0\":1},\"doc_count\":1}"));
+            server.aggregationResponse = "{\"aggregations\":{\"groups\":{\"buckets\":[" + buckets + "],\"after_key\":{\"g0\":1}}}}";
+            assertThat(source.getNextSourcePage().getPositionCount()).isEqualTo(1000);
+            assertThatThrownBy(source::getNextSourcePage).isInstanceOf(TrinoException.class).hasMessageContaining("non-progressing");
+            assertThat(source.isFinished()).isTrue();
+            assertThat(server.diagnostics.getAggregationRows()).isEqualTo(1000);
+            assertThat(server.diagnostics.getAggregationOutputBytes()).isPositive();
+        }
+    }
+
+    @Test
     public void testCountFailureAccounting()
             throws Exception
     {
@@ -194,6 +259,7 @@ public class TestElasticsearchPageSourceDiagnostics
         private final ElasticsearchPushdownDiagnostics diagnostics = new ElasticsearchPushdownDiagnostics();
         private final List<String> requests = new CopyOnWriteArrayList<>();
         private final List<String> clearBodies = new CopyOnWriteArrayList<>();
+        private volatile String aggregationResponse = "{\"hits\":{\"total\":{\"value\":3,\"relation\":\"eq\"}},\"aggregations\":{}}";
 
         public SearchServer(String value, boolean failNextPage, boolean failClear)
                 throws IOException
@@ -218,8 +284,14 @@ public class TestElasticsearchPageSourceDiagnostics
                         body = "{}";
                     }
                     else if (path.equals("/events/_search")) {
-                        String scroll = includeScroll ? "\"_scroll_id\":\"initial-scroll\"," : "";
-                        body = "{" + scroll + "\"hits\":{\"hits\":[{\"_id\":\"1\",\"_source\":{\"id\":" + value + "}}]}}";
+                        if (requestBody.contains("\"track_total_hits\":true")) {
+                            body = aggregationResponse;
+                            status = failNextPage ? 500 : 200;
+                        }
+                        else {
+                            String scroll = includeScroll ? "\"_scroll_id\":\"initial-scroll\"," : "";
+                            body = "{" + scroll + "\"hits\":{\"hits\":[{\"_id\":\"1\",\"_source\":{\"id\":" + value + "}}]}}";
+                        }
                     }
                     else if (path.equals("/events/_count")) {
                         status = failNextPage ? 500 : 200;
@@ -253,6 +325,29 @@ public class TestElasticsearchPageSourceDiagnostics
         public CountQueryPageSource count()
         {
             return new CountQueryPageSource(client, TABLE, new ElasticsearchSplit("events", 0, Optional.empty()), diagnostics);
+        }
+
+        public AggregationQueryPageSource aggregation()
+        {
+            return aggregation(false);
+        }
+
+        public AggregationQueryPageSource aggregation(boolean grouped)
+        {
+            ElasticsearchTableHandle table = new ElasticsearchTableHandle(
+                    SCAN,
+                    "default",
+                    "events",
+                    TABLE.constraint(),
+                    Map.of(),
+                    Map.of(),
+                    Map.of(),
+                    Optional.empty(),
+                    OptionalLong.empty(),
+                    List.of(),
+                    Set.of(ID),
+                    Optional.of(new ElasticsearchAggregation(grouped ? List.of(ID) : List.of(), List.of(new ElasticsearchAggregate("id", ElasticsearchAggregate.Function.COUNT_ALL, Optional.empty(), INTEGER)))));
+            return new AggregationQueryPageSource(client, table, List.of(ID), diagnostics);
         }
 
         @Override

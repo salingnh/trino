@@ -13,13 +13,9 @@
  */
 package io.trino.plugin.elasticsearch;
 
-import com.fasterxml.jackson.databind.JsonNode;
-import com.google.common.collect.AbstractIterator;
 import com.google.common.collect.ImmutableList;
-import io.airlift.log.Logger;
 import io.trino.plugin.elasticsearch.client.ElasticsearchClient;
 import io.trino.plugin.elasticsearch.client.SearchDocument;
-import io.trino.plugin.elasticsearch.client.SearchResult;
 import io.trino.plugin.elasticsearch.decoders.Decoder;
 import io.trino.spi.Page;
 import io.trino.spi.block.Block;
@@ -37,15 +33,10 @@ import java.util.List;
 import java.util.Map;
 import java.util.Map.Entry;
 import java.util.Optional;
-import java.util.OptionalLong;
 
 import static com.google.common.collect.ImmutableList.toImmutableList;
 import static io.trino.plugin.elasticsearch.BuiltinColumns.SOURCE;
 import static io.trino.plugin.elasticsearch.BuiltinColumns.isBuiltinColumn;
-import static io.trino.plugin.elasticsearch.ElasticsearchPushdownDiagnostics.RemoteRequestKind.NEXT_PAGE;
-import static io.trino.plugin.elasticsearch.ElasticsearchPushdownDiagnostics.RemoteRequestKind.SEARCH;
-import static io.trino.plugin.elasticsearch.ElasticsearchQueryBuilder.buildSearchQuery;
-import static io.trino.plugin.elasticsearch.ElasticsearchQueryBuilder.buildSort;
 import static io.trino.spi.type.TimestampType.TIMESTAMP_MILLIS;
 import static java.util.Objects.requireNonNull;
 import static java.util.function.Predicate.isEqual;
@@ -54,16 +45,13 @@ import static java.util.stream.Collectors.toList;
 public class ScanQueryPageSource
         implements ConnectorPageSource
 {
-    private static final Logger LOG = Logger.get(ScanQueryPageSource.class);
-
     private final List<Decoder> decoders;
 
-    private final SearchDocumentIterator iterator;
+    private final SearchExecution iterator;
     private final BlockBuilder[] columnBuilders;
     private final List<ElasticsearchColumnHandle> columns;
     private final ElasticsearchPushdownDiagnostics diagnostics;
     private long totalBytes;
-    private long readTimeNanos;
 
     public ScanQueryPageSource(
             ElasticsearchClient client,
@@ -115,27 +103,10 @@ public class ScanQueryPageSource
                 .filter(name -> !isBuiltinColumn(name))
                 .collect(toList());
 
-        List<JsonNode> sort = buildSort(table.sortOrder(), table.query().isPresent());
-
-        long start = System.nanoTime();
-        SearchResult searchResult;
-        diagnostics.recordRemoteRequest(SEARCH);
-        try {
-            searchResult = client.beginSearch(
-                    split.index(),
-                    split.shard(),
-                    buildSearchQuery(table, diagnostics),
-                    needAllFields ? Optional.empty() : Optional.of(requiredFields),
-                    documentFields,
-                    sort,
-                    table.limit());
-        }
-        catch (RuntimeException e) {
-            diagnostics.recordFailure();
-            throw e;
-        }
-        readTimeNanos += System.nanoTime() - start;
-        this.iterator = new SearchDocumentIterator(client, searchResult, table.limit(), diagnostics);
+        this.iterator = new SearchExecution(
+                SearchExecutionStrategies.create(client, table, split, needAllFields ? Optional.empty() : Optional.of(requiredFields), documentFields, diagnostics),
+                table.limit(),
+                diagnostics);
     }
 
     @Override
@@ -147,7 +118,7 @@ public class ScanQueryPageSource
     @Override
     public long getReadTimeNanos()
     {
-        return readTimeNanos + iterator.getReadTimeNanos();
+        return iterator.getReadTimeNanos();
     }
 
     @Override
@@ -200,6 +171,7 @@ public class ScanQueryPageSource
 
             totalBytes += document.sourceLength();
             diagnostics.recordDecodedRows(1, document.sourceLength());
+            iterator.documentDecoded();
 
             size = Arrays.stream(columnBuilders)
                     .mapToLong(BlockBuilder::getSizeInBytes)
@@ -292,132 +264,5 @@ public class ScanQueryPageSource
         }
 
         return base + "." + element;
-    }
-
-    private static class SearchDocumentIterator
-            extends AbstractIterator<SearchDocument>
-    {
-        private final ElasticsearchClient client;
-        private final OptionalLong limit;
-        private final ElasticsearchPushdownDiagnostics diagnostics;
-
-        private List<SearchDocument> currentHits;
-        private String scrollId;
-        private int currentPosition;
-
-        private long readTimeNanos;
-        private long totalRecordCount;
-        private boolean closed;
-        private boolean failed;
-        private boolean exhausted;
-
-        public SearchDocumentIterator(
-                ElasticsearchClient client,
-                SearchResult first,
-                OptionalLong limit,
-                ElasticsearchPushdownDiagnostics diagnostics)
-        {
-            this.client = requireNonNull(client, "client is null");
-            this.limit = requireNonNull(limit, "limit is null");
-            this.diagnostics = requireNonNull(diagnostics, "diagnostics is null");
-            this.totalRecordCount = 0;
-            reset(requireNonNull(first, "first is null"));
-        }
-
-        public boolean isClosed()
-        {
-            return closed;
-        }
-
-        public long getReadTimeNanos()
-        {
-            return readTimeNanos;
-        }
-
-        @Override
-        protected SearchDocument computeNext()
-        {
-            if (closed || limitReached()) {
-                // No more record is necessary.
-                exhausted = true;
-                return endOfData();
-            }
-
-            if (currentPosition == currentHits.size() && !exhausted && scrollId != null) {
-                long start = System.nanoTime();
-                SearchResult result;
-                diagnostics.recordRemoteRequest(NEXT_PAGE);
-                try {
-                    result = client.nextPage(scrollId);
-                }
-                catch (RuntimeException e) {
-                    fail();
-                    throw e;
-                }
-                readTimeNanos += System.nanoTime() - start;
-                reset(result);
-            }
-
-            if (currentPosition == currentHits.size()) {
-                exhausted = true;
-                return endOfData();
-            }
-
-            SearchDocument document = currentHits.get(currentPosition);
-            currentPosition++;
-            totalRecordCount++;
-            if (scrollId == null && currentPosition == currentHits.size()) {
-                exhausted = true;
-            }
-
-            return document;
-        }
-
-        private void reset(SearchResult result)
-        {
-            diagnostics.recordRemotePageReceived();
-            scrollId = result.scrollId().orElse(null);
-            currentHits = result.hits();
-            currentPosition = 0;
-            exhausted = currentHits.isEmpty();
-        }
-
-        private boolean limitReached()
-        {
-            return limit.isPresent() && totalRecordCount >= limit.orElseThrow();
-        }
-
-        public void fail()
-        {
-            if (!failed) {
-                failed = true;
-                diagnostics.recordFailure();
-            }
-            close();
-        }
-
-        public void close()
-        {
-            if (closed) {
-                return;
-            }
-            closed = true;
-            // This is a downstream early close, not necessarily a user-cancelled query. A pushed LIMIT and
-            // observed remote exhaustion are normal completion; failed scans are accounted separately.
-            if (!failed && !exhausted && !limitReached()) {
-                diagnostics.recordCancellation();
-            }
-            if (scrollId != null) {
-                diagnostics.recordClearScroll();
-                try {
-                    client.clearScroll(scrollId);
-                }
-                catch (Exception e) {
-                    diagnostics.recordFailure();
-                    // ignore
-                    LOG.debug(e, "Error clearing scroll");
-                }
-            }
-        }
     }
 }

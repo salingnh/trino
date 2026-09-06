@@ -49,6 +49,18 @@ import static java.util.concurrent.TimeUnit.SECONDS;
 })
 public class ElasticsearchConfig
 {
+    public enum SearchStrategy
+    {
+        SCROLL,
+        PIT,
+    }
+
+    public enum ResponseDecoder
+    {
+        MATERIALIZED,
+        STREAMING,
+    }
+
     public enum Security
     {
         AWS,
@@ -59,6 +71,8 @@ public class ElasticsearchConfig
     private int port = 9200;
     private String defaultSchema = "default";
     private int scrollSize = 1_000;
+    private SearchStrategy searchStrategy = SearchStrategy.SCROLL;
+    private ResponseDecoder responseDecoder = ResponseDecoder.MATERIALIZED;
     private Duration scrollTimeout = new Duration(1, MINUTES);
     private Duration requestTimeout = new Duration(10, SECONDS);
     private Duration connectTimeout = new Duration(1, SECONDS);
@@ -133,6 +147,34 @@ public class ElasticsearchConfig
     public int getScrollSize()
     {
         return scrollSize;
+    }
+
+    @NotNull
+    public SearchStrategy getSearchStrategy()
+    {
+        return searchStrategy;
+    }
+
+    @NotNull
+    public ResponseDecoder getResponseDecoder()
+    {
+        return responseDecoder;
+    }
+
+    @Config("elasticsearch.response-decoder")
+    @ConfigDescription("Search response decoding implementation")
+    public ElasticsearchConfig setResponseDecoder(ResponseDecoder responseDecoder)
+    {
+        this.responseDecoder = responseDecoder;
+        return this;
+    }
+
+    @Config("elasticsearch.search-strategy")
+    @ConfigDescription("Search pagination strategy; PIT requires Elasticsearch 7.17 or 8.x")
+    public ElasticsearchConfig setSearchStrategy(SearchStrategy searchStrategy)
+    {
+        this.searchStrategy = searchStrategy;
+        return this;
     }
 
     @Config("elasticsearch.scroll-size")

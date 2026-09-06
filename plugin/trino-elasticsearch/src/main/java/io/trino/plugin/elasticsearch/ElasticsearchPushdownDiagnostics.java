@@ -82,9 +82,15 @@ public class ElasticsearchPushdownDiagnostics
     private final LongAdder dynamicFilterDomainsRejected = new LongAdder();
     private final LongAdder dynamicFilterEstimatedQueryBytes = new LongAdder();
 
+    private final LongAdder pointInTimeOpens = new LongAdder();
+    private final LongAdder pointInTimeCloses = new LongAdder();
+    private final LongAdder aggregationRequests = new LongAdder();
+    private final LongAdder statisticsRequests = new LongAdder();
     private final LongAdder searchRequests = new LongAdder();
     private final LongAdder nextPageRequests = new LongAdder();
     private final LongAdder countRequests = new LongAdder();
+    private final LongAdder aggregationRows = new LongAdder();
+    private final LongAdder aggregationOutputBytes = new LongAdder();
     private final LongAdder rowsDecoded = new LongAdder();
     private final LongAdder sourceBytesDecoded = new LongAdder();
     private final LongAdder pagesReturned = new LongAdder();
@@ -235,10 +241,23 @@ public class ElasticsearchPushdownDiagnostics
     public void recordRemoteRequest(RemoteRequestKind kind)
     {
         switch (requireNonNull(kind, "kind is null")) {
+            case POINT_IN_TIME_OPEN -> pointInTimeOpens.increment();
+            case POINT_IN_TIME_CLOSE -> pointInTimeCloses.increment();
+            case AGGREGATION -> aggregationRequests.increment();
+            case STATISTICS -> statisticsRequests.increment();
             case SEARCH -> searchRequests.increment();
             case NEXT_PAGE -> nextPageRequests.increment();
             case COUNT -> countRequests.increment();
         }
+    }
+
+    public void recordAggregationOutput(long rows, long bytes)
+    {
+        if (rows < 0 || bytes < 0) {
+            throw new IllegalArgumentException("Aggregation row and byte counts must be non-negative");
+        }
+        aggregationRows.add(rows);
+        aggregationOutputBytes.add(bytes);
     }
 
     public void recordDecodedRows(long rows, long sourceBytes)
@@ -322,9 +341,15 @@ public class ElasticsearchPushdownDiagnostics
                 dynamicFilterTermsBatches.sum(),
                 dynamicFilterDomainsRejected.sum(),
                 dynamicFilterEstimatedQueryBytes.sum(),
+                pointInTimeOpens.sum(),
+                pointInTimeCloses.sum(),
+                aggregationRequests.sum(),
+                statisticsRequests.sum(),
                 searchRequests.sum(),
                 nextPageRequests.sum(),
                 countRequests.sum(),
+                aggregationRows.sum(),
+                aggregationOutputBytes.sum(),
                 rowsDecoded.sum(),
                 sourceBytesDecoded.sum(),
                 pagesReturned.sum(),
@@ -641,6 +666,42 @@ public class ElasticsearchPushdownDiagnostics
         return clearScrollCalls.sum();
     }
 
+    @Managed
+    public long getPointInTimeOpens()
+    {
+        return pointInTimeOpens.sum();
+    }
+
+    @Managed
+    public long getPointInTimeCloses()
+    {
+        return pointInTimeCloses.sum();
+    }
+
+    @Managed
+    public long getAggregationRequests()
+    {
+        return aggregationRequests.sum();
+    }
+
+    @Managed
+    public long getStatisticsRequests()
+    {
+        return statisticsRequests.sum();
+    }
+
+    @Managed
+    public long getAggregationRows()
+    {
+        return aggregationRows.sum();
+    }
+
+    @Managed
+    public long getAggregationOutputBytes()
+    {
+        return aggregationOutputBytes.sum();
+    }
+
     private void recordEnforcement(Enforcement enforcement)
     {
         switch (enforcement) {
@@ -652,6 +713,10 @@ public class ElasticsearchPushdownDiagnostics
 
     public enum RemoteRequestKind
     {
+        POINT_IN_TIME_OPEN,
+        POINT_IN_TIME_CLOSE,
+        AGGREGATION,
+        STATISTICS,
         SEARCH,
         NEXT_PAGE,
         COUNT,
@@ -706,9 +771,15 @@ public class ElasticsearchPushdownDiagnostics
             long dynamicFilterTermsBatches,
             long dynamicFilterDomainsRejected,
             long dynamicFilterEstimatedQueryBytes,
+            long pointInTimeOpens,
+            long pointInTimeCloses,
+            long aggregationRequests,
+            long statisticsRequests,
             long searchRequests,
             long nextPageRequests,
             long countRequests,
+            long aggregationRows,
+            long aggregationOutputBytes,
             long rowsDecoded,
             long sourceBytesDecoded,
             long pagesReturned,

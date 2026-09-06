@@ -13,6 +13,7 @@
  */
 package io.trino.plugin.elasticsearch.expression;
 
+import com.fasterxml.jackson.annotation.JsonIgnore;
 import com.fasterxml.jackson.annotation.JsonProperty;
 import com.fasterxml.jackson.annotation.JsonSubTypes;
 import com.fasterxml.jackson.annotation.JsonTypeInfo;
@@ -74,6 +75,18 @@ public sealed interface ElasticsearchRemotePredicate
     default Enforcement enforcement()
     {
         return Enforcement.EXACT;
+    }
+
+    @JsonIgnore
+    default boolean isExact()
+    {
+        return switch (this) {
+            case And and -> and.predicates().stream().allMatch(ElasticsearchRemotePredicate::isExact);
+            case Or or -> or.predicates().stream().allMatch(ElasticsearchRemotePredicate::isExact);
+            case Not not -> not.predicate().isExact();
+            case Enforced _ -> false;
+            case Term _, Terms _, Range _, Prefix _, Regexp _, MatchPhrase _, MatchPhrasePrefix _, Exists _ -> true;
+        };
     }
 
     @JsonProperty("@type")

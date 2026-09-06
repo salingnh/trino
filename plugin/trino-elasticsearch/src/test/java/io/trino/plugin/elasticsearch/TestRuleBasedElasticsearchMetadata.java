@@ -23,6 +23,8 @@ import io.trino.spi.connector.ConnectorSession;
 import io.trino.spi.connector.ConnectorTableHandle;
 import io.trino.spi.connector.Constraint;
 import io.trino.spi.connector.ConstraintApplicationResult;
+import io.trino.spi.connector.SortItem;
+import io.trino.spi.connector.SortOrder;
 import io.trino.spi.predicate.Domain;
 import io.trino.spi.predicate.Range;
 import io.trino.spi.predicate.TupleDomain;
@@ -97,6 +99,22 @@ public class TestRuleBasedElasticsearchMetadata
 
         assertThat(pushed.remotePredicate()).contains(new ElasticsearchRemotePredicate.Term("UserID", 10L));
         assertThat(metadata.applyFilter(session, pushed, constraint)).isEmpty();
+    }
+
+    @Test
+    public void testTopNPreservesPredicateAndDoesNotReorderLimitedRelation()
+    {
+        ElasticsearchTableHandle input = withRemotePredicate(emptyTable(), Optional.of(new ElasticsearchRemotePredicate.Term("UserID", 10L)));
+        List<SortItem> sort = List.of(new SortItem("id", SortOrder.ASC_NULLS_LAST));
+        ElasticsearchTableHandle topN = (ElasticsearchTableHandle) metadata.applyTopN(session, input, 5, sort, Map.of("id", USER_ID)).orElseThrow().getHandle();
+        assertThat(topN.remotePredicate()).isEqualTo(input.remotePredicate());
+        assertThat(topN.limit().orElseThrow()).isEqualTo(5);
+        assertThat(metadata.applyTopN(session, input.withTopN(3, List.of()), 5, sort, Map.of("id", USER_ID))).isEmpty();
+        assertThat(metadata.applyTopN(session, topN, 10, sort, Map.of("id", USER_ID))).isEmpty();
+        assertThat(metadata.applyFilter(session, topN, exactConstraint(20L))).isEmpty();
+        ElasticsearchTableHandle limited = (ElasticsearchTableHandle) metadata.applyLimit(session, topN, 2).orElseThrow().getHandle();
+        assertThat(limited.remotePredicate()).isEqualTo(input.remotePredicate());
+        assertThat(limited.sortOrder()).isEqualTo(topN.sortOrder());
     }
 
     @Test
