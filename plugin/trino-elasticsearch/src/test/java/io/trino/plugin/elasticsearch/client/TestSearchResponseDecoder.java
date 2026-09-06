@@ -62,6 +62,21 @@ public class TestSearchResponseDecoder
     }
 
     @Test
+    public void testIncompleteResponseRetainsContextsRegardlessOfFieldOrder()
+    {
+        for (SearchResponseDecoder decoder : DECODERS) {
+            for (String failure : List.of("\"timed_out\":true", "\"_shards\":{\"failed\":1}")) {
+                List<String> contexts = new ArrayList<>();
+                byte[] json = ("{" + failure + ",\"hits\":{\"hits\":[]},\"_scroll_id\":\"scroll\",\"pit_id\":\"pit\"}").getBytes(UTF_8);
+                assertThatThrownBy(() -> decoder.decode(new ByteArrayInputStream(json), contexts::add, contexts::add))
+                        .isInstanceOf(TrinoException.class)
+                        .hasMessageContaining("incomplete");
+                assertThat(contexts).containsExactly("scroll", "pit");
+            }
+        }
+    }
+
+    @Test
     public void testContextOwnershipPrecedesValidation()
     {
         for (SearchResponseDecoder decoder : DECODERS) {
