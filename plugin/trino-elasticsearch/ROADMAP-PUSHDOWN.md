@@ -433,7 +433,7 @@ This release boundary does not include runtime observability, metrics, execution
 Implementation is in PR #24 on `feature/elasticsearch-p1.3-observability`.
 The [phase design and release audit](P1.3-OBSERVABILITY-DESIGN.md) tracks the
 architectural contract, verified hardening checkpoints, and remaining gates.
-Passing connector tests does not close the outstanding diagnostics and release audit.
+Implementation and local release checks pass; final GitHub CI remains required.
 
 ### Objective
 
@@ -457,15 +457,33 @@ Pushdown diagnostics
 
 ### Scope
 
-- [ ] Translation/composition diagnostic events use stable structured reason codes, not ad-hoc log strings.
-- [ ] Remote Predicate IR -> Elasticsearch DSL diagnostics use the same model.
-- [ ] EXACT / PREFILTER / APPROXIMATE / residual counts.
-- [ ] `terms` values, batches, and request-byte estimates.
-- [ ] Array-membership and `any_match` pushdown counts.
-- [ ] Dynamic-filter values received/pushed/compacted/batched/rejected.
-- [ ] Remote requests, rows, bytes, pages, retries, cancellations, and failures where available.
-- [ ] Debug logging can render diagnostics without changing planner behavior.
-- [ ] Metrics/JMX consumers read the same counters/events.
+- [x] Translation/composition diagnostic events use stable structured reason codes, not ad-hoc log strings.
+- [x] Remote Predicate IR -> Elasticsearch DSL diagnostics use the same model.
+- [x] EXACT / PREFILTER / APPROXIMATE / residual counts.
+- [x] `terms` values, batches, and request-byte estimates.
+- [x] Array-membership and `any_match` pushdown counts.
+- [x] Dynamic-filter values received/pushed/compacted/batched/rejected.
+- [x] Remote requests, rows, bytes, pages, retries, cancellations, and failures where available.
+- [x] Debug logging can render diagnostics without changing planner behavior.
+- [x] Metrics/JMX consumers read the same counters/events.
+
+### Release validation
+
+Implementation commit `4ccc14f68d8de08deed7d1d196bf70dcee190b68` passes
+`./mvnw -nsu -pl :trino-elasticsearch -Perrorprone-compiler clean verify`:
+830 tests, zero failures/errors, 340 capability skips, both ES7/ES8 connector and
+metadata suites, and plugin JAR/ZIP packaging. The artifact manifest identifies
+the exact commit. Structured normalization and immutable snapshots, live JMX and
+debug equivalence, actual HTTP retries, count responses, initial-scroll ownership,
+failure cleanup, repeated close, no-scroll responses, and LIMIT completion all
+have focused acceptance coverage. Commit history is consolidated to one tested
+implementation commit; the earlier history remains on a backup branch.
+
+GitHub run `34008876905` validates the identical merge tree. Its initial attempt
+passed all connector, Maven, Error Prone, and artifact checks but timed out starting
+the Hive cross-realm impersonation environment during Kerberos tool installation.
+The failed jobs are being retried on the same SHA; this phase remains open until
+the final candidate passes CI. P1.4 and P2 remain outside this release.
 
 ### Architectural continuity
 

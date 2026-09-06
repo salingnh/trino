@@ -667,6 +667,45 @@ into the Elasticsearch query to reduce the number of scanned documents. The
 `dynamic_filtering_wait_timeout` session property, controls how long split
 generation waits for dynamic filters to be collected.
 
+### Pushdown diagnostics
+
+The connector exports `ElasticsearchPushdownDiagnostics` through JMX for each
+catalog on each Trino node. Counters are cumulative for the lifetime of the
+connector. Coordinator planning and worker execution are separate observations;
+they are not per-query totals. Snapshots taken while queries run can include
+concurrent updates.
+
+- `TranslationReasonCounts` and `NormalizationCounts` report structured planner
+  decisions, including exact, prefilter, approximate, residual, flattening, and
+  terms compaction decisions. Translation counts include child decisions and
+  repeated planner invocations; they do not count distinct SQL predicates.
+- `DynamicFilterOutcomes` distinguishes unrestricted, empty, pushed, partially
+  pushed, and rejected filters. Value counters count discrete values, not the
+  cardinality of ranges. `DynamicFilterTermsBatches` counts native `terms` nodes;
+  a single-value `term` is not a terms batch. Request-byte estimates cover accepted
+  filter clauses and exclude the enclosing request.
+- `RenderedQueries` and `RenderedQueryBytes` count successfully constructed scan,
+  count, and aggregation filters and their UTF-8 JSON bytes. Remote predicate node
+  counters describe the IR rendered in those filters. These are not HTTP request
+  bytes or unique-query counts.
+- `SearchRequests`, `NextPageRequests`, and `CountRequests` count logical scan/count
+  attempts, including failed attempts. `RetryAttempts` counts backpressure retries
+  across the connector's REST client. `RemotePagesReceived` counts successful scan
+  responses, including empty terminal responses; `PagesReturned` counts Trino
+  scan/count output pages. `RowsDecoded` and `SourceBytesDecoded` cover decoded
+  scan hits, not count results or network traffic.
+- `Cancellations` counts downstream scan close before observed exhaustion or a
+  pushed limit. It does not establish that a user cancelled a query. `Failures`
+  counts scan/count failures and failed scroll cleanup; one failed scan can also
+  have a separate cleanup failure. `ClearScrollCalls` counts cleanup attempts.
+
+Enable debug logging for
+`io.trino.plugin.elasticsearch.ElasticsearchPushdownDiagnostics` to see planner,
+normalization, dynamic-filter, and rendering observations from the same model.
+These diagnostic events omit predicate values. Enabling logging does not change
+pushdown or residual decisions. Aggregation/statistics execution accounting and
+alternative pagination strategies are outside this diagnostics phase.
+
 [built-in date formats]: https://www.elastic.co/guide/en/elasticsearch/reference/current/mapping-date-format.html#built-in-date-formats
 [custom date formats]: https://www.elastic.co/guide/en/elasticsearch/reference/current/mapping-date-format.html#custom-date-formats
 [date]: https://www.elastic.co/guide/en/elasticsearch/reference/current/date.html
