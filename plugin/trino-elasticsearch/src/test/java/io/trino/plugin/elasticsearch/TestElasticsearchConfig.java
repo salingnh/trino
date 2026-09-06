@@ -15,17 +15,21 @@ package io.trino.plugin.elasticsearch;
 
 import com.google.common.collect.ImmutableMap;
 import io.airlift.units.Duration;
+import io.airlift.units.MinDuration;
 import org.junit.jupiter.api.Test;
 
 import java.io.IOException;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.Arrays;
+import java.util.List;
 import java.util.Map;
 
 import static io.airlift.configuration.testing.ConfigAssertions.assertFullMapping;
 import static io.airlift.configuration.testing.ConfigAssertions.assertRecordedDefaults;
 import static io.airlift.configuration.testing.ConfigAssertions.recordDefaults;
+import static io.airlift.testing.ValidationAssertions.assertFailsValidation;
+import static io.airlift.testing.ValidationAssertions.assertValidates;
 import static io.trino.plugin.elasticsearch.ElasticsearchConfig.Security.AWS;
 import static java.util.concurrent.TimeUnit.MILLISECONDS;
 import static java.util.concurrent.TimeUnit.MINUTES;
@@ -154,5 +158,30 @@ public class TestElasticsearchConfig
                 .setFullTextPushdownMode(FullTextPushdownMode.SAFE);
 
         assertFullMapping(properties, expected);
+    }
+
+    @Test
+    public void testStatisticsRequestTimeoutValidation()
+    {
+        assertFailsValidation(
+                new ElasticsearchConfig()
+                        .setHosts(List.of("localhost"))
+                        .setStatisticsRequestTimeout(new Duration(0, MILLISECONDS)),
+                "statisticsRequestTimeout",
+                "must be greater than or equal to 1ms",
+                MinDuration.class);
+
+        assertFailsValidation(
+                new ElasticsearchConfig()
+                        .setHosts(List.of("localhost"))
+                        .setStatisticsRequestTimeout(new Duration(0.1, MILLISECONDS)),
+                "statisticsRequestTimeout",
+                "must be greater than or equal to 1ms",
+                MinDuration.class);
+
+        assertValidates(
+                new ElasticsearchConfig()
+                        .setHosts(List.of("localhost"))
+                        .setStatisticsRequestTimeout(new Duration(1, MILLISECONDS)));
     }
 }

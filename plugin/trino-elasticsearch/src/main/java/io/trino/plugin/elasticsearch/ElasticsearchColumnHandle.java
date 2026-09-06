@@ -71,6 +71,26 @@ public record ElasticsearchColumnHandle(
     }
 
     /**
+     * Whether indexed/doc-value semantics preserve the values decoded from {@code _source}. Mapping features such as
+     * {@code null_value} can deliberately rewrite the indexed representation while leaving {@code _source} unchanged.
+     */
+    @JsonIgnore
+    public boolean sourceValueSemanticsExact()
+    {
+        return elasticsearchType.sourceValueSemanticsExact();
+    }
+
+    /**
+     * Predicate support is only exact when the mapping preserves the source value semantics as well as the underlying
+     * Elasticsearch/Trino type pair.
+     */
+    @Override
+    public boolean supportsPredicates()
+    {
+        return supportsPredicates && sourceValueSemanticsExact();
+    }
+
+    /**
      * Field name to use when pushing predicates into Elasticsearch. For a {@code text} field that has an
      * exact-match {@code keyword} sub-field, this targets the sub-field; otherwise it is the exact remote field name.
      */

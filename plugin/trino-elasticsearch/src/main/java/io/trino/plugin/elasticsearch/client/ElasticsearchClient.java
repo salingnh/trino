@@ -543,6 +543,8 @@ public class ElasticsearchClient
             JsonNode metaNode = nullSafeNode(metaProperties, name);
             boolean isArray = !metaNode.isNull() && metaNode.has("isArray") && metaNode.get("isArray").asBoolean();
             boolean asRawJson = !metaNode.isNull() && metaNode.has("asRawJson") && metaNode.get("asRawJson").asBoolean();
+            boolean normalizedKeyword = type.equals("keyword") && value.get("normalizer") != null;
+            boolean sourceValueSemanticsExact = !value.has("null_value") && !normalizedKeyword;
 
             // While it is possible to handle isArray and asRawJson in the same column by creating a ARRAY(VARCHAR) type, we chose not to take
             // this route, as it will likely lead to confusion in dealing with array syntax in Trino and potentially nested array and other
@@ -559,12 +561,12 @@ public class ElasticsearchClient
                     if (value.has("format")) {
                         formats = Arrays.asList(value.get("format").asText().split("\\|\\|"));
                     }
-                    boolean aggregatable = !value.has("doc_values") || value.get("doc_values").asBoolean();
-                    result.add(new IndexMetadata.Field(asRawJson, isArray, name, new IndexMetadata.DateTimeType(formats, aggregatable)));
+                    boolean aggregatable = sourceValueSemanticsExact && (!value.has("doc_values") || value.get("doc_values").asBoolean());
+                    result.add(new IndexMetadata.Field(asRawJson, isArray, name, new IndexMetadata.DateTimeType(formats, aggregatable, sourceValueSemanticsExact)));
                 }
                 case "scaled_float" -> {
-                    boolean aggregatable = !value.has("doc_values") || value.get("doc_values").asBoolean();
-                    result.add(new IndexMetadata.Field(asRawJson, isArray, name, new IndexMetadata.ScaledFloatType(value.get("scaling_factor").asDouble(), aggregatable)));
+                    boolean aggregatable = sourceValueSemanticsExact && (!value.has("doc_values") || value.get("doc_values").asBoolean());
+                    result.add(new IndexMetadata.Field(asRawJson, isArray, name, new IndexMetadata.ScaledFloatType(value.get("scaling_factor").asDouble(), aggregatable, sourceValueSemanticsExact)));
                 }
                 case "nested", "object" -> {
                     if (value.has("properties")) {
@@ -575,7 +577,7 @@ public class ElasticsearchClient
                     }
                 }
                 default -> {
-                    boolean aggregatable = !value.has("doc_values") || value.get("doc_values").asBoolean();
+                    boolean aggregatable = sourceValueSemanticsExact && (!value.has("doc_values") || value.get("doc_values").asBoolean());
                     IndexMetadata.PrimitiveType primitiveType;
                     if (type.equals("text")) {
                         Optional<String> keyword = keywordSubfield(value, useBoundedKeyword);
@@ -583,15 +585,19 @@ public class ElasticsearchClient
                                 .map(keywordName -> value.path("fields").path(keywordName))
                                 .map(ElasticsearchClient::hasDocValues)
                                 .orElse(false);
-                        primitiveType = new IndexMetadata.PrimitiveType(type, keyword, keywordAggregatable);
+                        primitiveType = new IndexMetadata.PrimitiveType(type, keyword, keywordAggregatable && sourceValueSemanticsExact, sourceValueSemanticsExact);
                     }
-                    else if (type.equals("keyword") && value.get("normalizer") != null) {
-                        // A keyword field with a normalizer stores a rewritten (for example lowercased) value, not the
-                        // verbatim source, so it is not exact for predicate/sort/aggregation pushdown; treat it as analyzed text
-                        primitiveType = new IndexMetadata.PrimitiveType("text", Optional.empty(), false);
+                    else if (type.equals("keyword") && !sourceValueSemanticsExact) {
+                        // A normalizer or null_value rewrites the indexed value while _source remains unchanged. Treat the
+                        // field as analyzed text so exact predicate/sort/aggregation paths cannot claim source semantics.
+                        primitiveType = new IndexMetadata.PrimitiveType("text", Optional.empty(), false, false);
                     }
                     else {
-                        primitiveType = new IndexMetadata.PrimitiveType(type, Optional.empty(), aggregatable && IndexMetadata.PrimitiveType.isDocValueType(type));
+                        primitiveType = new IndexMetadata.PrimitiveType(
+                                type,
+                                Optional.empty(),
+                                aggregatable && IndexMetadata.PrimitiveType.isDocValueType(type),
+                                sourceValueSemanticsExact);
                     }
                     result.add(new IndexMetadata.Field(asRawJson, isArray, name, primitiveType));
                 }
@@ -615,9 +621,9 @@ public class ElasticsearchClient
             if (type == null || !"keyword".equals(type.asText())) {
                 continue;
             }
-            // A normalizer rewrites the value (for example lowercasing), so the sub-field is not a verbatim copy of the
-            // source and is unsafe for exact predicate/sort/aggregation pushdown
-            if (subfieldNode.get("normalizer") != null) {
+            // A normalizer or null_value rewrites the indexed value while _source remains unchanged, so the sub-field
+            // cannot be used as an exact source-value predicate/sort/aggregation target.
+            if (subfieldNode.get("normalizer") != null || subfieldNode.has("null_value")) {
                 continue;
             }
             // Exact term/prefix predicates use the inverted index and do not require doc values. A keyword field with
