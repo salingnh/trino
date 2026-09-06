@@ -131,6 +131,22 @@ public class TestPointInTimeSearchExecution
         }
     }
 
+    @Test
+    public void testIncompleteResponseClosesContextAfterFailureField()
+            throws Exception
+    {
+        for (ElasticsearchConfig.ResponseDecoder decoder : ElasticsearchConfig.ResponseDecoder.values()) {
+            try (Server server = new Server(false, false, false, 1, decoder)) {
+                server.initialSearchResponse = "{\"timed_out\":true,\"hits\":{\"hits\":[]},\"pit_id\":\"newest\"}";
+                assertThatThrownBy(() -> server.scan(TABLE)).isInstanceOf(TrinoException.class).hasMessageContaining("incomplete");
+                assertThat(server.closeBodies).containsExactly("{\"id\":\"newest\"}");
+                assertThat(server.openQueries).hasSize(1);
+                assertThat(server.diagnostics.getFailures()).isEqualTo(1);
+                assertThat(server.diagnostics.getCancellations()).isZero();
+            }
+        }
+    }
+
     private static class Server
             implements AutoCloseable
     {
@@ -140,6 +156,7 @@ public class TestPointInTimeSearchExecution
         private final List<String> searchBodies = new CopyOnWriteArrayList<>();
         private final List<String> closeBodies = new CopyOnWriteArrayList<>();
         private final List<String> openQueries = new CopyOnWriteArrayList<>();
+        private volatile String initialSearchResponse;
 
         public Server(boolean failSearch, boolean invalidValue, boolean failClose)
                 throws IOException
@@ -148,6 +165,12 @@ public class TestPointInTimeSearchExecution
         }
 
         public Server(boolean failSearch, boolean invalidValue, boolean failClose, int failurePage)
+                throws IOException
+        {
+            this(failSearch, invalidValue, failClose, failurePage, ElasticsearchConfig.ResponseDecoder.MATERIALIZED);
+        }
+
+        public Server(boolean failSearch, boolean invalidValue, boolean failClose, int failurePage, ElasticsearchConfig.ResponseDecoder decoder)
                 throws IOException
         {
             server = HttpServer.create(new InetSocketAddress(InetAddress.getLoopbackAddress(), 0), 0);
@@ -175,6 +198,9 @@ public class TestPointInTimeSearchExecution
                         if (searchBodies.size() == 1) {
                             body = "{\"pit_id\":\"updated\",\"hits\":{\"hits\":[{\"_id\":\"1\",\"sort\":[101],\"_source\":{\"id\":" +
                                     (invalidValue ? "\"invalid\"" : "42") + "}}]}}";
+                            if (initialSearchResponse != null) {
+                                body = initialSearchResponse;
+                            }
                         }
                         else {
                             body = "{\"pit_id\":\"latest\",\"hits\":{\"hits\":[]}}";
@@ -190,6 +216,7 @@ public class TestPointInTimeSearchExecution
             client = new ElasticsearchClient(new ElasticsearchConfig()
                     .setHosts(List.of(server.getAddress().getAddress().getHostAddress()))
                     .setPort(server.getAddress().getPort())
+                    .setResponseDecoder(decoder)
                     .setSearchStrategy(ElasticsearchConfig.SearchStrategy.PIT), Optional.empty(), Optional.empty(), diagnostics);
         }
 

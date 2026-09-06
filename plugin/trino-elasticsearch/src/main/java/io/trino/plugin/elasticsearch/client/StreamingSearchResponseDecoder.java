@@ -46,6 +46,7 @@ public final class StreamingSearchResponseDecoder
         ImmutableList.Builder<SearchDocument> hits = ImmutableList.builder();
         List<JsonNode> searchAfter = ImmutableList.of();
         boolean foundHits = false;
+        boolean incomplete = false;
         try (JsonParser parser = JSON_MAPPER.createParser(input)) {
             expect(parser.nextToken(), JsonToken.START_OBJECT);
             while (parser.nextToken() != JsonToken.END_OBJECT) {
@@ -63,13 +64,13 @@ public final class StreamingSearchResponseDecoder
                     }
                     case "timed_out" -> {
                         if (parser.getBooleanValue()) {
-                            throw incomplete();
+                            incomplete = true;
                         }
                     }
                     case "_shards" -> {
                         JsonNode shards = JSON_MAPPER.readTree(parser);
                         if (shards.path("failed").asInt() > 0) {
-                            throw incomplete();
+                            incomplete = true;
                         }
                     }
                     case "hits" -> {
@@ -96,6 +97,11 @@ public final class StreamingSearchResponseDecoder
                     }
                     default -> parser.skipChildren();
                 }
+            }
+            // JSON field order is not significant. Retain context IDs even if failure metadata preceded them,
+            // so the owning strategy can close the latest remote context before propagating the failure.
+            if (incomplete) {
+                throw incomplete();
             }
             if (!foundHits || parser.nextToken() != null) {
                 throw new TrinoException(ELASTICSEARCH_INVALID_RESPONSE, "Invalid search response envelope");
