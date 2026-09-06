@@ -428,12 +428,13 @@ This release boundary does not include runtime observability, metrics, execution
 
 ## P1.3 — Permanent Pushdown Diagnostics and Observability
 
-**Status:** IN PROGRESS — RELEASE AUDIT OPEN
+**Status:** COMPLETE — IMPLEMENTATION GATE GREEN
 
 Implementation is in PR #24 on `feature/elasticsearch-p1.3-observability`.
 The [phase design and release audit](P1.3-OBSERVABILITY-DESIGN.md) tracks the
 architectural contract, verified hardening checkpoints, and remaining gates.
-Implementation and local release checks pass; final GitHub CI remains required.
+Implementation and local release checks pass. Release tagging must use a final
+candidate whose documentation and exact SHA also pass CI.
 
 ### Objective
 
@@ -482,8 +483,13 @@ implementation commit; the earlier history remains on a backup branch.
 GitHub run `34008876905` validates the identical merge tree. Its initial attempt
 passed all connector, Maven, Error Prone, and artifact checks but timed out starting
 the Hive cross-realm impersonation environment during Kerberos tool installation.
-The failed jobs are being retried on the same SHA; this phase remains open until
-the final candidate passes CI. P1.4 and P2 remain outside this release.
+Attempt 2 passed all jobs on the same SHA, including the HDFS impersonation suite.
+The phase implementation gate is complete. Documentation candidate
+`8f97986301ae026de53c4246d0ec5a020a575186` additionally passes local
+`./mvnw -nsu -pl :trino-elasticsearch,:trino-docs -Perrorprone-compiler clean verify`
+with all 830 tests, documentation build, and packaging. Final release evidence is
+tracked on PR #24 against its current head, not inferred from an earlier green SHA.
+P1.4 and P2 remain outside this release.
 
 ### Architectural continuity
 
@@ -642,10 +648,10 @@ P1.2 Predicate Composition + Translation Contract   <- COMPLETE / MERGED / GREEN
 PRODUCTION-STABLE BASELINE                          <- P0 + P1.1 + P1.2 + TEST HARDENING
   │
   ▼
-P1.3 Permanent Diagnostics / Observability          <- NEXT AFTER P1.2 GATE
+P1.3 Permanent Diagnostics / Observability          <- COMPLETE / GREEN
   │
   ▼
-P1.4 Stable Search Execution Framework
+P1.4 Stable Search Execution Framework              <- NEXT PHASE, OUTSIDE THIS RELEASE
   │       ├── Scroll strategy
   │       ├── stable decoder contract
   │       └── PIT + search_after strategy after benchmarks
