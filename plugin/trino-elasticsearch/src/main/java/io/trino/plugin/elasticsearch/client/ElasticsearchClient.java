@@ -479,9 +479,19 @@ public class ElasticsearchClient
 
     public IndexMetadata getIndexMetadata(String index, boolean useBoundedKeyword)
     {
+        return getIndexMetadata(index, useBoundedKeyword, false);
+    }
+
+    public IndexMetadata getIndexMetadataForStatistics(String index, boolean useBoundedKeyword)
+    {
+        return getIndexMetadata(index, useBoundedKeyword, true);
+    }
+
+    private IndexMetadata getIndexMetadata(String index, boolean useBoundedKeyword, boolean statisticsRequest)
+    {
         String path = format("/%s/_mappings", index);
 
-        return doRequest(path, body -> {
+        return doRequest(path, statisticsRequest, body -> {
             try {
                 JsonNode mappings = JSON_MAPPER.readTree(body)
                         .elements().next()
@@ -932,6 +942,7 @@ public class ElasticsearchClient
     {
         ObjectNode body = JSON.objectNode();
         body.put("size", 0);
+        body.put("timeout", statisticsRequestTimeoutMillis + "ms");
         body.put("track_total_hits", true);
         body.set("query", query);
 
@@ -1098,11 +1109,18 @@ public class ElasticsearchClient
 
     private <T> T doRequest(String path, ResponseHandler<T> handler)
     {
+        return doRequest(path, false, handler);
+    }
+
+    private <T> T doRequest(String path, boolean statisticsRequest, ResponseHandler<T> handler)
+    {
         checkArgument(path.startsWith("/"), "path must be an absolute path");
 
         Response response;
         try {
-            response = client.performRequest("GET", path);
+            response = statisticsRequest
+                    ? client.performRequestWithTimeout("GET", path, ImmutableMap.of(), null, statisticsRequestTimeoutMillis)
+                    : client.performRequest("GET", path);
         }
         catch (IOException e) {
             throw new TrinoException(ELASTICSEARCH_CONNECTION_ERROR, e);

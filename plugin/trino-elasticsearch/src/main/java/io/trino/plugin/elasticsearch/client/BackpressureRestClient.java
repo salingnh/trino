@@ -101,7 +101,11 @@ public class BackpressureRestClient
     {
         Request request = toRequest(method, endpoint, params, entity, headers);
         request.setOptions(request.getOptions().toBuilder()
-                .setRequestConfig(RequestConfig.custom().setSocketTimeout(socketTimeoutMillis).build()));
+                .setRequestConfig(RequestConfig.custom()
+                        .setConnectionRequestTimeout(socketTimeoutMillis)
+                        .setConnectTimeout(socketTimeoutMillis)
+                        .setSocketTimeout(socketTimeoutMillis)
+                        .build()));
         return delegate.performRequest(request);
     }
 

@@ -132,6 +132,23 @@ public class TestPointInTimeSearchExecution
     }
 
     @Test
+    public void testHitFailureClosesLaterContext()
+            throws Exception
+    {
+        for (ElasticsearchConfig.ResponseDecoder decoder : ElasticsearchConfig.ResponseDecoder.values()) {
+            try (Server server = new Server(false, false, false, 1, decoder)) {
+                server.initialSearchResponse = "{\"hits\":{\"hits\":[{\"_id\":\"1\",\"_source\":42}]},\"pit_id\":\"newest\"}";
+                assertThatThrownBy(() -> server.scan(TABLE)).isInstanceOf(IllegalArgumentException.class);
+                assertThat(server.closeBodies).containsExactly("{\"id\":\"newest\"}");
+                assertThat(server.openQueries).hasSize(1);
+                assertThat(server.searchBodies).hasSize(1);
+                assertThat(server.diagnostics.getFailures()).isEqualTo(1);
+                assertThat(server.diagnostics.getCancellations()).isZero();
+            }
+        }
+    }
+
+    @Test
     public void testIncompleteResponseClosesContextAfterFailureField()
             throws Exception
     {

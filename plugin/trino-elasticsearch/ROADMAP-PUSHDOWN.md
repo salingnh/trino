@@ -489,7 +489,8 @@ The phase implementation gate is complete. Documentation candidate
 `./mvnw -nsu -pl :trino-elasticsearch,:trino-docs -Perrorprone-compiler clean verify`
 with all 830 tests, documentation build, and packaging. Final release evidence is
 tracked on PR #24 against its current head, not inferred from an earlier green SHA.
-P1.4 and P2 remain outside this release.
+P1.4 and P2 were outside that historical P1.3 release; their current implementation
+and local acceptance are tracked below.
 
 ### Architectural continuity
 
@@ -499,13 +500,15 @@ P1.4 search execution strategies and P2 aggregation/statistics paths must emit i
 
 ## P1.4 — Search Execution Framework and Large-scan Optimization
 
-**Status:** IMPLEMENTED — LOCAL GATE GREEN / CI PENDING
+**Status:** IMPLEMENTED — REVIEW FIXES AND LOCAL ACCEPTANCE COMPLETE
 
 Implementation and measurements are recorded in [the execution audit](P1.4-P2-EXECUTION-DESIGN.md).
-Checklist entries describe delivered code or explicit evidence-based decisions;
-Local validation passes 1,498 tests (zero failures/errors, 680 capability skips),
-including the opt-in benchmarks, AirStyle, Error Prone, ES7/ES8, docs and packaging.
-Release completion still requires exact-SHA CI; its result is tracked on the PR.
+Checklist entries distinguish implementation, correctness tests, measurements,
+and conditional decisions in the execution audit. Historical green gates do not
+certify the review fixes. The final code passes clean verification with Error Prone,
+AirStyle and both expanded benchmarks: 1,515 tests, zero failures/errors and 680
+unsupported-capability skips. External CI/PR review is outside the current task
+and is not claimed here. Default promotion of streaming remains explicitly rejected.
 
 ### Objective
 
@@ -537,7 +540,7 @@ SearchExecutionStrategy
 Define one hit/page decoding interface consumed by all search strategies.
 
 - [x] Existing JsonNode/materialized decoding works through the interface first.
-- [x] Add Jackson streaming decoding as another implementation when benchmark/tests prove benefit.
+- [x] Evaluate Jackson streaming decoding behind the same interface: implementation and equivalence tests delivered; benchmarks show workload-dependent benefit, so default promotion is rejected and the alternative remains opt-in (see execution audit).
 - [x] Decoder selection must not change planner or search-strategy contracts.
 - [x] Validate nested objects, arrays, NULL/missing, timestamps, binary, and raw JSON.
 
@@ -557,11 +560,21 @@ Define one hit/page decoding interface consumed by all search strategies.
 - Accounting is comparable across Scroll and PIT.
 - No optimization requires a later phase to replace the P1.4 execution abstraction.
 
+Local measurement protocol: ES 7.17.27 and 8.11.3, 50,000 documents, three shards,
+100-hit pages, three throughput rounds and a scan lasting at least 60 seconds
+against a one-second keep-alive. Require exact ID coverage, zero duplicate IDs,
+and zero remote open contexts after exhaustion, LIMIT, cancellation and injected
+next-page failure. A new query must succeed after failure; transparent replay of
+the failed snapshot remains forbidden. Report allocation bytes, heap-pool peak
+upper bounds and GC counts/time separately, not as interchangeable memory metrics.
+Decoder measurements use 100/1,000/10,000-hit pages, warm-up and both execution
+orders. Workload-specific benefits do not authorize changing production defaults.
+
 ---
 
 # P2 — Query-shape, Aggregation, and Statistics Hardening
 
-**Status:** IMPLEMENTED — LOCAL GATE GREEN / CI PENDING
+**Status:** IMPLEMENTED — REVIEW FIXES AND LOCAL ACCEPTANCE COMPLETE
 
 P2 extends the permanent P0/P1 planner and execution contracts. It does not introduce a second predicate model, diagnostics path, or scan lifecycle.
 
@@ -573,6 +586,13 @@ P2 extends the permanent P0/P1 planner and execution contracts. It does not intr
 - [x] Add cancellation as soon as the exact required row set is known.
 - [x] Measure request/page/byte reduction through P1.3 accounting.
 - [x] Keep fallback behavior exact when a remote TopN cannot be represented safely.
+
+Exactness includes mapping semantics, not only Trino types: rounded `scaled_float`
+doc values cannot implement ordering/grouping/numeric metrics on original `_source`
+values. Regression coverage must assert fallback and compare SQL results.
+Measure LIMIT and TopN against the same full scan: require three search/page
+requests for shard-local N=10, fewer decoded source bytes, and the correct merged
+global TopN. These byte counters describe decoded source, not compressed wire I/O.
 
 ## P2.2 — Aggregation execution hardening
 
@@ -601,6 +621,17 @@ The conservative fallback remains valid permanently. This phase extends the set 
 - [x] Add request/document-count bounds.
 - [x] Measure planning overhead before adding caches.
 - [x] Add caching/selectivity improvements only through the same statistics contract.
+
+The document threshold gates per-column aggregations, not the initial exact-count
+work. Count, optional mapping lookup and optional column statistics are at most
+three logical requests; transport timeouts are per request, not an end-to-end
+planning deadline. Both mapping and statistics calls bypass backpressure retries;
+search requests additionally carry an Elasticsearch query timeout. Test the
+per-column branch, column limit, rounded mappings, timeout/partial-response and
+mapping-failure fallbacks. Measure warmed row-only and per-column planning calls
+(20 samples, median/p95, request counts and allocations) before considering cache
+work. Cache, page-size configuration and a second aggregation strategy remain
+explicitly not justified, rather than unimplemented mandatory features.
 
 ## P2.4 — Cross-feature invariants
 
@@ -661,12 +692,12 @@ PRODUCTION-STABLE BASELINE                          <- P0 + P1.1 + P1.2 + TEST H
 P1.3 Permanent Diagnostics / Observability          <- COMPLETE / GREEN
   │
   ▼
-P1.4 Stable Search Execution Framework              <- IMPLEMENTED / LOCAL GREEN / CI PENDING
+P1.4 Stable Search Execution Framework              <- IMPLEMENTED / LOCAL ACCEPTANCE COMPLETE
   │       ├── Scroll strategy
   │       ├── stable decoder contract
   │       └── PIT + search_after strategy after benchmarks
   ▼
-P2 Query-shape / Aggregation / Statistics Hardening  <- IMPLEMENTED / LOCAL GREEN / CI PENDING
+P2 Query-shape / Aggregation / Statistics Hardening  <- IMPLEMENTED / LOCAL ACCEPTANCE COMPLETE
   │
   ▼
 P3 Optional SPI Extensions

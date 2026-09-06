@@ -13,11 +13,18 @@
  */
 package io.trino.plugin.elasticsearch;
 
+import com.fasterxml.jackson.databind.json.JsonMapper;
 import com.sun.net.httpserver.HttpServer;
 import io.trino.plugin.elasticsearch.client.ElasticsearchClient;
 import io.trino.plugin.elasticsearch.client.IndexMetadata.PrimitiveType;
 import io.trino.plugin.elasticsearch.decoders.IntegerDecoder;
+import io.trino.plugin.elasticsearch.expression.ElasticsearchRemotePredicate.Term;
 import io.trino.spi.TrinoException;
+import io.trino.spi.connector.ColumnHandle;
+import io.trino.spi.connector.DynamicFilter;
+import io.trino.spi.predicate.Domain;
+import io.trino.spi.predicate.TupleDomain;
+import io.trino.testing.TestingConnectorSession;
 import org.junit.jupiter.api.Test;
 
 import java.io.IOException;
@@ -29,8 +36,10 @@ import java.util.Map;
 import java.util.Optional;
 import java.util.OptionalLong;
 import java.util.Set;
+import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.CopyOnWriteArrayList;
 
+import static io.trino.plugin.elasticsearch.ElasticsearchRemotePredicateTranslator.withRemotePredicate;
 import static io.trino.plugin.elasticsearch.ElasticsearchTableHandle.Type.SCAN;
 import static io.trino.spi.type.IntegerType.INTEGER;
 import static io.trino.type.InternalTypeManager.TESTING_TYPE_MANAGER;
@@ -43,6 +52,91 @@ public class TestElasticsearchPageSourceDiagnostics
     private static final ElasticsearchColumnHandle ID = new ElasticsearchColumnHandle(
             List.of("id"), INTEGER, new PrimitiveType("integer"), new IntegerDecoder.Descriptor("id"), true);
     private static final ElasticsearchTableHandle TABLE = new ElasticsearchTableHandle(SCAN, "default", "events", Optional.empty());
+
+    @Test
+    public void testDynamicFilterPreservesPredicateLimitSortAndProjection()
+            throws Exception
+    {
+        for (List<ElasticsearchColumnSort> sort : List.of(List.<ElasticsearchColumnSort>of(), List.of(new ElasticsearchColumnSort("id", false, false)))) {
+            try (SearchServer server = new SearchServer("42", false, false)) {
+                var table = withRemotePredicate(TABLE.withTopN(1, sort), Optional.of(new Term("status", "active")));
+                var provider = new ElasticsearchPageSourceProvider(server.client, TESTING_TYPE_MANAGER, new ElasticsearchConfig(), server.diagnostics);
+                try (var source = provider.createPageSource(
+                        ElasticsearchTransactionHandle.INSTANCE,
+                        TestingConnectorSession.SESSION,
+                        new ElasticsearchSplit("events", 0, Optional.empty()),
+                        table,
+                        Optional.empty(),
+                        List.of(ID),
+                        dynamicFilter(TupleDomain.withColumnDomains(Map.of(ID, Domain.singleValue(INTEGER, 42L)))))) {
+                    assertThat(source.getNextSourcePage().getPositionCount()).isEqualTo(1);
+                    assertThat(source.isFinished()).isTrue();
+                    assertThat(server.requests).containsExactly("POST /events/_search", "DELETE /_search/scroll");
+                    var request = JsonMapper.builder().build().readTree(server.searchBodies.getFirst());
+                    assertThat(request.path("size").asInt()).isEqualTo(1);
+                    assertThat(request.path("query").toString()).contains("status", "active", "id", "42");
+                    assertThat(request.path("_source").toString()).contains("id");
+                    if (!sort.isEmpty()) {
+                        assertThat(request.path("sort").get(0).path("id").path("order").asText()).isEqualTo("desc");
+                    }
+                    assertThat(server.diagnostics.getDynamicFilterPredicatesPushed()).isEqualTo(1);
+                    assertThat(server.diagnostics.getCancellations()).isZero();
+                }
+            }
+        }
+    }
+
+    private static DynamicFilter dynamicFilter(TupleDomain<ColumnHandle> predicate)
+    {
+        return new DynamicFilter()
+        {
+            @Override
+            public Set<ColumnHandle> getColumnsCovered()
+            {
+                return Set.of(ID);
+            }
+
+            @Override
+            public CompletableFuture<?> isBlocked()
+            {
+                return NOT_BLOCKED;
+            }
+
+            @Override
+            public boolean isComplete()
+            {
+                return true;
+            }
+
+            @Override
+            public boolean isAwaitable()
+            {
+                return false;
+            }
+
+            @Override
+            public TupleDomain<ColumnHandle> getCurrentPredicate()
+            {
+                return predicate;
+            }
+        };
+    }
+
+    @Test
+    public void testHitFailureClosesLaterScrollContext()
+            throws Exception
+    {
+        for (ElasticsearchConfig.ResponseDecoder decoder : ElasticsearchConfig.ResponseDecoder.values()) {
+            try (SearchServer server = new SearchServer("42", false, false, true, decoder)) {
+                server.initialSearchResponse = "{\"hits\":{\"hits\":[{\"_id\":\"1\",\"_source\":42}]},\"_scroll_id\":\"newest\"}";
+                assertThatThrownBy(() -> server.scan(TABLE)).isInstanceOf(IllegalArgumentException.class);
+                assertThat(server.clearBodies).singleElement().asString().contains("newest");
+                assertThat(server.requests).containsExactly("POST /events/_search", "DELETE /_search/scroll");
+                assertThat(server.diagnostics.getFailures()).isEqualTo(1);
+                assertThat(server.diagnostics.getCancellations()).isZero();
+            }
+        }
+    }
 
     @Test
     public void testCloseBeforeReadingClearsInitialScrollExactlyOnce()
@@ -259,7 +353,9 @@ public class TestElasticsearchPageSourceDiagnostics
         private final ElasticsearchPushdownDiagnostics diagnostics = new ElasticsearchPushdownDiagnostics();
         private final List<String> requests = new CopyOnWriteArrayList<>();
         private final List<String> clearBodies = new CopyOnWriteArrayList<>();
+        private final List<String> searchBodies = new CopyOnWriteArrayList<>();
         private volatile String aggregationResponse = "{\"hits\":{\"total\":{\"value\":3,\"relation\":\"eq\"}},\"aggregations\":{}}";
+        private volatile String initialSearchResponse;
 
         public SearchServer(String value, boolean failNextPage, boolean failClear)
                 throws IOException
@@ -268,6 +364,12 @@ public class TestElasticsearchPageSourceDiagnostics
         }
 
         public SearchServer(String value, boolean failNextPage, boolean failClear, boolean includeScroll)
+                throws IOException
+        {
+            this(value, failNextPage, failClear, includeScroll, ElasticsearchConfig.ResponseDecoder.MATERIALIZED);
+        }
+
+        public SearchServer(String value, boolean failNextPage, boolean failClear, boolean includeScroll, ElasticsearchConfig.ResponseDecoder decoder)
                 throws IOException
         {
             server = HttpServer.create(new InetSocketAddress(InetAddress.getLoopbackAddress(), 0), 0);
@@ -284,6 +386,7 @@ public class TestElasticsearchPageSourceDiagnostics
                         body = "{}";
                     }
                     else if (path.equals("/events/_search")) {
+                        searchBodies.add(requestBody);
                         if (requestBody.contains("\"track_total_hits\":true")) {
                             body = aggregationResponse;
                             status = failNextPage ? 500 : 200;
@@ -291,6 +394,9 @@ public class TestElasticsearchPageSourceDiagnostics
                         else {
                             String scroll = includeScroll ? "\"_scroll_id\":\"initial-scroll\"," : "";
                             body = "{" + scroll + "\"hits\":{\"hits\":[{\"_id\":\"1\",\"_source\":{\"id\":" + value + "}}]}}";
+                            if (initialSearchResponse != null) {
+                                body = initialSearchResponse;
+                            }
                         }
                     }
                     else if (path.equals("/events/_count")) {
@@ -311,6 +417,7 @@ public class TestElasticsearchPageSourceDiagnostics
             client = new ElasticsearchClient(
                     new ElasticsearchConfig()
                             .setHosts(List.of(server.getAddress().getAddress().getHostAddress()))
+                            .setResponseDecoder(decoder)
                             .setPort(server.getAddress().getPort()),
                     Optional.empty(),
                     Optional.empty(),

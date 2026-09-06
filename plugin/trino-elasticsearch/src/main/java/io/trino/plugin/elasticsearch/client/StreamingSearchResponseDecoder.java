@@ -16,6 +16,8 @@ package io.trino.plugin.elasticsearch.client;
 import com.fasterxml.jackson.core.JsonParser;
 import com.fasterxml.jackson.core.JsonToken;
 import com.fasterxml.jackson.databind.JsonNode;
+import com.fasterxml.jackson.databind.MappingIterator;
+import com.fasterxml.jackson.databind.ObjectReader;
 import com.fasterxml.jackson.databind.json.JsonMapper;
 import com.google.common.collect.ImmutableList;
 import io.airlift.json.JsonMapperProvider;
@@ -37,6 +39,7 @@ public final class StreamingSearchResponseDecoder
         implements SearchResponseDecoder
 {
     private static final JsonMapper JSON_MAPPER = new JsonMapperProvider().get().rebuild().disable(FAIL_ON_TRAILING_TOKENS).build();
+    private static final ObjectReader HIT_READER = JSON_MAPPER.readerFor(JsonNode.class);
 
     @Override
     public SearchResult decode(InputStream input, Consumer<String> scrollContext, Consumer<String> pointInTimeContext)
@@ -47,6 +50,7 @@ public final class StreamingSearchResponseDecoder
         List<JsonNode> searchAfter = ImmutableList.of();
         boolean foundHits = false;
         boolean incomplete = false;
+        RuntimeException hitFailure = null;
         try (JsonParser parser = JSON_MAPPER.createParser(input)) {
             expect(parser.nextToken(), JsonToken.START_OBJECT);
             while (parser.nextToken() != JsonToken.END_OBJECT) {
@@ -85,14 +89,35 @@ public final class StreamingSearchResponseDecoder
                             }
                             expect(parser.currentToken(), JsonToken.START_ARRAY);
                             foundHits = true;
-                            while (parser.nextToken() != JsonToken.END_ARRAY) {
-                                expect(parser.currentToken(), JsonToken.START_OBJECT);
-                                JsonNode hit = JSON_MAPPER.readTree(parser);
-                                hits.add(MaterializedSearchResponseDecoder.decodeHit(hit));
-                                ImmutableList.Builder<JsonNode> values = ImmutableList.builder();
-                                hit.path("sort").forEach(values::add);
-                                searchAfter = values.build();
+                            JsonNode lastSort = null;
+                            // Share one Jackson deserialization context for the hit sequence instead of
+                            // allocating a fresh context for each readTree call. The outer parser owns the stream.
+                            parser.clearCurrentToken();
+                            try (MappingIterator<JsonNode> values = HIT_READER.readValues(parser)) {
+                                while (values.hasNextValue()) {
+                                    expect(parser.currentToken(), JsonToken.START_OBJECT);
+                                    JsonNode hit = values.nextValue();
+                                    if (hitFailure != null) {
+                                        continue;
+                                    }
+                                    try {
+                                        hits.add(MaterializedSearchResponseDecoder.decodeHit(hit));
+                                    }
+                                    catch (RuntimeException e) {
+                                        // The hit tree is consumed. Drain the envelope to transfer later context IDs,
+                                        // but never return a partial page or decode more hits after the first failure.
+                                        hitFailure = e;
+                                        continue;
+                                    }
+                                    lastSort = hit.get("sort");
+                                }
                             }
+                            // Only the final hit supplies the continuation token; do not copy every hit's sort array.
+                            ImmutableList.Builder<JsonNode> sortValues = ImmutableList.builder();
+                            if (lastSort != null) {
+                                lastSort.forEach(sortValues::add);
+                            }
+                            searchAfter = sortValues.build();
                         }
                     }
                     default -> parser.skipChildren();
@@ -105,6 +130,9 @@ public final class StreamingSearchResponseDecoder
             }
             if (!foundHits || parser.nextToken() != null) {
                 throw new TrinoException(ELASTICSEARCH_INVALID_RESPONSE, "Invalid search response envelope");
+            }
+            if (hitFailure != null) {
+                throw hitFailure;
             }
             return new SearchResult(scrollId, hits.build(), pointInTimeId, searchAfter);
         }
