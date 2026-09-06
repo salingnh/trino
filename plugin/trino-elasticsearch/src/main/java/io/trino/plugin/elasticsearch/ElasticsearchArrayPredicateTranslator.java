@@ -365,7 +365,7 @@ final class ElasticsearchArrayPredicateTranslator
 
     private static Optional<Type> exactArrayElementType(ElasticsearchColumnHandle column)
     {
-        if (column == null || !(column.type() instanceof ArrayType arrayType)) {
+        if (column == null || !column.sourceValueSemanticsExact() || !(column.type() instanceof ArrayType arrayType)) {
             return Optional.empty();
         }
 

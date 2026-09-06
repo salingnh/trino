@@ -451,13 +451,14 @@ public class ElasticsearchConfig
     }
 
     @NotNull
+    @MinDuration("1ms")
     public Duration getStatisticsRequestTimeout()
     {
         return statisticsRequestTimeout;
     }
 
     @Config("elasticsearch.statistics.request-timeout")
-    @ConfigDescription("Socket timeout for a single per-column statistics request; a slow aggregation fails fast (no retry) and falls back to the row count instead of blocking query planning")
+    @ConfigDescription("Per-request timeout for statistics mapping and search work; slow requests fail without retry and fall back conservatively")
     public ElasticsearchConfig setStatisticsRequestTimeout(Duration statisticsRequestTimeout)
     {
         this.statisticsRequestTimeout = statisticsRequestTimeout;
