@@ -17,6 +17,7 @@ import io.trino.plugin.elasticsearch.client.ElasticsearchClient;
 import io.trino.spi.connector.ConnectorPageSource;
 import io.trino.spi.connector.SourcePage;
 
+import static io.trino.plugin.elasticsearch.ElasticsearchPushdownDiagnostics.RemoteRequestKind.COUNT;
 import static io.trino.plugin.elasticsearch.ElasticsearchQueryBuilder.buildSearchQuery;
 import static java.lang.Math.toIntExact;
 import static java.util.Objects.requireNonNull;
@@ -30,20 +31,39 @@ class CountQueryPageSource
     // TODO (https://github.com/trinodb/trino/issues/16824) allow connector to return pages of arbitrary row count and handle this gracefully in engine
     private static final int BATCH_SIZE = 10000;
 
+    private final ElasticsearchPushdownDiagnostics diagnostics;
     private final long readTimeNanos;
     private long remaining;
 
     public CountQueryPageSource(ElasticsearchClient client, ElasticsearchTableHandle table, ElasticsearchSplit split)
     {
+        this(client, table, split, new ElasticsearchPushdownDiagnostics());
+    }
+
+    CountQueryPageSource(
+            ElasticsearchClient client,
+            ElasticsearchTableHandle table,
+            ElasticsearchSplit split,
+            ElasticsearchPushdownDiagnostics diagnostics)
+    {
         requireNonNull(client, "client is null");
         requireNonNull(table, "table is null");
         requireNonNull(split, "split is null");
+        this.diagnostics = requireNonNull(diagnostics, "diagnostics is null");
 
         long start = System.nanoTime();
-        long count = client.count(
-                split.index(),
-                split.shard(),
-                buildSearchQuery(table));
+        long count;
+        diagnostics.recordRemoteRequest(COUNT);
+        try {
+            count = client.count(
+                    split.index(),
+                    split.shard(),
+                    buildSearchQuery(table, diagnostics));
+        }
+        catch (RuntimeException e) {
+            diagnostics.recordFailure();
+            throw e;
+        }
         readTimeNanos = System.nanoTime() - start;
 
         if (table.limit().isPresent()) {
@@ -64,6 +84,7 @@ class CountQueryPageSource
     {
         int batch = toIntExact(Math.min(BATCH_SIZE, remaining));
         remaining -= batch;
+        diagnostics.recordPageReturned();
 
         return SourcePage.create(batch);
     }

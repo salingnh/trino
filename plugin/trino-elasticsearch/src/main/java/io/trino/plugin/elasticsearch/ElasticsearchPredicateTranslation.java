@@ -54,6 +54,7 @@ record ElasticsearchPredicateTranslation<R>(
         NOOP,
         EXACT_DOMAIN,
         EXACT_ARRAY,
+        EXACT_ANY_MATCH,
         EXACT_LIKE,
         EXACT_REGEXP,
         EXACT_PREFIX,
@@ -68,6 +69,16 @@ record ElasticsearchPredicateTranslation<R>(
         UNSUPPORTED_EXPRESSION,
     }
 
+    enum Normalization
+    {
+        AND_FLATTENED,
+        OR_FLATTENED,
+        DUPLICATE_REMOVED,
+        BOOLEAN_COLLAPSED,
+        TERMS_COMPACTED,
+        TERMS_BATCHED,
+    }
+
     /**
      * Immutable semantic snapshot of one translation node. It intentionally contains no SQL or Elasticsearch payload;
      * those remain owned by the translation and Remote Predicate IR. This makes the tree safe for future diagnostics
@@ -79,13 +90,20 @@ record ElasticsearchPredicateTranslation<R>(
             boolean remotePredicatePresent,
             boolean remainingPresent,
             boolean residualPresent,
-            List<Decision> children)
+            List<Decision> children,
+            List<Normalization> normalizations)
     {
+        Decision(Reason reason, Optional<Enforcement> enforcement, boolean remotePredicatePresent, boolean remainingPresent, boolean residualPresent, List<Decision> children)
+        {
+            this(reason, enforcement, remotePredicatePresent, remainingPresent, residualPresent, children, List.of());
+        }
+
         Decision
         {
             requireNonNull(reason, "reason is null");
             requireNonNull(enforcement, "enforcement is null");
             children = List.copyOf(requireNonNull(children, "children is null"));
+            normalizations = List.copyOf(requireNonNull(normalizations, "normalizations is null"));
             checkArgument(remotePredicatePresent == enforcement.isPresent(), "decision remote predicate and enforcement must be present together");
         }
     }
@@ -212,6 +230,18 @@ record ElasticsearchPredicateTranslation<R>(
             Reason reason,
             List<? extends ElasticsearchPredicateTranslation<?>> children)
     {
+        return composed(predicate, enforcement, remaining, residual, reason, children, List.of());
+    }
+
+    static <R> ElasticsearchPredicateTranslation<R> composed(
+            Optional<ElasticsearchRemotePredicate> predicate,
+            Optional<Enforcement> enforcement,
+            Optional<R> remaining,
+            Optional<R> residual,
+            Reason reason,
+            List<? extends ElasticsearchPredicateTranslation<?>> children,
+            List<Normalization> normalizations)
+    {
         requireNonNull(predicate, "predicate is null");
         requireNonNull(enforcement, "enforcement is null");
         requireNonNull(remaining, "remaining is null");
@@ -234,7 +264,8 @@ record ElasticsearchPredicateTranslation<R>(
                         residual.isPresent(),
                         children.stream()
                                 .map(ElasticsearchPredicateTranslation::decision)
-                                .toList()));
+                                .toList(),
+                        normalizations));
     }
 
     private static ElasticsearchRemotePredicate enforce(ElasticsearchRemotePredicate predicate, Enforcement enforcement)

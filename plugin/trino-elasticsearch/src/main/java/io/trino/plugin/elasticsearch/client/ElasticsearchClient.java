@@ -32,6 +32,7 @@ import io.airlift.stats.TimeStat;
 import io.airlift.units.Duration;
 import io.trino.plugin.elasticsearch.AwsSecurityConfig;
 import io.trino.plugin.elasticsearch.ElasticsearchConfig;
+import io.trino.plugin.elasticsearch.ElasticsearchPushdownDiagnostics;
 import io.trino.plugin.elasticsearch.PasswordConfig;
 import io.trino.spi.TrinoException;
 import jakarta.annotation.PostConstruct;
@@ -135,13 +136,22 @@ public class ElasticsearchClient
     private final TimeStat countStats = new TimeStat(MILLISECONDS);
     private final TimeStat backpressureStats = new TimeStat(MILLISECONDS);
 
-    @Inject
     public ElasticsearchClient(
             ElasticsearchConfig config,
             Optional<AwsSecurityConfig> awsSecurityConfig,
             Optional<PasswordConfig> passwordConfig)
     {
-        client = createClient(config, awsSecurityConfig, passwordConfig, backpressureStats);
+        this(config, awsSecurityConfig, passwordConfig, new ElasticsearchPushdownDiagnostics());
+    }
+
+    @Inject
+    public ElasticsearchClient(
+            ElasticsearchConfig config,
+            Optional<AwsSecurityConfig> awsSecurityConfig,
+            Optional<PasswordConfig> passwordConfig,
+            ElasticsearchPushdownDiagnostics diagnostics)
+    {
+        client = createClient(config, awsSecurityConfig, passwordConfig, backpressureStats, diagnostics);
 
         this.ignorePublishAddress = config.isIgnorePublishAddress();
         this.scrollSize = config.getScrollSize();
@@ -201,7 +211,8 @@ public class ElasticsearchClient
             ElasticsearchConfig config,
             Optional<AwsSecurityConfig> awsSecurityConfig,
             Optional<PasswordConfig> passwordConfig,
-            TimeStat backpressureStats)
+            TimeStat backpressureStats,
+            ElasticsearchPushdownDiagnostics diagnostics)
     {
         RestClientBuilder builder = RestClient.builder(
                 config.getHosts().stream()
@@ -247,7 +258,7 @@ public class ElasticsearchClient
             return clientBuilder;
         });
 
-        return new BackpressureRestClient(builder.build(), config, backpressureStats);
+        return new BackpressureRestClient(builder.build(), config, backpressureStats, diagnostics);
     }
 
     private static AwsCredentialsProvider getAwsCredentialsProvider(AwsSecurityConfig config)

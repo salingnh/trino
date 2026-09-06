@@ -38,6 +38,7 @@ import static io.trino.plugin.elasticsearch.ElasticsearchRemotePredicateTranslat
 import static io.trino.plugin.elasticsearch.ElasticsearchRemotePredicateTranslator.combine;
 import static io.trino.plugin.elasticsearch.ElasticsearchRemotePredicateTranslator.withRemotePredicate;
 import static io.trino.plugin.elasticsearch.ElasticsearchSessionProperties.getFullTextPushdownMode;
+import static java.util.Objects.requireNonNull;
 
 /**
  * Rule-based Elasticsearch metadata facade.
@@ -49,10 +50,22 @@ import static io.trino.plugin.elasticsearch.ElasticsearchSessionProperties.getFu
 public class RuleBasedElasticsearchMetadata
         extends CasePreservingElasticsearchMetadata
 {
-    @Inject
+    private final ElasticsearchPushdownDiagnostics diagnostics;
+
     public RuleBasedElasticsearchMetadata(TypeManager typeManager, ElasticsearchClient client, ElasticsearchConfig config)
     {
+        this(typeManager, client, config, new ElasticsearchPushdownDiagnostics());
+    }
+
+    @Inject
+    public RuleBasedElasticsearchMetadata(
+            TypeManager typeManager,
+            ElasticsearchClient client,
+            ElasticsearchConfig config,
+            ElasticsearchPushdownDiagnostics diagnostics)
+    {
         super(typeManager, client, config);
+        this.diagnostics = requireNonNull(diagnostics, "diagnostics is null");
     }
 
     @Override
@@ -66,6 +79,7 @@ public class RuleBasedElasticsearchMetadata
                 session,
                 constraint,
                 getFullTextPushdownMode(session));
+        predicatePlan.decisions().forEach(diagnostics::recordTranslation);
         Constraint preparedConstraint = predicatePlan.remainingConstraint();
 
         Optional<ElasticsearchRemotePredicate> inheritedPredicate = combine(input.remotePredicate(), predicatePlan.remotePredicate());

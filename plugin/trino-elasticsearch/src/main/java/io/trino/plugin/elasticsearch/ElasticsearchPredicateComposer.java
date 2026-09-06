@@ -14,6 +14,7 @@
 package io.trino.plugin.elasticsearch;
 
 import io.trino.plugin.base.expression.ConnectorExpressions;
+import io.trino.plugin.elasticsearch.ElasticsearchPredicateTranslation.Normalization;
 import io.trino.plugin.elasticsearch.ElasticsearchPredicateTranslation.Reason;
 import io.trino.plugin.elasticsearch.expression.ElasticsearchRemotePredicate;
 import io.trino.plugin.elasticsearch.expression.ElasticsearchRemotePredicate.Enforcement;
@@ -30,7 +31,10 @@ import java.util.List;
 import java.util.Map;
 import java.util.Optional;
 import java.util.Set;
+import java.util.function.Consumer;
 
+import static io.trino.plugin.elasticsearch.ElasticsearchPredicateTranslation.Normalization.TERMS_BATCHED;
+import static io.trino.plugin.elasticsearch.ElasticsearchPredicateTranslation.Normalization.TERMS_COMPACTED;
 import static io.trino.plugin.elasticsearch.expression.ElasticsearchRemotePredicate.Enforcement.APPROXIMATE;
 import static io.trino.plugin.elasticsearch.expression.ElasticsearchRemotePredicate.Enforcement.EXACT;
 import static io.trino.plugin.elasticsearch.expression.ElasticsearchRemotePredicate.Enforcement.PREFILTER;
@@ -64,6 +68,7 @@ final class ElasticsearchPredicateComposer
         requireNonNull(policy, "policy is null");
 
         List<ElasticsearchRemotePredicate> remotePredicates = new ArrayList<>();
+        List<Normalization> normalizations = new ArrayList<>();
         List<ConnectorExpression> remaining = new ArrayList<>();
         List<ConnectorExpression> residual = new ArrayList<>();
         boolean approximate = false;
@@ -76,7 +81,7 @@ final class ElasticsearchPredicateComposer
             approximate |= child.enforcement().filter(value -> value == APPROXIMATE).isPresent();
         }
 
-        Optional<ElasticsearchRemotePredicate> remotePredicate = ElasticsearchRemotePredicateNormalizer.and(remotePredicates);
+        Optional<ElasticsearchRemotePredicate> remotePredicate = ElasticsearchRemotePredicateNormalizer.and(remotePredicates, normalizations::add);
         Optional<ConnectorExpression> remainingExpression = andExpressions(remaining);
         Optional<ConnectorExpression> residualExpression = andExpressions(residual);
 
@@ -87,7 +92,8 @@ final class ElasticsearchPredicateComposer
                     remainingExpression,
                     residualExpression,
                     Reason.BOOLEAN_AND,
-                    children);
+                    children,
+                    normalizations);
         }
         if (!isWithinRequestBudget(remotePredicate.orElseThrow(), policy)) {
             return ElasticsearchPredicateTranslation.composed(
@@ -96,7 +102,8 @@ final class ElasticsearchPredicateComposer
                     Optional.empty(),
                     Optional.of(source),
                     Reason.BOOLEAN_AND,
-                    children);
+                    children,
+                    normalizations);
         }
 
         Enforcement enforcement;
@@ -116,7 +123,8 @@ final class ElasticsearchPredicateComposer
                 remainingExpression,
                 residualExpression,
                 Reason.BOOLEAN_AND,
-                children);
+                children,
+                normalizations);
     }
 
     static ElasticsearchPredicateTranslation<ConnectorExpression> or(
@@ -150,7 +158,8 @@ final class ElasticsearchPredicateComposer
         List<ElasticsearchRemotePredicate> remotePredicates = children.stream()
                 .map(child -> child.remotePredicate().orElseThrow())
                 .toList();
-        Optional<List<ElasticsearchRemotePredicate>> compacted = compactExactTerms(remotePredicates, policy);
+        List<Normalization> normalizations = new ArrayList<>();
+        Optional<List<ElasticsearchRemotePredicate>> compacted = compactExactTerms(remotePredicates, policy, normalizations::add);
         if (compacted.isEmpty()) {
             return ElasticsearchPredicateTranslation.composed(
                     Optional.empty(),
@@ -158,10 +167,11 @@ final class ElasticsearchPredicateComposer
                     Optional.empty(),
                     Optional.of(source),
                     Reason.BOOLEAN_OR,
-                    children);
+                    children,
+                    normalizations);
         }
 
-        Optional<ElasticsearchRemotePredicate> remotePredicate = ElasticsearchRemotePredicateNormalizer.or(compacted.orElseThrow());
+        Optional<ElasticsearchRemotePredicate> remotePredicate = ElasticsearchRemotePredicateNormalizer.or(compacted.orElseThrow(), normalizations::add);
         if (remotePredicate.isEmpty() || !isWithinRequestBudget(remotePredicate.orElseThrow(), policy)) {
             return ElasticsearchPredicateTranslation.composed(
                     Optional.empty(),
@@ -169,7 +179,8 @@ final class ElasticsearchPredicateComposer
                     Optional.empty(),
                     Optional.of(source),
                     Reason.BOOLEAN_OR,
-                    children);
+                    children,
+                    normalizations);
         }
 
         boolean approximate = children.stream()
@@ -185,7 +196,8 @@ final class ElasticsearchPredicateComposer
                 Optional.empty(),
                 needsResidual ? Optional.of(source) : Optional.empty(),
                 Reason.BOOLEAN_OR,
-                children);
+                children,
+                normalizations);
     }
 
     static ElasticsearchPredicateTranslation<ConnectorExpression> not(ConnectorExpression source)
@@ -199,9 +211,10 @@ final class ElasticsearchPredicateComposer
 
     private static Optional<List<ElasticsearchRemotePredicate>> compactExactTerms(
             List<ElasticsearchRemotePredicate> predicates,
-            ElasticsearchPredicateCompositionPolicy policy)
+            ElasticsearchPredicateCompositionPolicy policy,
+            Consumer<Normalization> events)
     {
-        Optional<ElasticsearchRemotePredicate> normalized = ElasticsearchRemotePredicateNormalizer.or(predicates);
+        Optional<ElasticsearchRemotePredicate> normalized = ElasticsearchRemotePredicateNormalizer.or(predicates, events);
         if (normalized.isEmpty()) {
             return Optional.of(List.of());
         }
@@ -253,6 +266,9 @@ final class ElasticsearchPredicateComposer
             }
 
             List<Value> values = List.copyOf(valuesByField.get(field));
+            if (values.size() > policy.termsBatchSize()) {
+                events.accept(TERMS_BATCHED);
+            }
             for (int offset = 0; offset < values.size(); offset += policy.termsBatchSize()) {
                 int end = Math.min(offset + policy.termsBatchSize(), values.size());
                 List<Value> batch = values.subList(offset, end);
@@ -267,6 +283,9 @@ final class ElasticsearchPredicateComposer
 
         if (result.size() > policy.maxBooleanClauses()) {
             return Optional.empty();
+        }
+        if (!result.equals(disjuncts)) {
+            events.accept(TERMS_COMPACTED);
         }
         return Optional.of(List.copyOf(result));
     }

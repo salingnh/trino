@@ -13,12 +13,18 @@
  */
 package io.trino.plugin.elasticsearch;
 
+import io.trino.plugin.elasticsearch.ElasticsearchPredicateTranslation.Normalization;
 import io.trino.plugin.elasticsearch.expression.ElasticsearchRemotePredicate;
 
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Optional;
+import java.util.function.Consumer;
 
+import static io.trino.plugin.elasticsearch.ElasticsearchPredicateTranslation.Normalization.AND_FLATTENED;
+import static io.trino.plugin.elasticsearch.ElasticsearchPredicateTranslation.Normalization.BOOLEAN_COLLAPSED;
+import static io.trino.plugin.elasticsearch.ElasticsearchPredicateTranslation.Normalization.DUPLICATE_REMOVED;
+import static io.trino.plugin.elasticsearch.ElasticsearchPredicateTranslation.Normalization.OR_FLATTENED;
 import static java.util.Objects.requireNonNull;
 
 /**
@@ -39,15 +45,22 @@ final class ElasticsearchRemotePredicateNormalizer
 
     static Optional<ElasticsearchRemotePredicate> and(List<ElasticsearchRemotePredicate> predicates)
     {
+        return and(predicates, _ -> {});
+    }
+
+    static Optional<ElasticsearchRemotePredicate> and(List<ElasticsearchRemotePredicate> predicates, Consumer<Normalization> events)
+    {
         requireNonNull(predicates, "predicates is null");
         List<ElasticsearchRemotePredicate> flattened = new ArrayList<>();
         for (ElasticsearchRemotePredicate predicate : predicates) {
-            addConjunct(flattened, normalize(requireNonNull(predicate, "predicate is null")));
+            addConjunct(flattened, normalize(requireNonNull(predicate, "predicate is null"), events), events);
         }
         if (flattened.isEmpty()) {
+            events.accept(BOOLEAN_COLLAPSED);
             return Optional.empty();
         }
         if (flattened.size() == 1) {
+            events.accept(BOOLEAN_COLLAPSED);
             return Optional.of(flattened.getFirst());
         }
         return Optional.of(new ElasticsearchRemotePredicate.And(flattened));
@@ -55,15 +68,22 @@ final class ElasticsearchRemotePredicateNormalizer
 
     static Optional<ElasticsearchRemotePredicate> or(List<ElasticsearchRemotePredicate> predicates)
     {
+        return or(predicates, _ -> {});
+    }
+
+    static Optional<ElasticsearchRemotePredicate> or(List<ElasticsearchRemotePredicate> predicates, Consumer<Normalization> events)
+    {
         requireNonNull(predicates, "predicates is null");
         List<ElasticsearchRemotePredicate> flattened = new ArrayList<>();
         for (ElasticsearchRemotePredicate predicate : predicates) {
-            addDisjunct(flattened, normalize(requireNonNull(predicate, "predicate is null")));
+            addDisjunct(flattened, normalize(requireNonNull(predicate, "predicate is null"), events), events);
         }
         if (flattened.isEmpty()) {
+            events.accept(BOOLEAN_COLLAPSED);
             return Optional.empty();
         }
         if (flattened.size() == 1) {
+            events.accept(BOOLEAN_COLLAPSED);
             return Optional.of(flattened.getFirst());
         }
         return Optional.of(new ElasticsearchRemotePredicate.Or(flattened));
@@ -71,37 +91,50 @@ final class ElasticsearchRemotePredicateNormalizer
 
     static ElasticsearchRemotePredicate normalize(ElasticsearchRemotePredicate predicate)
     {
+        return normalize(predicate, _ -> {});
+    }
+
+    private static ElasticsearchRemotePredicate normalize(ElasticsearchRemotePredicate predicate, Consumer<Normalization> events)
+    {
         requireNonNull(predicate, "predicate is null");
         return switch (predicate) {
-            case ElasticsearchRemotePredicate.And and -> and(and.predicates()).orElseThrow();
-            case ElasticsearchRemotePredicate.Or or -> or(or.predicates()).orElseThrow();
-            case ElasticsearchRemotePredicate.Not not -> new ElasticsearchRemotePredicate.Not(normalize(not.predicate()));
+            case ElasticsearchRemotePredicate.And and -> and(and.predicates(), events).orElseThrow();
+            case ElasticsearchRemotePredicate.Or or -> or(or.predicates(), events).orElseThrow();
+            case ElasticsearchRemotePredicate.Not not -> new ElasticsearchRemotePredicate.Not(normalize(not.predicate(), events));
             case ElasticsearchRemotePredicate.Enforced enforced -> new ElasticsearchRemotePredicate.Enforced(
-                    normalize(enforced.predicate()),
+                    normalize(enforced.predicate(), events),
                     enforced.enforcement());
             default -> predicate;
         };
     }
 
-    private static void addConjunct(List<ElasticsearchRemotePredicate> conjuncts, ElasticsearchRemotePredicate predicate)
+    private static void addConjunct(List<ElasticsearchRemotePredicate> conjuncts, ElasticsearchRemotePredicate predicate, Consumer<Normalization> events)
     {
         if (predicate instanceof ElasticsearchRemotePredicate.And and) {
-            and.predicates().forEach(child -> addConjunct(conjuncts, child));
+            events.accept(AND_FLATTENED);
+            and.predicates().forEach(child -> addConjunct(conjuncts, child, events));
             return;
         }
         if (!conjuncts.contains(predicate)) {
             conjuncts.add(predicate);
         }
+        else {
+            events.accept(DUPLICATE_REMOVED);
+        }
     }
 
-    private static void addDisjunct(List<ElasticsearchRemotePredicate> disjuncts, ElasticsearchRemotePredicate predicate)
+    private static void addDisjunct(List<ElasticsearchRemotePredicate> disjuncts, ElasticsearchRemotePredicate predicate, Consumer<Normalization> events)
     {
         if (predicate instanceof ElasticsearchRemotePredicate.Or or) {
-            or.predicates().forEach(child -> addDisjunct(disjuncts, child));
+            events.accept(OR_FLATTENED);
+            or.predicates().forEach(child -> addDisjunct(disjuncts, child, events));
             return;
         }
         if (!disjuncts.contains(predicate)) {
             disjuncts.add(predicate);
+        }
+        else {
+            events.accept(DUPLICATE_REMOVED);
         }
     }
 }

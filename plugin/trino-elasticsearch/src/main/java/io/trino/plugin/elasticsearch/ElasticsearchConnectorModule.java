@@ -37,9 +37,11 @@ public class ElasticsearchConnectorModule
         binder.bind(ElasticsearchSplitManager.class).in(Scopes.SINGLETON);
         binder.bind(ElasticsearchPageSourceProvider.class).in(Scopes.SINGLETON);
         binder.bind(ElasticsearchClient.class).in(Scopes.SINGLETON);
+        binder.bind(ElasticsearchPushdownDiagnostics.class).in(Scopes.SINGLETON);
         binder.bind(NodesSystemTable.class).in(Scopes.SINGLETON);
 
         newExporter(binder).export(ElasticsearchClient.class).withGeneratedName();
+        newExporter(binder).export(ElasticsearchPushdownDiagnostics.class).withGeneratedName();
 
         configBinder(binder).bindConfig(ElasticsearchConfig.class);
 
