@@ -48,6 +48,7 @@ import static io.trino.spi.type.TinyintType.TINYINT;
 import static io.trino.spi.type.VarcharType.VARCHAR;
 import static java.lang.Math.floorDiv;
 import static java.lang.Math.toIntExact;
+import static java.nio.charset.StandardCharsets.UTF_8;
 import static java.time.format.DateTimeFormatter.ISO_DATE_TIME;
 import static java.util.Objects.requireNonNull;
 
@@ -56,6 +57,14 @@ public final class ElasticsearchQueryBuilder
     private static final JsonNodeFactory JSON = JsonNodeFactory.instance;
 
     private ElasticsearchQueryBuilder() {}
+
+    public static JsonNode buildSearchQuery(ElasticsearchTableHandle table, ElasticsearchPushdownDiagnostics diagnostics)
+    {
+        requireNonNull(diagnostics, "diagnostics is null");
+        JsonNode query = buildSearchQuery(table);
+        diagnostics.recordRenderedQuery(table.remotePredicate(), query.toString().getBytes(UTF_8).length);
+        return query;
+    }
 
     public static JsonNode buildSearchQuery(ElasticsearchTableHandle table)
     {

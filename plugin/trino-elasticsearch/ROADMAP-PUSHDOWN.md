@@ -428,7 +428,12 @@ This release boundary does not include runtime observability, metrics, execution
 
 ## P1.3 — Permanent Pushdown Diagnostics and Observability
 
-**Status:** NOT STARTED
+**Status:** IN PROGRESS — RELEASE AUDIT OPEN
+
+Implementation is in PR #24 on `feature/elasticsearch-p1.3-observability`.
+The [phase design and release audit](P1.3-OBSERVABILITY-DESIGN.md) tracks the
+architectural contract, verified hardening checkpoints, and remaining gates.
+Passing connector tests does not close the outstanding diagnostics and release audit.
 
 ### Objective
 

@@ -16,6 +16,7 @@ package io.trino.plugin.elasticsearch;
 import io.airlift.slice.Slice;
 import io.airlift.slice.Slices;
 import io.trino.plugin.base.expression.ConnectorExpressions;
+import io.trino.plugin.elasticsearch.ElasticsearchPredicateTranslation.Decision;
 import io.trino.plugin.elasticsearch.ElasticsearchPredicateTranslation.Reason;
 import io.trino.plugin.elasticsearch.client.IndexMetadata.PrimitiveType;
 import io.trino.plugin.elasticsearch.expression.ElasticsearchExpressionRewrite;
@@ -86,6 +87,7 @@ final class ElasticsearchPredicatePushdownPlanner
                 : constraint;
 
         List<ElasticsearchRemotePredicate> remotePredicates = new ArrayList<>();
+        List<Decision> decisions = new ArrayList<>();
         Map<ColumnHandle, Domain> remainingDomains = new HashMap<>(normalizedConstraint.getSummary().getDomains().orElse(Map.of()));
         Map<ColumnHandle, Domain> residualDomains = new HashMap<>();
 
@@ -94,6 +96,7 @@ final class ElasticsearchPredicatePushdownPlanner
             Domain domain = entry.getValue();
             ElasticsearchPredicateTranslation<Domain> translation = translateDomainPredicate(column, domain, fullTextMode);
 
+            decisions.add(translation.decision());
             translation.remotePredicate().ifPresent(remotePredicates::add);
             if (translation.remaining().isEmpty()) {
                 remainingDomains.remove(column);
@@ -106,6 +109,7 @@ final class ElasticsearchPredicatePushdownPlanner
                 normalizedConstraint.getExpression(),
                 normalizedConstraint.getAssignments(),
                 fullTextMode);
+        decisions.add(expressionTranslation.decision());
         expressionTranslation.remotePredicate().ifPresent(remotePredicates::add);
 
         Constraint remainingConstraint = new Constraint(
@@ -116,7 +120,8 @@ final class ElasticsearchPredicatePushdownPlanner
                 remainingConstraint,
                 conjunction(remotePredicates),
                 TupleDomain.withColumnDomains(residualDomains),
-                expressionTranslation.residual().map(List::of).orElseGet(List::of));
+                expressionTranslation.residual().map(List::of).orElseGet(List::of),
+                decisions);
     }
 
     private static ElasticsearchPredicateTranslation<Domain> translateDomainPredicate(
@@ -197,7 +202,10 @@ final class ElasticsearchPredicatePushdownPlanner
 
         Optional<ElasticsearchRemotePredicate> arrayPredicate = ElasticsearchArrayPredicateTranslator.translate(expression, assignments);
         if (arrayPredicate.isPresent()) {
-            return ElasticsearchPredicateTranslation.exact(arrayPredicate.orElseThrow(), Reason.EXACT_ARRAY);
+            Reason reason = expression instanceof Call call && call.getFunctionName().getName().equals("any_match")
+                    ? Reason.EXACT_ANY_MATCH
+                    : Reason.EXACT_ARRAY;
+            return ElasticsearchPredicateTranslation.exact(arrayPredicate.orElseThrow(), reason);
         }
 
         Optional<ElasticsearchPredicateTranslation<ConnectorExpression>> regexpPredicate = translateRegexp(expression, assignments, fullTextMode);
@@ -521,7 +529,8 @@ final class ElasticsearchPredicatePushdownPlanner
             Constraint remainingConstraint,
             Optional<ElasticsearchRemotePredicate> remotePredicate,
             TupleDomain<ColumnHandle> residualFilter,
-            List<ConnectorExpression> residualExpressions)
+            List<ConnectorExpression> residualExpressions,
+            List<Decision> decisions)
     {
         public Result
         {
@@ -529,6 +538,7 @@ final class ElasticsearchPredicatePushdownPlanner
             requireNonNull(remotePredicate, "remotePredicate is null");
             requireNonNull(residualFilter, "residualFilter is null");
             residualExpressions = List.copyOf(requireNonNull(residualExpressions, "residualExpressions is null"));
+            decisions = List.copyOf(requireNonNull(decisions, "decisions is null"));
         }
     }
 }

@@ -37,9 +37,12 @@ import java.util.stream.IntStream;
 
 import static io.airlift.slice.Slices.utf8Slice;
 import static io.trino.plugin.elasticsearch.ElasticsearchQueryBuilder.buildSearchQuery;
+import static io.trino.plugin.elasticsearch.ElasticsearchRemotePredicateTranslator.withRemotePredicate;
+import static io.trino.plugin.elasticsearch.ElasticsearchTableHandle.Type.SCAN;
 import static io.trino.spi.type.DoubleType.DOUBLE;
 import static io.trino.spi.type.IntegerType.INTEGER;
 import static io.trino.spi.type.VarcharType.VARCHAR;
+import static java.nio.charset.StandardCharsets.UTF_8;
 import static org.assertj.core.api.Assertions.assertThat;
 
 public class TestElasticsearchQueryBuilder
@@ -50,6 +53,33 @@ public class TestElasticsearchQueryBuilder
     private static final ElasticsearchColumnHandle AGE = new ElasticsearchColumnHandle(ImmutableList.of("age"), INTEGER, new IndexMetadata.PrimitiveType("int"), new IntegerDecoder.Descriptor("age"), true);
     private static final ElasticsearchColumnHandle SCORE = new ElasticsearchColumnHandle(ImmutableList.of("score"), DOUBLE, new IndexMetadata.PrimitiveType("double"), new DoubleDecoder.Descriptor("score"), true);
     private static final ElasticsearchColumnHandle LENGTH = new ElasticsearchColumnHandle(ImmutableList.of("length"), DOUBLE, new IndexMetadata.PrimitiveType("double"), new DoubleDecoder.Descriptor("length"), true);
+
+    @Test
+    public void testRenderingDiagnosticsPreserveQueryAndHandle()
+    {
+        ElasticsearchRemotePredicate predicate = new ElasticsearchRemotePredicate.Terms("name", List.of("ngô", "văn"));
+        ElasticsearchTableHandle table = withRemotePredicate(
+                new ElasticsearchTableHandle(SCAN, "default", "events", Optional.empty()),
+                Optional.of(predicate));
+        ElasticsearchPushdownDiagnostics diagnostics = new ElasticsearchPushdownDiagnostics();
+        JsonNode expected = buildSearchQuery(table);
+
+        assertThat(buildSearchQuery(table, diagnostics)).isEqualTo(expected);
+        assertThat(buildSearchQuery(table, diagnostics)).isEqualTo(expected);
+        assertThat(table.remotePredicate()).contains(predicate);
+        assertThat(diagnostics.snapshot().renderedQueries()).isEqualTo(2);
+        assertThat(diagnostics.snapshot().renderedQueryBytes()).isEqualTo(2L * expected.toString().getBytes(UTF_8).length);
+        assertThat(diagnostics.snapshot().remotePredicateNodes()).isEqualTo(2);
+        assertThat(diagnostics.snapshot().termsValues()).isEqualTo(4);
+        assertThat(diagnostics.getRenderedQueries()).isEqualTo(diagnostics.snapshot().renderedQueries());
+        assertThat(diagnostics.getRenderedQueryBytes()).isEqualTo(diagnostics.snapshot().renderedQueryBytes());
+        assertThat(diagnostics.getTranslationNodes()).isZero();
+
+        ElasticsearchTableHandle unfiltered = new ElasticsearchTableHandle(SCAN, "default", "events", Optional.empty());
+        assertThat(buildSearchQuery(unfiltered, diagnostics)).isEqualTo(buildSearchQuery(unfiltered));
+        assertThat(diagnostics.getRenderedQueries()).isEqualTo(3);
+        assertThat(diagnostics.getRemotePredicateNodes()).isEqualTo(2);
+    }
 
     @Test
     public void testMatchAll()

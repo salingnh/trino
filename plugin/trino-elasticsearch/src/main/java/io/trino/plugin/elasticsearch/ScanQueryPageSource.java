@@ -38,11 +38,12 @@ import java.util.Map;
 import java.util.Map.Entry;
 import java.util.Optional;
 import java.util.OptionalLong;
-import java.util.function.Supplier;
 
 import static com.google.common.collect.ImmutableList.toImmutableList;
 import static io.trino.plugin.elasticsearch.BuiltinColumns.SOURCE;
 import static io.trino.plugin.elasticsearch.BuiltinColumns.isBuiltinColumn;
+import static io.trino.plugin.elasticsearch.ElasticsearchPushdownDiagnostics.RemoteRequestKind.NEXT_PAGE;
+import static io.trino.plugin.elasticsearch.ElasticsearchPushdownDiagnostics.RemoteRequestKind.SEARCH;
 import static io.trino.plugin.elasticsearch.ElasticsearchQueryBuilder.buildSearchQuery;
 import static io.trino.plugin.elasticsearch.ElasticsearchQueryBuilder.buildSort;
 import static io.trino.spi.type.TimestampType.TIMESTAMP_MILLIS;
@@ -60,6 +61,7 @@ public class ScanQueryPageSource
     private final SearchDocumentIterator iterator;
     private final BlockBuilder[] columnBuilders;
     private final List<ElasticsearchColumnHandle> columns;
+    private final ElasticsearchPushdownDiagnostics diagnostics;
     private long totalBytes;
     private long readTimeNanos;
 
@@ -70,9 +72,21 @@ public class ScanQueryPageSource
             ElasticsearchSplit split,
             List<ElasticsearchColumnHandle> columns)
     {
+        this(client, typeManager, table, split, columns, new ElasticsearchPushdownDiagnostics());
+    }
+
+    ScanQueryPageSource(
+            ElasticsearchClient client,
+            TypeManager typeManager,
+            ElasticsearchTableHandle table,
+            ElasticsearchSplit split,
+            List<ElasticsearchColumnHandle> columns,
+            ElasticsearchPushdownDiagnostics diagnostics)
+    {
         requireNonNull(client, "client is null");
         requireNonNull(typeManager, "typeManager is null");
         requireNonNull(columns, "columns is null");
+        this.diagnostics = requireNonNull(diagnostics, "diagnostics is null");
 
         this.columns = ImmutableList.copyOf(columns);
 
@@ -104,16 +118,24 @@ public class ScanQueryPageSource
         List<JsonNode> sort = buildSort(table.sortOrder(), table.query().isPresent());
 
         long start = System.nanoTime();
-        SearchResult searchResult = client.beginSearch(
-                split.index(),
-                split.shard(),
-                buildSearchQuery(table),
-                needAllFields ? Optional.empty() : Optional.of(requiredFields),
-                documentFields,
-                sort,
-                table.limit());
+        SearchResult searchResult;
+        diagnostics.recordRemoteRequest(SEARCH);
+        try {
+            searchResult = client.beginSearch(
+                    split.index(),
+                    split.shard(),
+                    buildSearchQuery(table, diagnostics),
+                    needAllFields ? Optional.empty() : Optional.of(requiredFields),
+                    documentFields,
+                    sort,
+                    table.limit());
+        }
+        catch (RuntimeException e) {
+            diagnostics.recordFailure();
+            throw e;
+        }
         readTimeNanos += System.nanoTime() - start;
-        this.iterator = new SearchDocumentIterator(client, () -> searchResult, table.limit());
+        this.iterator = new SearchDocumentIterator(client, searchResult, table.limit(), diagnostics);
     }
 
     @Override
@@ -131,7 +153,7 @@ public class ScanQueryPageSource
     @Override
     public boolean isFinished()
     {
-        return !iterator.hasNext();
+        return iterator.isClosed() || !iterator.hasNext();
     }
 
     @Override
@@ -142,6 +164,20 @@ public class ScanQueryPageSource
 
     @Override
     public SourcePage getNextSourcePage()
+    {
+        if (iterator.isClosed()) {
+            return null;
+        }
+        try {
+            return readPage();
+        }
+        catch (RuntimeException e) {
+            iterator.fail();
+            throw e;
+        }
+    }
+
+    private SourcePage readPage()
     {
         long size = 0;
         while (size < PageBuilderStatus.DEFAULT_MAX_PAGE_SIZE_IN_BYTES && iterator.hasNext()) {
@@ -163,6 +199,7 @@ public class ScanQueryPageSource
             }
 
             totalBytes += document.sourceLength();
+            diagnostics.recordDecodedRows(1, document.sourceLength());
 
             size = Arrays.stream(columnBuilders)
                     .mapToLong(BlockBuilder::getSizeInBytes)
@@ -175,6 +212,7 @@ public class ScanQueryPageSource
             columnBuilders[i] = columnBuilders[i].newBlockBuilderLike(null);
         }
 
+        diagnostics.recordPageReturned();
         return SourcePage.create(new Page(blocks));
     }
 
@@ -260,8 +298,8 @@ public class ScanQueryPageSource
             extends AbstractIterator<SearchDocument>
     {
         private final ElasticsearchClient client;
-        private final Supplier<SearchResult> first;
         private final OptionalLong limit;
+        private final ElasticsearchPushdownDiagnostics diagnostics;
 
         private List<SearchDocument> currentHits;
         private String scrollId;
@@ -269,13 +307,26 @@ public class ScanQueryPageSource
 
         private long readTimeNanos;
         private long totalRecordCount;
+        private boolean closed;
+        private boolean failed;
+        private boolean exhausted;
 
-        public SearchDocumentIterator(ElasticsearchClient client, Supplier<SearchResult> first, OptionalLong limit)
+        public SearchDocumentIterator(
+                ElasticsearchClient client,
+                SearchResult first,
+                OptionalLong limit,
+                ElasticsearchPushdownDiagnostics diagnostics)
         {
-            this.client = client;
-            this.first = first;
-            this.limit = limit;
+            this.client = requireNonNull(client, "client is null");
+            this.limit = requireNonNull(limit, "limit is null");
+            this.diagnostics = requireNonNull(diagnostics, "diagnostics is null");
             this.totalRecordCount = 0;
+            reset(requireNonNull(first, "first is null"));
+        }
+
+        public boolean isClosed()
+        {
+            return closed;
         }
 
         public long getReadTimeNanos()
@@ -286,49 +337,83 @@ public class ScanQueryPageSource
         @Override
         protected SearchDocument computeNext()
         {
-            if (limit.isPresent() && totalRecordCount == limit.orElseThrow()) {
+            if (closed || limitReached()) {
                 // No more record is necessary.
+                exhausted = true;
                 return endOfData();
             }
 
-            if (scrollId == null) {
+            if (currentPosition == currentHits.size() && !exhausted && scrollId != null) {
                 long start = System.nanoTime();
-                SearchResult result = first.get();
-                readTimeNanos += System.nanoTime() - start;
-                reset(result);
-            }
-            else if (currentPosition == currentHits.size()) {
-                long start = System.nanoTime();
-                SearchResult result = client.nextPage(scrollId);
+                SearchResult result;
+                diagnostics.recordRemoteRequest(NEXT_PAGE);
+                try {
+                    result = client.nextPage(scrollId);
+                }
+                catch (RuntimeException e) {
+                    fail();
+                    throw e;
+                }
                 readTimeNanos += System.nanoTime() - start;
                 reset(result);
             }
 
             if (currentPosition == currentHits.size()) {
+                exhausted = true;
                 return endOfData();
             }
 
             SearchDocument document = currentHits.get(currentPosition);
             currentPosition++;
             totalRecordCount++;
+            if (scrollId == null && currentPosition == currentHits.size()) {
+                exhausted = true;
+            }
 
             return document;
         }
 
         private void reset(SearchResult result)
         {
+            diagnostics.recordRemotePageReceived();
             scrollId = result.scrollId().orElse(null);
             currentHits = result.hits();
             currentPosition = 0;
+            exhausted = currentHits.isEmpty();
+        }
+
+        private boolean limitReached()
+        {
+            return limit.isPresent() && totalRecordCount >= limit.orElseThrow();
+        }
+
+        public void fail()
+        {
+            if (!failed) {
+                failed = true;
+                diagnostics.recordFailure();
+            }
+            close();
         }
 
         public void close()
         {
+            if (closed) {
+                return;
+            }
+            closed = true;
+            // This is a downstream early close, not necessarily a user-cancelled query. A pushed LIMIT and
+            // observed remote exhaustion are normal completion; failed scans are accounted separately.
+            if (!failed && !exhausted && !limitReached()) {
+                diagnostics.recordCancellation();
+            }
             if (scrollId != null) {
+                diagnostics.recordClearScroll();
                 try {
                     client.clearScroll(scrollId);
                 }
                 catch (Exception e) {
+                    diagnostics.recordFailure();
                     // ignore
                     LOG.debug(e, "Error clearing scroll");
                 }

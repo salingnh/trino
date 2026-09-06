@@ -22,6 +22,12 @@ import org.junit.jupiter.api.Test;
 
 import java.util.List;
 
+import static io.trino.plugin.elasticsearch.ElasticsearchPredicateTranslation.Normalization.AND_FLATTENED;
+import static io.trino.plugin.elasticsearch.ElasticsearchPredicateTranslation.Normalization.BOOLEAN_COLLAPSED;
+import static io.trino.plugin.elasticsearch.ElasticsearchPredicateTranslation.Normalization.DUPLICATE_REMOVED;
+import static io.trino.plugin.elasticsearch.ElasticsearchPredicateTranslation.Normalization.OR_FLATTENED;
+import static io.trino.plugin.elasticsearch.ElasticsearchPredicateTranslation.Normalization.TERMS_BATCHED;
+import static io.trino.plugin.elasticsearch.ElasticsearchPredicateTranslation.Normalization.TERMS_COMPACTED;
 import static io.trino.plugin.elasticsearch.ElasticsearchRemotePredicateSemantics.effectiveEnforcement;
 import static io.trino.plugin.elasticsearch.expression.ElasticsearchRemotePredicate.Enforcement.APPROXIMATE;
 import static io.trino.plugin.elasticsearch.expression.ElasticsearchRemotePredicate.Enforcement.EXACT;
@@ -33,6 +39,47 @@ public class TestElasticsearchPredicateComposer
 {
     private static final ConnectorExpression A = new Variable("a", BOOLEAN);
     private static final ConnectorExpression B = new Variable("b", BOOLEAN);
+
+    @Test
+    public void testNormalizationEventsPreserveSemanticDecisionTree()
+    {
+        ElasticsearchRemotePredicate.Term first = new ElasticsearchRemotePredicate.Term("status", "active");
+        ElasticsearchRemotePredicate.Term second = new ElasticsearchRemotePredicate.Term("status", "pending");
+        ElasticsearchPredicateTranslation<ConnectorExpression> conjunction = ElasticsearchPredicateComposer.and(
+                A,
+                List.of(
+                        ElasticsearchPredicateTranslation.exact(new ElasticsearchRemotePredicate.And(List.of(first, second)), Reason.EXACT_DOMAIN),
+                        ElasticsearchPredicateTranslation.exact(first, Reason.EXACT_DOMAIN)));
+        assertThat(conjunction.decision().normalizations()).containsExactly(AND_FLATTENED, DUPLICATE_REMOVED);
+        assertThat(conjunction.remotePredicate()).contains(new ElasticsearchRemotePredicate.And(List.of(first, second)));
+        assertThat(conjunction.decision().children()).hasSize(2);
+
+        ElasticsearchPredicateTranslation<ConnectorExpression> disjunction = ElasticsearchPredicateComposer.or(
+                A,
+                List.of(
+                        ElasticsearchPredicateTranslation.exact(new ElasticsearchRemotePredicate.Or(List.of(first, second)), Reason.EXACT_DOMAIN),
+                        exact("status", "closed")),
+                new ElasticsearchPredicateCompositionPolicy(10, 2, 10));
+        assertThat(disjunction.decision().normalizations()).containsExactly(OR_FLATTENED, TERMS_BATCHED, TERMS_COMPACTED);
+        assertThat(disjunction.remotePredicate()).contains(new ElasticsearchRemotePredicate.Or(List.of(
+                new ElasticsearchRemotePredicate.Terms("status", List.of("active", "pending")),
+                new ElasticsearchRemotePredicate.Term("status", "closed"))));
+
+        ElasticsearchPredicateTranslation<ConnectorExpression> singleton = ElasticsearchPredicateComposer.and(A, List.of(exact("status", "active")));
+        assertThat(singleton.decision().normalizations()).containsExactly(BOOLEAN_COLLAPSED);
+        assertThat(singleton.remotePredicate()).contains(first);
+
+        ElasticsearchPushdownDiagnostics diagnostics = new ElasticsearchPushdownDiagnostics();
+        diagnostics.recordTranslation(conjunction.decision());
+        diagnostics.recordTranslation(disjunction.decision());
+        diagnostics.recordTranslation(singleton.decision());
+        ElasticsearchPushdownDiagnostics.Snapshot snapshot = diagnostics.snapshot();
+        assertThat(snapshot.normalizationCounts().values()).containsOnly(1L);
+        diagnostics.recordTranslation(conjunction.decision());
+        assertThat(diagnostics.getNormalizationCounts()).containsEntry("AND_FLATTENED", 2L).containsEntry("DUPLICATE_REMOVED", 2L);
+        assertThat(snapshot.normalizationCounts().values()).containsOnly(1L);
+        assertThat(conjunction.decision().normalizations()).containsExactly(AND_FLATTENED, DUPLICATE_REMOVED);
+    }
 
     @Test
     public void testExactAndExactStaysExact()

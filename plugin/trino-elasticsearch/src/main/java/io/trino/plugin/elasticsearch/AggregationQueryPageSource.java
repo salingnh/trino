@@ -69,10 +69,15 @@ class AggregationQueryPageSource
 
     public AggregationQueryPageSource(ElasticsearchClient client, ElasticsearchTableHandle table, List<ElasticsearchColumnHandle> columns)
     {
+        this(client, table, columns, new ElasticsearchPushdownDiagnostics());
+    }
+
+    public AggregationQueryPageSource(ElasticsearchClient client, ElasticsearchTableHandle table, List<ElasticsearchColumnHandle> columns, ElasticsearchPushdownDiagnostics diagnostics)
+    {
         this.client = requireNonNull(client, "client is null");
         requireNonNull(table, "table is null");
         this.index = table.index();
-        this.filterQuery = buildSearchQuery(table);
+        this.filterQuery = buildSearchQuery(table, diagnostics);
         ElasticsearchAggregation aggregation = table.aggregation().orElseThrow(() -> new IllegalArgumentException("table handle has no aggregation"));
         this.groupingColumns = aggregation.groupingColumns();
         this.aggregates = aggregation.aggregates();
