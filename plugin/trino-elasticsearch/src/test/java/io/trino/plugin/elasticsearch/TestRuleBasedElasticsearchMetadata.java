@@ -15,6 +15,7 @@ package io.trino.plugin.elasticsearch;
 
 import io.trino.plugin.elasticsearch.client.ElasticsearchClient;
 import io.trino.plugin.elasticsearch.client.IndexMetadata;
+import io.trino.plugin.elasticsearch.decoders.DoubleDecoder;
 import io.trino.plugin.elasticsearch.decoders.IntegerDecoder;
 import io.trino.plugin.elasticsearch.decoders.VarcharDecoder;
 import io.trino.plugin.elasticsearch.expression.ElasticsearchRemotePredicate;
@@ -44,6 +45,7 @@ import static io.trino.plugin.elasticsearch.ElasticsearchRemotePredicateTranslat
 import static io.trino.plugin.elasticsearch.ElasticsearchTableHandle.Type.SCAN;
 import static io.trino.plugin.elasticsearch.FullTextPushdownMode.SAFE;
 import static io.trino.spi.expression.Constant.TRUE;
+import static io.trino.spi.type.DoubleType.DOUBLE;
 import static io.trino.spi.type.IntegerType.INTEGER;
 import static io.trino.spi.type.VarcharType.VARCHAR;
 import static io.trino.type.InternalTypeManager.TESTING_TYPE_MANAGER;
@@ -99,6 +101,16 @@ public class TestRuleBasedElasticsearchMetadata
 
         assertThat(pushed.remotePredicate()).contains(new ElasticsearchRemotePredicate.Term("UserID", 10L));
         assertThat(metadata.applyFilter(session, pushed, constraint)).isEmpty();
+    }
+
+    @Test
+    public void testTopNRejectsRoundedDocValues()
+    {
+        ElasticsearchColumnHandle rounded = new ElasticsearchColumnHandle(
+                List.of("amount"), DOUBLE, new IndexMetadata.ScaledFloatType(10), new DoubleDecoder.Descriptor("amount"), false);
+        for (SortOrder order : SortOrder.values()) {
+            assertThat(metadata.applyTopN(session, emptyTable(), 1, List.of(new SortItem("amount", order)), Map.of("amount", rounded))).isEmpty();
+        }
     }
 
     @Test

@@ -14,11 +14,12 @@
 package io.trino.plugin.elasticsearch.client;
 
 import io.airlift.log.Logger;
+import io.trino.plugin.elasticsearch.BenchmarkMemory;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.condition.EnabledIfSystemProperty;
+import org.junit.jupiter.api.parallel.Isolated;
 
 import java.io.ByteArrayInputStream;
-import java.lang.management.ManagementFactory;
 import java.util.List;
 import java.util.stream.IntStream;
 
@@ -27,6 +28,7 @@ import static java.util.stream.Collectors.joining;
 import static org.assertj.core.api.Assertions.assertThat;
 
 @EnabledIfSystemProperty(named = "elasticsearch.benchmark", matches = "true")
+@Isolated
 public class TestSearchResponseDecoderBenchmark
 {
     private static final Logger LOG = Logger.get(TestSearchResponseDecoderBenchmark.class);
@@ -34,7 +36,7 @@ public class TestSearchResponseDecoderBenchmark
     @Test
     public void measureRepresentativePages()
     {
-        for (int count : List.of(100, 1000)) {
+        for (int count : List.of(100, 1000, 10000)) {
             String hits = IntStream.range(0, count)
                     .mapToObj(id -> """
                                     {"_id":"%s","sort":[%s],"_source":{"id":%s,"text":"ngô văn %s","nested":{"tags":["a",null,"b"],"timestamp":"2026-09-06T00:00:00Z"}}}
@@ -47,24 +49,20 @@ public class TestSearchResponseDecoderBenchmark
                     for (int warmup = 0; warmup < 30; warmup++) {
                         assertThat(decoder.decode(new ByteArrayInputStream(json)).hits()).hasSize(count);
                     }
-                    long collections = gcCollections();
+                    BenchmarkMemory memory = new BenchmarkMemory();
                     long start = System.nanoTime();
                     for (int iteration = 0; iteration < 100; iteration++) {
                         assertThat(decoder.decode(new ByteArrayInputStream(json)).hits()).hasSize(count);
                     }
-                    LOG.info("decoder=%s hits=%s round=%s ns/page=%s gcCollections=%s",
+                    LOG.info("decoder=%s hits=%s round=%s ns/page=%s allocatedBytes/page=%s %s",
                             decoder.getClass().getSimpleName(),
                             count,
                             round,
                             (System.nanoTime() - start) / 100,
-                            gcCollections() - collections);
+                            memory.allocatedBytes() / 100,
+                            memory.summary());
                 }
             }
         }
-    }
-
-    private static long gcCollections()
-    {
-        return ManagementFactory.getGarbageCollectorMXBeans().stream().mapToLong(bean -> Math.max(0, bean.getCollectionCount())).sum();
     }
 }

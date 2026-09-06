@@ -77,6 +77,20 @@ public class TestSearchResponseDecoder
     }
 
     @Test
+    public void testHitFailureRetainsLaterContexts()
+    {
+        for (SearchResponseDecoder decoder : DECODERS) {
+            for (String hit : List.of("{\"_id\":\"1\",\"_source\":42}", "{\"_source\":{}}")) {
+                List<String> contexts = new ArrayList<>();
+                byte[] json = ("{\"hits\":{\"hits\":[" + hit + ",{\"_id\":\"2\",\"_source\":{}}]},\"_scroll_id\":\"scroll\",\"pit_id\":\"pit\"}").getBytes(UTF_8);
+                assertThatThrownBy(() -> decoder.decode(new ByteArrayInputStream(json), contexts::add, contexts::add))
+                        .isInstanceOf(RuntimeException.class);
+                assertThat(contexts).containsExactly("scroll", "pit");
+            }
+        }
+    }
+
+    @Test
     public void testContextOwnershipPrecedesValidation()
     {
         for (SearchResponseDecoder decoder : DECODERS) {

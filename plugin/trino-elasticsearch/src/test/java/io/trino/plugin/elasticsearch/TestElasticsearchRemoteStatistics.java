@@ -13,7 +13,9 @@
  */
 package io.trino.plugin.elasticsearch;
 
+import com.fasterxml.jackson.databind.json.JsonMapper;
 import com.sun.net.httpserver.HttpServer;
+import io.airlift.units.Duration;
 import io.trino.plugin.elasticsearch.client.ElasticsearchClient;
 import io.trino.plugin.elasticsearch.expression.ElasticsearchRemotePredicate;
 import io.trino.plugin.elasticsearch.expression.ElasticsearchRemotePredicate.And;
@@ -29,11 +31,13 @@ import java.net.InetSocketAddress;
 import java.util.List;
 import java.util.Optional;
 import java.util.concurrent.CopyOnWriteArrayList;
+import java.util.function.BiFunction;
 
 import static io.trino.plugin.elasticsearch.ElasticsearchRemotePredicateTranslator.withRemotePredicate;
 import static io.trino.plugin.elasticsearch.ElasticsearchTableHandle.Type.SCAN;
 import static io.trino.type.InternalTypeManager.TESTING_TYPE_MANAGER;
 import static java.nio.charset.StandardCharsets.UTF_8;
+import static java.util.concurrent.TimeUnit.MILLISECONDS;
 import static org.assertj.core.api.Assertions.assertThat;
 
 public class TestElasticsearchRemoteStatistics
@@ -42,6 +46,135 @@ public class TestElasticsearchRemoteStatistics
             .setPropertyMetadata(new ElasticsearchSessionProperties(new ElasticsearchConfig()).getSessionProperties())
             .build();
     private static final ElasticsearchTableHandle TABLE = new ElasticsearchTableHandle(SCAN, "default", "events", Optional.empty());
+    private static final String ROW_COUNT = "{\"timed_out\":false,\"hits\":{\"total\":{\"value\":7,\"relation\":\"eq\"}}}";
+    private static final String MAPPING = "{\"events\":{\"mappings\":{\"properties\":{\"amount\":{\"type\":\"double\"},\"other\":{\"type\":\"double\"},\"rounded\":{\"type\":\"scaled_float\",\"scaling_factor\":10}}}}}";
+    private static final String COLUMN_STATISTICS = "{\"hits\":{\"total\":{\"value\":7,\"relation\":\"eq\"}},\"aggregations\":{\"f0_card\":{\"value\":3},\"f0_count\":{\"value\":6},\"f0_min\":{\"value\":1},\"f0_max\":{\"value\":9}}}";
+
+    @Test
+    public void testPerColumnStatisticsPreservePredicateAndColumnBound()
+            throws Exception
+    {
+        try (Server server = new Server(
+                new ElasticsearchConfig().setStatisticsMaxIndexDocuments(10).setStatisticsMaxColumns(1),
+                (path, body) -> path.endsWith("_mappings") ? MAPPING : body.contains("\"aggs\"") ? COLUMN_STATISTICS : ROW_COUNT)) {
+            ElasticsearchTableHandle handle = withRemotePredicate(TABLE, Optional.of(new And(List.of(new Term("amount", 1), new Term("other", 1)))));
+            var statistics = server.metadata.getTableStatistics(SESSION, handle);
+            assertThat(statistics.getRowCount().getValue()).isEqualTo(7);
+            assertThat(statistics.getColumnStatistics()).hasSize(1);
+            var column = statistics.getColumnStatistics().values().iterator().next();
+            assertThat(column.getDistinctValuesCount().getValue()).isEqualTo(3);
+            assertThat(column.getNullsFraction().getValue()).isEqualTo(1.0 / 7);
+            assertThat(column.getRange().orElseThrow().getMin()).isEqualTo(1);
+            assertThat(column.getRange().orElseThrow().getMax()).isEqualTo(9);
+            assertThat(server.paths).containsExactly("/events/_search", "/events/_mappings", "/events/_search");
+            JsonMapper mapper = JsonMapper.builder().build();
+            var first = mapper.readTree(server.requests.getFirst());
+            var last = mapper.readTree(server.requests.getLast());
+            assertThat(last.get("query")).isEqualTo(first.get("query"));
+            assertThat(last.get("timeout").asText()).isEqualTo("5000ms");
+            assertThat(last.get("aggs").size()).isEqualTo(4);
+            assertThat(server.diagnostics.getStatisticsRequests()).isEqualTo(2);
+        }
+    }
+
+    @Test
+    public void testColumnFailurePreservesRowEstimate()
+            throws Exception
+    {
+        for (String response : List.of("{}", "{\"timed_out\":true}", "{\"_shards\":{\"failed\":1}}", "{\"hits\":{\"total\":{\"value\":7,\"relation\":\"gte\"}}}")) {
+            try (Server server = new Server(
+                    new ElasticsearchConfig().setStatisticsMaxIndexDocuments(10),
+                    (path, body) -> path.endsWith("_mappings") ? MAPPING : body.contains("\"aggs\"") ? response : ROW_COUNT)) {
+                var statistics = server.metadata.getTableStatistics(SESSION, withRemotePredicate(TABLE, Optional.of(new Term("amount", 1))));
+                assertThat(statistics.getRowCount().getValue()).isEqualTo(7);
+                assertThat(statistics.getColumnStatistics()).isEmpty();
+                assertThat(server.paths).hasSize(3);
+                assertThat(server.diagnostics.getFailures()).isEqualTo(1);
+            }
+        }
+    }
+
+    @Test
+    public void testMappingFailurePreservesRowEstimate()
+            throws Exception
+    {
+        try (Server server = new Server(
+                new ElasticsearchConfig().setStatisticsMaxIndexDocuments(10),
+                (path, _) -> path.endsWith("_mappings") ? "{}" : ROW_COUNT)) {
+            var statistics = server.metadata.getTableStatistics(SESSION, withRemotePredicate(TABLE, Optional.of(new Term("amount", 1))));
+            assertThat(statistics.getRowCount().getValue()).isEqualTo(7);
+            assertThat(statistics.getColumnStatistics()).isEmpty();
+            assertThat(server.paths).containsExactly("/events/_search", "/events/_mappings");
+        }
+    }
+
+    @Test
+    public void testRoundedDocValuesDoNotBecomeSourceStatistics()
+            throws Exception
+    {
+        try (Server server = new Server(
+                new ElasticsearchConfig().setStatisticsMaxIndexDocuments(10),
+                (path, _) -> path.endsWith("_mappings") ? MAPPING : ROW_COUNT)) {
+            var statistics = server.metadata.getTableStatistics(SESSION, withRemotePredicate(TABLE, Optional.of(new Term("rounded", 1))));
+            assertThat(statistics.getRowCount().getValue()).isEqualTo(7);
+            assertThat(statistics.getColumnStatistics()).isEmpty();
+            assertThat(server.diagnostics.getStatisticsRequests()).isEqualTo(1);
+        }
+    }
+
+    @Test
+    public void testMappingTimeoutPreservesRowEstimate()
+            throws Exception
+    {
+        try (Server server = new Server(new ElasticsearchConfig().setStatisticsMaxIndexDocuments(10).setStatisticsRequestTimeout(new Duration(100, MILLISECONDS)),
+                (path, _) -> {
+                    if (path.endsWith("_mappings")) {
+                        try {
+                            Thread.sleep(3000);
+                        }
+                        catch (InterruptedException e) {
+                            Thread.currentThread().interrupt();
+                            throw new RuntimeException(e);
+                        }
+                        return MAPPING;
+                    }
+                    return ROW_COUNT;
+                })) {
+            var statistics = server.metadata.getTableStatistics(SESSION, withRemotePredicate(TABLE, Optional.of(new Term("amount", 1))));
+            assertThat(statistics.getRowCount().getValue()).isEqualTo(7);
+            assertThat(statistics.getColumnStatistics()).isEmpty();
+            assertThat(server.paths).containsExactly("/events/_search", "/events/_mappings");
+        }
+    }
+
+    @Test
+    public void testColumnTimeoutDoesNotRetryOrDiscardRowEstimate()
+            throws Exception
+    {
+        try (Server server = new Server(new ElasticsearchConfig().setStatisticsMaxIndexDocuments(10).setStatisticsRequestTimeout(new Duration(100, MILLISECONDS)),
+                (path, body) -> {
+                    if (path.endsWith("_mappings")) {
+                        return MAPPING;
+                    }
+                    if (body.contains("\"aggs\"")) {
+                        try {
+                            Thread.sleep(3000);
+                        }
+                        catch (InterruptedException e) {
+                            Thread.currentThread().interrupt();
+                            throw new RuntimeException(e);
+                        }
+                    }
+                    return ROW_COUNT;
+                })) {
+            var statistics = server.metadata.getTableStatistics(SESSION, withRemotePredicate(TABLE, Optional.of(new Term("amount", 1))));
+            assertThat(statistics.getRowCount().getValue()).isEqualTo(7);
+            assertThat(statistics.getColumnStatistics()).isEmpty();
+            assertThat(server.diagnostics.getStatisticsRequests()).isEqualTo(2);
+            assertThat(server.diagnostics.getFailures()).isEqualTo(1);
+            assertThat(server.paths).hasSize(3);
+        }
+    }
 
     @Test
     public void testExactRemoteFilterReachesStatistics()
@@ -95,24 +228,33 @@ public class TestElasticsearchRemoteStatistics
         private final RuleBasedElasticsearchMetadata metadata;
         private final ElasticsearchPushdownDiagnostics diagnostics = new ElasticsearchPushdownDiagnostics();
         private final List<String> requests = new CopyOnWriteArrayList<>();
+        private final List<String> paths = new CopyOnWriteArrayList<>();
 
         public Server(boolean partial)
+                throws IOException
+        {
+            this(new ElasticsearchConfig().setStatisticsMaxIndexDocuments(5),
+                    (_, _) -> "{\"timed_out\":" + partial + ",\"hits\":{\"total\":{\"value\":7,\"relation\":\"eq\"}}}");
+        }
+
+        public Server(ElasticsearchConfig config, BiFunction<String, String, String> response)
                 throws IOException
         {
             server = HttpServer.create(new InetSocketAddress(InetAddress.getLoopbackAddress(), 0), 0);
             server.createContext("/", exchange -> {
                 try (exchange) {
-                    requests.add(new String(exchange.getRequestBody().readAllBytes(), UTF_8));
-                    byte[] body = ("{\"timed_out\":" + partial + ",\"hits\":{\"total\":{\"value\":7,\"relation\":\"eq\"}}}").getBytes(UTF_8);
+                    String path = exchange.getRequestURI().getPath();
+                    String request = new String(exchange.getRequestBody().readAllBytes(), UTF_8);
+                    paths.add(path);
+                    requests.add(request);
+                    byte[] body = response.apply(path, request).getBytes(UTF_8);
                     exchange.getResponseHeaders().add("Content-Type", "application/json");
                     exchange.sendResponseHeaders(200, body.length);
                     exchange.getResponseBody().write(body);
                 }
             });
             server.start();
-            ElasticsearchConfig config = new ElasticsearchConfig()
-                    .setStatisticsMaxIndexDocuments(5)
-                    .setHosts(List.of(server.getAddress().getAddress().getHostAddress()))
+            config.setHosts(List.of(server.getAddress().getAddress().getHostAddress()))
                     .setPort(server.getAddress().getPort());
             client = new ElasticsearchClient(config, Optional.empty(), Optional.empty(), diagnostics);
             metadata = new RuleBasedElasticsearchMetadata(TESTING_TYPE_MANAGER, client, config, diagnostics);

@@ -598,13 +598,16 @@ public class ElasticsearchMetadata
         if (referenced.isEmpty()) {
             return ImmutableList.of();
         }
-        return makeInternalTableMetadata(handle.schema(), handle.index(), useBoundedKeyword).columnHandles().values().stream()
+        IndexMetadata metadata = client.getIndexMetadataForStatistics(handle.index(), useBoundedKeyword);
+        return makeColumnHandles(getColumnFields(metadata)).values().stream()
                 .map(ElasticsearchColumnHandle.class::cast)
                 .filter(column -> column.path().size() == 1)
                 // Array columns are excluded: value_count aggregates every array element and can exceed the row count
                 .filter(column -> !(column.type() instanceof ArrayType))
                 .filter(column -> !BuiltinColumns.isBuiltinColumn(column.name()))
                 .filter(column -> isAggregatable(column.elasticsearchType()))
+                // Statistics must describe the values returned from _source, not rounded doc values.
+                .filter(column -> !(column.elasticsearchType() instanceof ScaledFloatType))
                 .filter(column -> referenced.contains(column.name()) || referenced.contains(column.predicateName()))
                 .limit(statisticsMaxColumns)
                 .collect(toImmutableList());
@@ -751,6 +754,7 @@ public class ElasticsearchMetadata
         for (SortItem sortItem : sortItems) {
             ElasticsearchColumnHandle column = (ElasticsearchColumnHandle) assignments.get(sortItem.getName());
             if (column == null || BuiltinColumns.isBuiltinColumn(column.name()) || !isAggregatable(column.elasticsearchType())
+                    || column.elasticsearchType() instanceof ScaledFloatType
                     || !(isSupportedGroupingType(column.type()) || column.type().equals(TIMESTAMP_MILLIS))) {
                 return Optional.empty();
             }
@@ -804,7 +808,8 @@ public class ElasticsearchMetadata
         for (ColumnHandle columnHandle : groupingSets.get(0)) {
             ElasticsearchColumnHandle column = (ElasticsearchColumnHandle) columnHandle;
             // Grouping keys become composite terms sources: the field must be aggregatable (doc_values), exact, and a type we can decode
-            if (BuiltinColumns.isBuiltinColumn(column.name()) || !isAggregatable(column.elasticsearchType()) || !isSupportedGroupingType(column.type())) {
+            if (BuiltinColumns.isBuiltinColumn(column.name()) || !isAggregatable(column.elasticsearchType())
+                    || column.elasticsearchType() instanceof ScaledFloatType || !isSupportedGroupingType(column.type())) {
                 return Optional.empty();
             }
             // Grouping columns pass through unchanged: they belong only in the grouping-column mapping,
@@ -894,7 +899,9 @@ public class ElasticsearchMetadata
     private static Optional<ElasticsearchAggregate> numericAggregate(String outputName, Function function, List<ConnectorExpression> arguments, Map<String, ColumnHandle> assignments, Type outputType)
     {
         Optional<ElasticsearchColumnHandle> column = aggregateColumn(arguments, assignments);
-        if (column.isEmpty() || !isAggregatable(column.get().elasticsearchType()) || !supportsNumericAggregate(function, column.get().type())) {
+        // scaled_float doc values are rounded, while the scan decoder returns the original _source value.
+        if (column.isEmpty() || !isAggregatable(column.get().elasticsearchType())
+                || column.get().elasticsearchType() instanceof ScaledFloatType || !supportsNumericAggregate(function, column.get().type())) {
             return Optional.empty();
         }
         return Optional.of(new ElasticsearchAggregate(outputName, function, Optional.of(column.get().predicateName()), outputType));
