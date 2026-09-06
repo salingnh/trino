@@ -75,6 +75,10 @@ public class RuleBasedElasticsearchMetadata
             Constraint constraint)
     {
         ElasticsearchTableHandle input = (ElasticsearchTableHandle) table;
+        if (input.limit().isPresent() || input.aggregation().isPresent()) {
+            // A predicate above LIMIT/TopN or aggregation cannot be moved below that query-shape boundary.
+            return Optional.empty();
+        }
         ElasticsearchPredicatePushdownPlanner.Result predicatePlan = ElasticsearchPredicatePushdownPlanner.plan(
                 session,
                 constraint,
@@ -149,9 +153,8 @@ public class RuleBasedElasticsearchMetadata
     public TableStatistics getTableStatistics(ConnectorSession session, ConnectorTableHandle table)
     {
         ElasticsearchTableHandle handle = (ElasticsearchTableHandle) table;
-        if (handle.remotePredicate().isPresent()) {
-            // The legacy statistics path does not yet render remotePredicate. Returning no statistics is conservative:
-            // an unfiltered estimate would be incorrect and can make the optimizer choose a bad join/order strategy.
+        if (handle.remotePredicate().filter(predicate -> !predicate.isExact()).isPresent()) {
+            // Candidate and approximate remote counts do not describe the rows after residual evaluation.
             return TableStatistics.empty();
         }
         return super.getTableStatistics(session, table);

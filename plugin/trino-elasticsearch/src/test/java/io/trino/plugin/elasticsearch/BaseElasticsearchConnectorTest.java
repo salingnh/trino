@@ -74,7 +74,23 @@ public abstract class BaseElasticsearchConnectorTest
         return ElasticsearchQueryRunner.builder(server)
                 .setInitialTables(REQUIRED_TPCH_TABLES)
                 .addConnectorProperties(Map.of("jmx.base-name", jmxBaseName))
+                .addConnectorProperties(connectorProperties())
                 .build();
+    }
+
+    protected Map<String, String> connectorProperties()
+    {
+        return Map.of();
+    }
+
+    @Test
+    public void testExecutionQueryShapeBoundaries()
+    {
+        assertQuery("SELECT orderkey FROM (SELECT orderkey, totalprice FROM orders ORDER BY orderkey LIMIT 25) WHERE totalprice > 5000");
+        assertQuery("SELECT orderkey FROM (SELECT orderkey, totalprice FROM orders ORDER BY orderkey LIMIT 25) ORDER BY totalprice, orderkey LIMIT 5");
+        assertQuery("SELECT orderkey FROM orders WHERE orderkey > 100 ORDER BY orderkey LIMIT 7");
+        assertQuery("SELECT orderstatus, count(*) FROM orders WHERE orderkey > 100 GROUP BY orderstatus");
+        assertQuery("SELECT o.orderkey FROM orders o JOIN nation n ON o.orderkey = n.nationkey WHERE n.regionkey = 1 ORDER BY o.orderkey LIMIT 3");
     }
 
     @AfterAll
