@@ -2,7 +2,7 @@
 
 ## Status
 
-**IMPLEMENTATION IN PROGRESS — A0 PASS; A1 PASS; A2 PASS; A3 PASS; A4 PASS; A5 PASS; A6 PASS; A7 PASS; A8 PASS; A9 NOT STARTED**
+**IMPLEMENTATION IN PROGRESS — A0 PASS; A1 PASS; A2 PASS; A3 PASS; A4 PASS; A5 PASS; A6 PASS; A7 PASS; A8 PASS; A9 BLOCKED BY EXTERNAL VALIDATION**
 
 Planning branch: `docs/elasticsearch-unsafe-array-pushdown-plan`
 
@@ -476,6 +476,8 @@ OR mixing an approximate analyzed ARRAY branch with an exact keyword-subfield AR
 Files changed in A7:
 
 ```text
+plugin/trino-elasticsearch/src/main/java/io/trino/plugin/elasticsearch/ElasticsearchArrayPredicateTranslator.java
+plugin/trino-elasticsearch/src/main/java/io/trino/plugin/elasticsearch/ElasticsearchFullTextPredicateTranslator.java
 plugin/trino-elasticsearch/src/test/java/io/trino/plugin/elasticsearch/BaseElasticsearchUnsafeArrayPushdownTest.java
 plugin/trino-elasticsearch/src/test/java/io/trino/plugin/elasticsearch/TestElasticsearchArrayPredicateTranslator.java
 ```
@@ -506,7 +508,9 @@ RESULT: BUILD SUCCESS; Tests run: 1, Failures: 0, Errors: 0, Skipped: 0
 Semantic findings: the cross-element trap remains local on both backends; null/missing/empty
 and duplicate source behavior is exercised without weakening the translation contract; analyzed
 Unicode and folded values use full-text strategies; mixed exact/approximate OR is classified by
-the shared composer as approximate. There is no architectural contradiction with
+the shared composer as approximate. An independent review first added a red regression for a
+lambda body whose LIKE/prefix/regexp operand was a different variable; the production helper
+now verifies the actual lambda element before translating those forms. There is no architectural contradiction with
 `ROADMAP-PUSHDOWN.md`.
 
 Feature implementation commit: `12ca0225aa7`.
@@ -555,6 +559,69 @@ There is no architectural contradiction with `ROADMAP-PUSHDOWN.md`.
 
 Feature implementation commit: `e4a5dc00aca`.
 Current gate HEAD before this evidence commit: `e4a5dc00aca`.
+
+### A9 — Final acceptance, independent review, and release evidence
+
+**Status:** BLOCKED — external validation remains unverified
+
+The implementation review against both `ROADMAP-PUSHDOWN.md` and this plan found no semantic
+or architectural contradiction. The final review specifically checked enforcement classification,
+residual removal, partial OR rejection, same-element lambda scope, scalar/ARRAY translation reuse,
+resource bounds, diagnostics/statistics, and dynamic-filter isolation. The last implementation
+change adds an early shared-policy bound for analyzed ARRAY membership disjunctions and a query-byte
+check for singleton analyzed phrases; over-budget values remain local.
+
+Final focused verification at implementation HEAD `c261765de362d878be9721cd3cd407ff2a8fc76c`:
+
+```text
+docker compose exec -T maven ./mvnw -Dmaven.gitcommitid.skip=true \
+  -pl :trino-elasticsearch \
+  -Dtest=TestElasticsearchArrayPredicateTranslator,TestElasticsearchPredicateTranslation,TestElasticsearchPredicateComposer,TestElasticsearchPredicateCompositionPlanner,TestElasticsearchPredicateCompositionPolicy,TestElasticsearchPredicateCompositionRequestBudget,TestElasticsearchPredicatePushdownPlanner,TestElasticsearchPushdownDiagnostics,TestElasticsearchSourceValueSemantics,TestElasticsearchRemotePredicateTranslator,TestElasticsearchDynamicFilterPlanner,TestElasticsearchRemoteStatistics test
+RESULT: BUILD SUCCESS; Tests run: 121, Failures: 0, Errors: 0, Skipped: 0
+
+docker compose exec -T maven ./mvnw -Dmaven.gitcommitid.skip=true \
+  -pl :trino-elasticsearch airstyle:check
+RESULT: BUILD SUCCESS; all 144 files formatted; checkstyle reported 0 violations.
+
+docker compose exec -T maven ./mvnw -nsu -Dmaven.gitcommitid.skip=true \
+  -pl :trino-elasticsearch -Perrorprone-compiler clean verify -DskipTests
+RESULT: BUILD SUCCESS; clean Error Prone compilation, test compilation, packaging, dependency checks,
+AirStyle, checkstyle, modernizer, and static verification passed. Existing repository Error Prone
+warnings remained warnings.
+```
+
+The required full module command was also executed at this implementation HEAD:
+
+```text
+docker compose exec -T maven ./mvnw -Dmaven.gitcommitid.skip=true \
+  -pl :trino-elasticsearch test
+RESULT: BUILD FAILURE; Tests run: 1563, Failures: 1, Errors: 0, Skipped: 682. The only failure was
+the unrelated baseline TestElasticsearch7PointInTimeConnectorTest.testSelectAll HTTP 404
+"Query not found" while fetching a Trino statement page. The normal TestElasticsearch7ConnectorTest
+and TestElasticsearch8ConnectorTest classes each completed with Tests run: 328, Failures: 0,
+Errors: 0, Skipped: 170. Re-running the failing point-in-time method alone at the same HEAD passed:
+Tests run: 1, Failures: 0, Errors: 0, Skipped: 0.
+```
+
+The same HTTP 404 appeared in earlier aggregate runs and disappeared in isolated reruns; it is a
+test-harness/concurrency infrastructure flake, not a changed predicate path. The initially observed
+Docker image download stall and subsequent Testcontainers Docker address-pool exhaustion were also
+external infrastructure observations. The required abstract base-class selectors remain repository
+non-runnable selectors (`Tests run: 0`, `No tests were executed`); their concrete ES7/ES8 inherited
+tests were used instead.
+
+GitHub CI is not yet verifiable: no PR was created or pushed from this workspace, so there is no CI
+run ID for the exact final SHA. A9 therefore cannot be marked complete under the plan’s release gate.
+
+Files changed during A9 evidence hardening:
+
+```text
+plugin/trino-elasticsearch/src/main/java/io/trino/plugin/elasticsearch/ElasticsearchArrayPredicateTranslator.java
+plugin/trino-elasticsearch/src/test/java/io/trino/plugin/elasticsearch/TestElasticsearchArrayPredicateTranslator.java
+plugin/trino-elasticsearch/UNSAFE-ARRAY-PUSHDOWN-PLAN.md
+```
+
+Current implementation HEAD before this evidence update: `c261765de362d878be9721cd3cd407ff2a8fc76c`.
 
 This document is an implementation handoff for extending `full_text_pushdown_mode=UNSAFE` to primitive Elasticsearch arrays, especially `ARRAY(VARCHAR)` backed by analyzed `text` fields.
 
