@@ -292,6 +292,55 @@ public abstract class BaseElasticsearchUnsafeArrayPushdownTest
         }
     }
 
+    @Test
+    public void testUnsafeAnalyzedArrayOrPushdownRequiresEveryBranch()
+            throws IOException
+    {
+        String indexName = "unsafe_array_or_" + randomNameSuffix();
+        @Language("JSON")
+        String body =
+                """
+                {
+                  "settings": {
+                    "analysis": {
+                      "analyzer": {
+                        "folded_text": {
+                          "type": "custom",
+                          "tokenizer": "standard",
+                          "filter": ["lowercase", "asciifolding"]
+                        }
+                      }
+                    }
+                  },
+                  "mappings": {
+                    "_meta": { "trino": { "names": { "isArray": true } } },
+                    "properties": {
+                      "id": { "type": "keyword" },
+                      "names": { "type": "text", "analyzer": "folded_text" }
+                    }
+                  }
+                }
+                """;
+        createIndex(indexName, body);
+        try {
+            index(indexName, ImmutableMap.of("id", "1", "names", ImmutableList.of("Nguyen Van", "Nguyen Anh")));
+            index(indexName, ImmutableMap.of("id", "2", "names", ImmutableList.of("Tran Thi", "Le Van")));
+            index(indexName, ImmutableMap.of("id", "8", "names", ImmutableList.of("Nguyen Van", "Nguyen Van")));
+
+            Session unsafe = sessionWithFullTextMode("UNSAFE");
+
+            assertThat(query(unsafe, "SELECT id FROM " + indexName + " WHERE any_match(names, x -> x = 'Nguyen Van' OR x LIKE 'Tran%' OR regexp_like(x, 'Le.*Anh'))"))
+                    .skipResultsCorrectnessCheckForPushdown()
+                    .isFullyPushedDown();
+            assertThat(query(unsafe, "SELECT id FROM " + indexName + " WHERE any_match(names, x -> x = 'Nguyen Van' OR x LIKE 'Ng% yen')"))
+                    .matches("VALUES VARCHAR '1', VARCHAR '8'")
+                    .isNotFullyPushedDown(FilterNode.class);
+        }
+        finally {
+            deleteIndex(indexName);
+        }
+    }
+
     private Session sessionWithFullTextMode(String mode)
     {
         String catalogName = getSession().getCatalog().orElseThrow();
