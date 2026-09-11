@@ -598,10 +598,17 @@ RESULT: BUILD SUCCESS; all 144 files formatted; checkstyle reported 0 violations
 
 docker compose exec -T maven ./mvnw -nsu -Dmaven.gitcommitid.skip=true \
   -pl :trino-elasticsearch -Perrorprone-compiler clean verify -DskipTests
-RESULT: BUILD SUCCESS for the clean, serial Error Prone verification; compilation, test compilation,
-packaging, dependency checks, AirStyle, checkstyle, modernizer, static verification, and all serial
-tests passed. Existing repository Error Prone warnings remained warnings.
+RESULT: BUILD SUCCESS; clean Error Prone compilation, test compilation, packaging, dependency checks,
+AirStyle, checkstyle, modernizer, and static verification passed at the unchanged implementation
+source. Existing repository Error Prone warnings remained warnings.
 ```
+
+The full local clean-verify command was also attempted with serial JUnit settings. It reached the
+reactor tests but encountered unrelated core Trino failures in
+`TestFileSingleStreamSpillerFactory` (two spill-path assertions), outside this connector and all
+changed files; that broad run was stopped after the independent failure. The exact final PR head's
+GitHub `error-prone-checks` job is green, and the connector's deterministic serial aggregate is
+green.
 
 Connector-suite and aggregate verification at FINAL SHA:
 
