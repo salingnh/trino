@@ -476,6 +476,61 @@ public class TestElasticsearchArrayPredicateTranslator
     }
 
     @Test
+    public void testUnsafeAnyMatchRegexpAnalyzedTextArrayUsesScalarClassifier()
+    {
+        ArrayType arrayType = new ArrayType(VARCHAR);
+        ElasticsearchColumnHandle column = analyzedTextArrayColumn("Tags");
+        Call regexp = anyMatch("tags", arrayType, element -> new Call(
+                BOOLEAN,
+                new FunctionName("regexp_like"),
+                List.of(element, new Constant(utf8Slice("nguyen.*van"), VARCHAR))));
+        Call nonCapturingGroup = anyMatch("tags", arrayType, element -> new Call(
+                BOOLEAN,
+                new FunctionName("regexp_like"),
+                List.of(element, new Constant(utf8Slice("(?:nguyen|tran)"), VARCHAR))));
+
+        ElasticsearchPredicateTranslation<ConnectorExpression> regexpTranslation = translateWithContract(
+                regexp,
+                Map.of("tags", column),
+                UNSAFE).orElseThrow();
+        ElasticsearchPredicateTranslation<ConnectorExpression> groupTranslation = translateWithContract(
+                nonCapturingGroup,
+                Map.of("tags", column),
+                UNSAFE).orElseThrow();
+
+        assertThat(regexpTranslation.remotePredicate()).contains(new ElasticsearchRemotePredicate.Enforced(
+                new ElasticsearchRemotePredicate.Regexp("Tags", ".*(nguyen.*van).*"),
+                APPROXIMATE));
+        assertThat(groupTranslation.remotePredicate()).contains(new ElasticsearchRemotePredicate.Enforced(
+                new ElasticsearchRemotePredicate.Regexp("Tags", ".*((nguyen|tran)).*"),
+                APPROXIMATE));
+        assertThat(regexpTranslation.remaining()).isEmpty();
+        assertThat(regexpTranslation.residual()).isEmpty();
+        assertThat(groupTranslation.remaining()).isEmpty();
+        assertThat(groupTranslation.residual()).isEmpty();
+    }
+
+    @Test
+    public void testUnsafeAnyMatchUnsupportedRegexpRemainsLocal()
+    {
+        ArrayType arrayType = new ArrayType(VARCHAR);
+        ElasticsearchColumnHandle column = analyzedTextArrayColumn("Tags");
+        Call unsupportedRegexp = anyMatch("tags", arrayType, element -> new Call(
+                BOOLEAN,
+                new FunctionName("regexp_like"),
+                List.of(element, new Constant(utf8Slice("(?=nguyen)van"), VARCHAR))));
+
+        ElasticsearchPredicateTranslation<ConnectorExpression> translation = translateWithContract(
+                unsupportedRegexp,
+                Map.of("tags", column),
+                UNSAFE).orElseThrow();
+
+        assertThat(translation.remotePredicate()).isEmpty();
+        assertThat(translation.remaining()).isEmpty();
+        assertThat(translation.residual()).contains(unsupportedRegexp);
+    }
+
+    @Test
     public void testAnyMatchInWithNullConstantRemainsResidual()
     {
         ArrayType arrayType = new ArrayType(INTEGER);

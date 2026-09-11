@@ -231,6 +231,67 @@ public abstract class BaseElasticsearchUnsafeArrayPushdownTest
         }
     }
 
+    @Test
+    public void testUnsafeAnalyzedArrayRegexpPushdown()
+            throws IOException
+    {
+        String indexName = "unsafe_array_regexp_" + randomNameSuffix();
+        @Language("JSON")
+        String body =
+                """
+                {
+                  "settings": {
+                    "analysis": {
+                      "analyzer": {
+                        "folded_text": {
+                          "type": "custom",
+                          "tokenizer": "standard",
+                          "filter": ["lowercase", "asciifolding"]
+                        }
+                      }
+                    }
+                  },
+                  "mappings": {
+                    "_meta": { "trino": { "names": { "isArray": true } } },
+                    "properties": {
+                      "id": { "type": "keyword" },
+                      "names": { "type": "text", "analyzer": "folded_text" }
+                    }
+                  }
+                }
+                """;
+        createIndex(indexName, body);
+        try {
+            index(indexName, ImmutableMap.of("id", "1", "names", ImmutableList.of("NGÔ VĂN", "Nguyen Van")));
+            index(indexName, ImmutableMap.of("id", "2", "names", ImmutableList.of("TRẦN VĂN", "Tran Thi")));
+            index(indexName, ImmutableMap.of("id", "3", "names", ImmutableList.of("social network", "telegram")));
+            index(indexName, ImmutableMap.of("id", "4", "names", ImmutableList.of("Nguyen Anh", "Le Van")));
+            index(indexName, ImmutableMap.of("id", "8", "names", ImmutableList.of("Nguyen Van", "Nguyen Van")));
+
+            Session unsafe = sessionWithFullTextMode("UNSAFE");
+            Session safe = sessionWithFullTextMode("SAFE");
+
+            assertThat(query(unsafe, "SELECT id FROM " + indexName + " WHERE any_match(names, x -> regexp_like(x, 'nguyen.*van'))"))
+                    .skipResultsCorrectnessCheckForPushdown()
+                    .isFullyPushedDown();
+            assertThat(query(unsafe, "SELECT id FROM " + indexName + " WHERE any_match(names, x -> regexp_like(x, '(?:tran|nguyen)'))"))
+                    .skipResultsCorrectnessCheckForPushdown()
+                    .isFullyPushedDown();
+            assertThat(query(unsafe, "SELECT id FROM " + indexName + " WHERE any_match(names, x -> regexp_like(x, 'ngo'))"))
+                    .skipResultsCorrectnessCheckForPushdown()
+                    .isFullyPushedDown();
+
+            assertThat(query(safe, "SELECT id FROM " + indexName + " WHERE any_match(names, x -> regexp_like(x, 'nguyen.*van'))"))
+                    .isNotFullyPushedDown(FilterNode.class);
+            assertThat(query(unsafe, "SELECT id FROM " + indexName + " WHERE any_match(names, x -> regexp_like(x, '(?=nguyen)van'))"))
+                    .returnsEmptyResult()
+                    .isNotFullyPushedDown(FilterNode.class);
+        }
+        finally {
+            deleteIndex(indexName);
+        }
+    }
+
     private Session sessionWithFullTextMode(String mode)
     {
         String catalogName = getSession().getCatalog().orElseThrow();
