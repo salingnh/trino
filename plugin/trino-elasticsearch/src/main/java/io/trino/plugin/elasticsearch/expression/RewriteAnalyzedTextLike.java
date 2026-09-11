@@ -79,11 +79,29 @@ final class RewriteAnalyzedTextLike
     {
         Variable variable = captures.get(LIKE_VALUE);
         Constant pattern = captures.get(LIKE_PATTERN);
+        return rewrite(expression, (ElasticsearchColumnHandle) context.getAssignment(variable.getName()), pattern);
+    }
+
+    static Optional<ElasticsearchExpressionRewrite> rewrite(
+            Call expression,
+            ElasticsearchColumnHandle column)
+    {
+        if (expression.getArguments().size() != 2
+                || !(expression.getArguments().get(1) instanceof Constant pattern)) {
+            return Optional.empty();
+        }
+        return rewrite(expression, column, pattern);
+    }
+
+    private static Optional<ElasticsearchExpressionRewrite> rewrite(
+            Call expression,
+            ElasticsearchColumnHandle column,
+            Constant pattern)
+    {
         if (!(pattern.getValue() instanceof Slice slice)) {
             return Optional.empty();
         }
 
-        ElasticsearchColumnHandle column = (ElasticsearchColumnHandle) context.getAssignment(variable.getName());
         if (!isAnalyzedTextOnly(column)) {
             return Optional.empty();
         }
@@ -94,7 +112,8 @@ final class RewriteAnalyzedTextLike
 
     private static boolean isAnalyzedTextOnly(ElasticsearchColumnHandle column)
     {
-        return !column.supportsPredicates()
+        return column != null
+                && !column.supportsPredicates()
                 && column.elasticsearchType() instanceof PrimitiveType primitiveType
                 && primitiveType.name().equalsIgnoreCase("text")
                 && primitiveType.keyword().isEmpty();

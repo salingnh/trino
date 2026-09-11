@@ -83,7 +83,7 @@ final class ElasticsearchArrayPredicateTranslator
         return switch (call.getFunctionName().getName()) {
             case "contains" -> Optional.of(translateContains(call, assignments, fullTextMode));
             case "arrays_overlap" -> Optional.of(translateArraysOverlap(call, assignments, fullTextMode));
-            case "any_match" -> Optional.of(translateAnyMatch(call, assignments, fullTextMode));
+            case "any_match" -> Optional.of(translateAnyMatch(session, call, assignments, fullTextMode));
             default -> Optional.empty();
         };
     }
@@ -157,6 +157,7 @@ final class ElasticsearchArrayPredicateTranslator
     }
 
     private static ElasticsearchPredicateTranslation<ConnectorExpression> translateAnyMatch(
+            ConnectorSession session,
             Call call,
             Map<String, ColumnHandle> assignments,
             FullTextPushdownMode fullTextMode)
@@ -183,7 +184,14 @@ final class ElasticsearchArrayPredicateTranslator
             if (fullTextMode != FullTextPushdownMode.UNSAFE) {
                 return ElasticsearchPredicateTranslation.unsupported(call, UNSUPPORTED_EXPRESSION);
             }
-            return translateAnalyzedAnyMatchMembership(call, lambda.getBody(), lambdaVariable, column, elementType.orElseThrow());
+            return translateAnalyzedAnyMatch(
+                    session,
+                    call,
+                    lambda.getBody(),
+                    lambdaVariable,
+                    column,
+                    elementType.orElseThrow(),
+                    fullTextMode);
         }
 
         return exactOrUnsupported(
@@ -192,15 +200,38 @@ final class ElasticsearchArrayPredicateTranslator
                 EXACT_ANY_MATCH);
     }
 
-    private static ElasticsearchPredicateTranslation<ConnectorExpression> translateAnalyzedAnyMatchMembership(
+    private static ElasticsearchPredicateTranslation<ConnectorExpression> translateAnalyzedAnyMatch(
+            ConnectorSession session,
             Call source,
             ConnectorExpression body,
             Variable lambdaVariable,
             ElasticsearchColumnHandle column,
-            Type elementType)
+            Type elementType,
+            FullTextPushdownMode fullTextMode)
     {
         if (!(body instanceof Call call)) {
             return ElasticsearchPredicateTranslation.unsupported(source, UNSUPPORTED_EXPRESSION);
+        }
+
+        Optional<ElasticsearchPredicateTranslation<ConnectorExpression>> like = ElasticsearchFullTextPredicateTranslator.translateLikeElement(
+                session,
+                source,
+                call,
+                column,
+                fullTextMode,
+                APPROXIMATE_ANY_MATCH);
+        if (like.isPresent()) {
+            return like.orElseThrow();
+        }
+
+        Optional<ElasticsearchPredicateTranslation<ConnectorExpression>> startsWith = ElasticsearchFullTextPredicateTranslator.translateStartsWithElement(
+                source,
+                call,
+                column,
+                fullTextMode,
+                APPROXIMATE_ANY_MATCH);
+        if (startsWith.isPresent()) {
+            return startsWith.orElseThrow();
         }
 
         if (EQUAL_OPERATOR_FUNCTION_NAME.equals(call.getFunctionName())) {
@@ -217,7 +248,7 @@ final class ElasticsearchArrayPredicateTranslator
                             column,
                             elementType,
                             List.of(ElasticsearchRemotePredicateTranslator.getValue(elementType, constant.getValue())),
-                            FullTextPushdownMode.UNSAFE,
+                            fullTextMode,
                             EXACT_ANY_MATCH,
                             APPROXIMATE_ANY_MATCH);
                 }
@@ -233,7 +264,7 @@ final class ElasticsearchArrayPredicateTranslator
                             column,
                             elementType,
                             values,
-                            FullTextPushdownMode.UNSAFE,
+                            fullTextMode,
                             EXACT_ANY_MATCH,
                             APPROXIMATE_ANY_MATCH))
                     .orElseGet(() -> ElasticsearchPredicateTranslation.unsupported(source, UNSUPPORTED_EXPRESSION));
