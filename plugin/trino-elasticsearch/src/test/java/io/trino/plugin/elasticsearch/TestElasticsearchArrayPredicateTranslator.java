@@ -531,6 +531,74 @@ public class TestElasticsearchArrayPredicateTranslator
     }
 
     @Test
+    public void testUnsafeAnyMatchAnalyzedTextOrComposesEveryElementBranch()
+    {
+        ArrayType arrayType = new ArrayType(VARCHAR);
+        ElasticsearchColumnHandle column = analyzedTextArrayColumn("Tags");
+        Call anyMatch = anyMatch("tags", arrayType, element -> {
+            Call equality = new Call(
+                    BOOLEAN,
+                    EQUAL_OPERATOR_FUNCTION_NAME,
+                    List.of(element, new Constant(utf8Slice("Nguyen Van"), VARCHAR)));
+            Call prefix = new Call(
+                    BOOLEAN,
+                    LIKE_FUNCTION_NAME,
+                    List.of(element, new Constant(utf8Slice("Tran%"), VARCHAR)));
+            Call regexp = new Call(
+                    BOOLEAN,
+                    new FunctionName("regexp_like"),
+                    List.of(element, new Constant(utf8Slice("Le.*Anh"), VARCHAR)));
+            return new Call(BOOLEAN, OR_FUNCTION_NAME, List.of(equality, prefix, regexp));
+        });
+
+        ElasticsearchPredicateTranslation<ConnectorExpression> translation = translateWithContract(
+                anyMatch,
+                Map.of("tags", column),
+                UNSAFE).orElseThrow();
+
+        assertThat(translation.remotePredicate()).contains(new ElasticsearchRemotePredicate.Or(List.of(
+                new ElasticsearchRemotePredicate.Enforced(
+                        new ElasticsearchRemotePredicate.MatchPhrase("Tags", "Nguyen Van"),
+                        APPROXIMATE),
+                new ElasticsearchRemotePredicate.Enforced(
+                        new ElasticsearchRemotePredicate.MatchPhrasePrefix("Tags", "Tran"),
+                        APPROXIMATE),
+                new ElasticsearchRemotePredicate.Enforced(
+                        new ElasticsearchRemotePredicate.Regexp("Tags", ".*(Le.*Anh).*"),
+                        APPROXIMATE))));
+        assertThat(translation.enforcement()).contains(APPROXIMATE);
+        assertThat(translation.remaining()).isEmpty();
+        assertThat(translation.residual()).isEmpty();
+    }
+
+    @Test
+    public void testUnsafeAnyMatchAnalyzedTextPartialOrRemainsLocal()
+    {
+        ArrayType arrayType = new ArrayType(VARCHAR);
+        ElasticsearchColumnHandle column = analyzedTextArrayColumn("Tags");
+        Call partialOr = anyMatch("tags", arrayType, element -> {
+            Call equality = new Call(
+                    BOOLEAN,
+                    EQUAL_OPERATOR_FUNCTION_NAME,
+                    List.of(element, new Constant(utf8Slice("Nguyen Van"), VARCHAR)));
+            Call unsupported = new Call(
+                    BOOLEAN,
+                    LIKE_FUNCTION_NAME,
+                    List.of(element, new Constant(utf8Slice("Ng% yen"), VARCHAR)));
+            return new Call(BOOLEAN, OR_FUNCTION_NAME, List.of(equality, unsupported));
+        });
+
+        ElasticsearchPredicateTranslation<ConnectorExpression> translation = translateWithContract(
+                partialOr,
+                Map.of("tags", column),
+                UNSAFE).orElseThrow();
+
+        assertThat(translation.remotePredicate()).isEmpty();
+        assertThat(translation.remaining()).isEmpty();
+        assertThat(translation.residual()).contains(partialOr);
+    }
+
+    @Test
     public void testAnyMatchInWithNullConstantRemainsResidual()
     {
         ArrayType arrayType = new ArrayType(INTEGER);

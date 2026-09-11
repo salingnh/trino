@@ -213,6 +213,23 @@ final class ElasticsearchArrayPredicateTranslator
             return ElasticsearchPredicateTranslation.unsupported(source, UNSUPPORTED_EXPRESSION);
         }
 
+        if (OR_FUNCTION_NAME.equals(call.getFunctionName())) {
+            if (call.getArguments().isEmpty()) {
+                return ElasticsearchPredicateTranslation.unsupported(source, UNSUPPORTED_EXPRESSION);
+            }
+            List<ElasticsearchPredicateTranslation<ConnectorExpression>> branches = call.getArguments().stream()
+                    .map(argument -> translateAnalyzedAnyMatch(
+                            session,
+                            source,
+                            argument,
+                            lambdaVariable,
+                            column,
+                            elementType,
+                            fullTextMode))
+                    .toList();
+            return ElasticsearchPredicateComposer.or(source, branches);
+        }
+
         Optional<ElasticsearchPredicateTranslation<ConnectorExpression>> like = ElasticsearchFullTextPredicateTranslator.translateLikeElement(
                 session,
                 source,
