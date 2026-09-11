@@ -2,7 +2,7 @@
 
 ## Status
 
-**IMPLEMENTATION IN PROGRESS — A0 PASS; A1 PASS; A2 PASS; A3 PASS; A4 NOT STARTED**
+**IMPLEMENTATION IN PROGRESS — A0 PASS; A1 PASS; A2 PASS; A3 PASS; A4 PASS; A5 NOT STARTED**
 
 Planning branch: `docs/elasticsearch-unsafe-array-pushdown-plan`
 
@@ -267,6 +267,73 @@ their own semantic gates. There is no architectural contradiction with `ROADMAP-
 
 Feature implementation commit: `1748b84758b`.
 Current gate HEAD before this evidence commit: `1748b84758b`.
+
+### A4 — UNSAFE LIKE and prefix parity inside `any_match`
+
+**Status:** PASS
+
+Scalar and ARRAY-element full-text translation now share
+`ElasticsearchFullTextPredicateTranslator`. The shared helper reuses the existing analyzed-LIKE
+rewrite for literal and contains-literal patterns, the existing metadata conversion for prefix
+and escaped patterns, and the existing exact keyword/prefix strategies. Array `any_match` uses
+the enclosing lambda call as the translation source, so an unsupported element shape remains a
+local ARRAY predicate rather than becoming an unrelated remote candidate. Analyzed ARRAY LIKE
+and `starts_with` translations in `UNSAFE` are explicit `APPROXIMATE`; SAFE and DISABLED remain
+residual. Token-spanning internal wildcard shapes remain unsupported, matching scalar behavior.
+
+Files changed in A4:
+
+```text
+plugin/trino-elasticsearch/src/main/java/io/trino/plugin/elasticsearch/ElasticsearchArrayPredicateTranslator.java
+plugin/trino-elasticsearch/src/main/java/io/trino/plugin/elasticsearch/ElasticsearchFullTextPredicateTranslator.java
+plugin/trino-elasticsearch/src/main/java/io/trino/plugin/elasticsearch/ElasticsearchPredicatePushdownPlanner.java
+plugin/trino-elasticsearch/src/main/java/io/trino/plugin/elasticsearch/expression/ElasticsearchExpressionTranslator.java
+plugin/trino-elasticsearch/src/main/java/io/trino/plugin/elasticsearch/expression/RewriteAnalyzedTextLike.java
+plugin/trino-elasticsearch/src/test/java/io/trino/plugin/elasticsearch/BaseElasticsearchUnsafeArrayPushdownTest.java
+plugin/trino-elasticsearch/src/test/java/io/trino/plugin/elasticsearch/TestElasticsearchArrayPredicateTranslator.java
+```
+
+Focused unit, scalar-regression, style, and connector acceptance verification:
+
+```text
+docker compose exec -T maven ./mvnw -Dmaven.gitcommitid.skip=true \
+  -pl :trino-elasticsearch -Dtest=TestElasticsearchArrayPredicateTranslator,TestElasticsearchPredicatePushdownPlanner test
+RESULT: BUILD SUCCESS; Tests run: 35, Failures: 0, Errors: 0, Skipped: 0
+
+docker compose exec -T maven ./mvnw -Dmaven.gitcommitid.skip=true \
+  -pl :trino-elasticsearch \
+  -Dtest=TestElasticsearch7ConnectorTest#testUnsafeLikePushdownUsesTextAnalyzer,TestElasticsearch7ConnectorTest#testLike,TestElasticsearch7ConnectorTest#testRegexpLikeIsNotPushedDown test
+RESULT: BUILD SUCCESS; Tests run: 3, Failures: 0, Errors: 0, Skipped: 0
+
+docker compose exec -T maven ./mvnw -Dmaven.gitcommitid.skip=true \
+  -pl :trino-elasticsearch \
+  -Dtest=TestElasticsearch8ConnectorTest#testUnsafeLikePushdownUsesTextAnalyzer,TestElasticsearch8ConnectorTest#testLike,TestElasticsearch8ConnectorTest#testRegexpLikeIsNotPushedDown test
+RESULT: BUILD SUCCESS; Tests run: 3, Failures: 0, Errors: 0, Skipped: 0
+
+docker compose exec -T maven ./mvnw -Dmaven.gitcommitid.skip=true \
+  -pl :trino-elasticsearch \
+  -Dtest=TestElasticsearch7ConnectorTest#testUnsafeAnalyzedArrayLikeAndPrefixPushdown test
+RESULT: BUILD SUCCESS; Tests run: 1, Failures: 0, Errors: 0, Skipped: 0
+
+docker compose exec -T maven ./mvnw -Dmaven.gitcommitid.skip=true \
+  -pl :trino-elasticsearch \
+  -Dtest=TestElasticsearch8ConnectorTest#testUnsafeAnalyzedArrayLikeAndPrefixPushdown test
+RESULT: BUILD SUCCESS; Tests run: 1, Failures: 0, Errors: 0, Skipped: 0
+
+docker compose exec -T maven ./mvnw -Dmaven.gitcommitid.skip=true \
+  -pl :trino-elasticsearch airstyle:check
+RESULT: BUILD SUCCESS; All 144 files are already formatted.
+```
+
+Semantic findings: literal LIKE, `%literal%`, prefix LIKE, `starts_with`, and escaped LIKE
+patterns use the scalar strategy and report `APPROXIMATE` for analyzed ARRAY elements in
+UNSAFE. Multi-token phrase behavior is covered by the custom standard/lowercase/asciifolding
+fixture. SAFE remains residual, and unsupported token-spanning LIKE remains local. Exact array
+membership behavior and scalar LIKE/regexp regressions remain green. There is no architectural
+contradiction with `ROADMAP-PUSHDOWN.md`.
+
+Feature implementation commit: `d4301a52f93`.
+Current gate HEAD before this evidence commit: `d4301a52f93`.
 
 This document is an implementation handoff for extending `full_text_pushdown_mode=UNSAFE` to primitive Elasticsearch arrays, especially `ARRAY(VARCHAR)` backed by analyzed `text` fields.
 
