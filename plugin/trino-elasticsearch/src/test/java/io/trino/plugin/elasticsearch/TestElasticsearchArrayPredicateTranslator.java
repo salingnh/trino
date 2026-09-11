@@ -54,6 +54,7 @@ import static io.trino.spi.expression.StandardFunctions.EQUAL_OPERATOR_FUNCTION_
 import static io.trino.spi.expression.StandardFunctions.GREATER_THAN_OPERATOR_FUNCTION_NAME;
 import static io.trino.spi.expression.StandardFunctions.IN_PREDICATE_FUNCTION_NAME;
 import static io.trino.spi.expression.StandardFunctions.LESS_THAN_OPERATOR_FUNCTION_NAME;
+import static io.trino.spi.expression.StandardFunctions.LIKE_FUNCTION_NAME;
 import static io.trino.spi.expression.StandardFunctions.OR_FUNCTION_NAME;
 import static io.trino.spi.type.BooleanType.BOOLEAN;
 import static io.trino.spi.type.IntegerType.INTEGER;
@@ -387,6 +388,91 @@ public class TestElasticsearchArrayPredicateTranslator
         assertThat(inTranslation.remotePredicate()).isPresent();
         assertThat(inTranslation.remaining()).isEmpty();
         assertThat(inTranslation.residual()).isEmpty();
+    }
+
+    @Test
+    public void testUnsafeAnyMatchLikeAndPrefixAnalyzedTextArrayUseScalarStrategies()
+    {
+        ArrayType arrayType = new ArrayType(VARCHAR);
+        ElasticsearchColumnHandle column = analyzedTextArrayColumn("Tags");
+        Call literalLike = anyMatch("tags", arrayType, element -> new Call(
+                BOOLEAN,
+                LIKE_FUNCTION_NAME,
+                List.of(element, new Constant(utf8Slice("Nguyen Van"), VARCHAR))));
+        Call containsLike = anyMatch("tags", arrayType, element -> new Call(
+                BOOLEAN,
+                LIKE_FUNCTION_NAME,
+                List.of(element, new Constant(utf8Slice("%Nguyen Van%"), VARCHAR))));
+        Call prefixLike = anyMatch("tags", arrayType, element -> new Call(
+                BOOLEAN,
+                LIKE_FUNCTION_NAME,
+                List.of(element, new Constant(utf8Slice("Nguyen%"), VARCHAR))));
+        Call startsWith = anyMatch("tags", arrayType, element -> new Call(
+                BOOLEAN,
+                new FunctionName("starts_with"),
+                List.of(element, new Constant(utf8Slice("Nguyen"), VARCHAR))));
+
+        assertThat(translateWithContract(literalLike, Map.of("tags", column), UNSAFE).orElseThrow().remotePredicate())
+                .contains(new ElasticsearchRemotePredicate.Enforced(
+                        new ElasticsearchRemotePredicate.MatchPhrase("Tags", "Nguyen Van"),
+                        APPROXIMATE));
+        assertThat(translateWithContract(containsLike, Map.of("tags", column), UNSAFE).orElseThrow().remotePredicate())
+                .contains(new ElasticsearchRemotePredicate.Enforced(
+                        new ElasticsearchRemotePredicate.MatchPhrase("Tags", "Nguyen Van"),
+                        APPROXIMATE));
+        assertThat(translateWithContract(prefixLike, Map.of("tags", column), UNSAFE).orElseThrow().remotePredicate())
+                .contains(new ElasticsearchRemotePredicate.Enforced(
+                        new ElasticsearchRemotePredicate.MatchPhrasePrefix("Tags", "Nguyen"),
+                        APPROXIMATE));
+        assertThat(translateWithContract(startsWith, Map.of("tags", column), UNSAFE).orElseThrow().remotePredicate())
+                .contains(new ElasticsearchRemotePredicate.Enforced(
+                        new ElasticsearchRemotePredicate.MatchPhrasePrefix("Tags", "Nguyen"),
+                        APPROXIMATE));
+    }
+
+    @Test
+    public void testUnsafeAnyMatchUnsupportedLikeShapeRemainsLocal()
+    {
+        ArrayType arrayType = new ArrayType(VARCHAR);
+        ElasticsearchColumnHandle column = analyzedTextArrayColumn("Tags");
+        Call unsupportedLike = anyMatch("tags", arrayType, element -> new Call(
+                BOOLEAN,
+                LIKE_FUNCTION_NAME,
+                List.of(element, new Constant(utf8Slice("Ng% yen"), VARCHAR))));
+
+        ElasticsearchPredicateTranslation<ConnectorExpression> translation = translateWithContract(
+                unsupportedLike,
+                Map.of("tags", column),
+                UNSAFE).orElseThrow();
+
+        assertThat(translation.remotePredicate()).isEmpty();
+        assertThat(translation.remaining()).contains(unsupportedLike);
+        assertThat(translation.residual()).isEmpty();
+    }
+
+    @Test
+    public void testUnsafeAnyMatchEscapedLikeUsesScalarStrategy()
+    {
+        ArrayType arrayType = new ArrayType(VARCHAR);
+        ElasticsearchColumnHandle column = analyzedTextArrayColumn("Tags");
+        Call escapedLike = anyMatch("tags", arrayType, element -> new Call(
+                BOOLEAN,
+                LIKE_FUNCTION_NAME,
+                List.of(
+                        element,
+                        new Constant(utf8Slice("Nguyen\\%"), VARCHAR),
+                        new Constant(utf8Slice("\\"), VARCHAR))));
+
+        ElasticsearchPredicateTranslation<ConnectorExpression> translation = translateWithContract(
+                escapedLike,
+                Map.of("tags", column),
+                UNSAFE).orElseThrow();
+
+        assertThat(translation.remotePredicate()).contains(new ElasticsearchRemotePredicate.Enforced(
+                new ElasticsearchRemotePredicate.Regexp("Tags", "Nguyen%"),
+                APPROXIMATE));
+        assertThat(translation.remaining()).isEmpty();
+        assertThat(translation.residual()).isEmpty();
     }
 
     @Test

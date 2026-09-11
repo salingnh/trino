@@ -158,6 +158,79 @@ public abstract class BaseElasticsearchUnsafeArrayPushdownTest
         }
     }
 
+    @Test
+    public void testUnsafeAnalyzedArrayLikeAndPrefixPushdown()
+            throws IOException
+    {
+        String indexName = "unsafe_array_like_" + randomNameSuffix();
+        @Language("JSON")
+        String body =
+                """
+                {
+                  "settings": {
+                    "analysis": {
+                      "analyzer": {
+                        "folded_text": {
+                          "type": "custom",
+                          "tokenizer": "standard",
+                          "filter": ["lowercase", "asciifolding"]
+                        }
+                      }
+                    }
+                  },
+                  "mappings": {
+                    "_meta": { "trino": { "names": { "isArray": true } } },
+                    "properties": {
+                      "id": { "type": "keyword" },
+                      "names": { "type": "text", "analyzer": "folded_text" }
+                    }
+                  }
+                }
+                """;
+        createIndex(indexName, body);
+        try {
+            index(indexName, ImmutableMap.of("id", "1", "names", ImmutableList.of("NGÔ VĂN", "Nguyen Van", "Nguyen Anh")));
+            index(indexName, ImmutableMap.of("id", "2", "names", ImmutableList.of("TRẦN VĂN", "Tran Thi", "Le Van")));
+            index(indexName, ImmutableMap.of("id", "3", "names", ImmutableList.of("social network", "telegram")));
+            index(indexName, ImmutableMap.of("id", "4", "names", ImmutableList.of("Nguyen Anh", "Le Van")));
+            index(indexName, ImmutableMap.of("id", "8", "names", ImmutableList.of("Nguyen Van", "Nguyen Van")));
+
+            Session unsafe = sessionWithFullTextMode("UNSAFE");
+            Session safe = sessionWithFullTextMode("SAFE");
+
+            assertThat(query(unsafe, "SELECT id FROM " + indexName + " WHERE any_match(names, x -> x LIKE 'Nguyen Van')"))
+                    .matches("VALUES VARCHAR '1', VARCHAR '8'")
+                    .skipResultsCorrectnessCheckForPushdown()
+                    .isFullyPushedDown();
+            assertThat(query(unsafe, "SELECT id FROM " + indexName + " WHERE any_match(names, x -> x LIKE '%Nguyen Van%')"))
+                    .matches("VALUES VARCHAR '1', VARCHAR '8'")
+                    .skipResultsCorrectnessCheckForPushdown()
+                    .isFullyPushedDown();
+            assertThat(query(unsafe, "SELECT id FROM " + indexName + " WHERE any_match(names, x -> x LIKE 'Nguyen%')"))
+                    .matches("VALUES VARCHAR '1', VARCHAR '4', VARCHAR '8'")
+                    .skipResultsCorrectnessCheckForPushdown()
+                    .isFullyPushedDown();
+            assertThat(query(unsafe, "SELECT id FROM " + indexName + " WHERE any_match(names, x -> starts_with(x, 'Nguyen'))"))
+                    .matches("VALUES VARCHAR '1', VARCHAR '4', VARCHAR '8'")
+                    .skipResultsCorrectnessCheckForPushdown()
+                    .isFullyPushedDown();
+            assertThat(query(unsafe, "SELECT id FROM " + indexName + " WHERE any_match(names, x -> x LIKE '%social network%')"))
+                    .matches("VALUES VARCHAR '3'")
+                    .skipResultsCorrectnessCheckForPushdown()
+                    .isFullyPushedDown();
+
+            assertThat(query(safe, "SELECT id FROM " + indexName + " WHERE any_match(names, x -> x LIKE 'Nguyen%')"))
+                    .matches("VALUES VARCHAR '1', VARCHAR '4', VARCHAR '8'")
+                    .isNotFullyPushedDown(FilterNode.class);
+            assertThat(query(unsafe, "SELECT id FROM " + indexName + " WHERE any_match(names, x -> x LIKE 'Ng% yen')"))
+                    .returnsEmptyResult()
+                    .isNotFullyPushedDown(FilterNode.class);
+        }
+        finally {
+            deleteIndex(indexName);
+        }
+    }
+
     private Session sessionWithFullTextMode(String mode)
     {
         String catalogName = getSession().getCatalog().orElseThrow();

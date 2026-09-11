@@ -15,8 +15,10 @@ package io.trino.plugin.elasticsearch.expression;
 
 import com.google.common.collect.ImmutableSet;
 import io.trino.plugin.base.expression.ConnectorExpressionRewriter;
+import io.trino.plugin.elasticsearch.ElasticsearchColumnHandle;
 import io.trino.spi.connector.ColumnHandle;
 import io.trino.spi.connector.ConnectorSession;
+import io.trino.spi.expression.Call;
 import io.trino.spi.expression.ConnectorExpression;
 
 import java.util.Map;
@@ -43,5 +45,16 @@ public final class ElasticsearchExpressionTranslator
             Map<String, ColumnHandle> assignments)
     {
         return rewriter.rewrite(session, expression, assignments);
+    }
+
+    public Optional<ElasticsearchExpressionRewrite> rewriteAnalyzedTextLike(
+            ConnectorSession session,
+            Call expression,
+            ElasticsearchColumnHandle column)
+    {
+        if (session == null) {
+            throw new NullPointerException("session is null");
+        }
+        return RewriteAnalyzedTextLike.rewrite(expression, column);
     }
 }
