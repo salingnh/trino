@@ -127,4 +127,3 @@ docker compose exec -T maven ./mvnw -pl :trino-elasticsearch -Dtest=BaseElastics
 - [ ] Inspect Compose logs and record test counts, failures, errors, skips, packaging, and exact SHA.
 - [ ] Run `git diff --check` and an independent diff review against both source-of-truth documents.
 - [ ] Update roadmap/plan evidence accurately, including CI status; do not claim COMPLETE without green CI on the exact final SHA.
-
