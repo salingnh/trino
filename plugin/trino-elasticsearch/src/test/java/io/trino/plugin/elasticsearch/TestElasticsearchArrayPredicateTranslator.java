@@ -599,6 +599,34 @@ public class TestElasticsearchArrayPredicateTranslator
     }
 
     @Test
+    public void testUnsafeAnalyzedAnyMatchAndDoesNotCrossArrayElements()
+    {
+        ArrayType arrayType = new ArrayType(VARCHAR);
+        ElasticsearchColumnHandle column = analyzedTextArrayColumn("Tags");
+        Call sameElementAnd = anyMatch("tags", arrayType, element -> new Call(
+                BOOLEAN,
+                AND_FUNCTION_NAME,
+                List.of(
+                        new Call(
+                                BOOLEAN,
+                                LIKE_FUNCTION_NAME,
+                                List.of(element, new Constant(utf8Slice("Nguyen%"), VARCHAR))),
+                        new Call(
+                                BOOLEAN,
+                                LIKE_FUNCTION_NAME,
+                                List.of(element, new Constant(utf8Slice("%Van%"), VARCHAR))))));
+
+        ElasticsearchPredicateTranslation<ConnectorExpression> translation = translateWithContract(
+                sameElementAnd,
+                Map.of("tags", column),
+                UNSAFE).orElseThrow();
+
+        assertThat(translation.remotePredicate()).isEmpty();
+        assertThat(translation.remaining()).contains(sameElementAnd);
+        assertThat(translation.residual()).isEmpty();
+    }
+
+    @Test
     public void testAnyMatchInWithNullConstantRemainsResidual()
     {
         ArrayType arrayType = new ArrayType(INTEGER);

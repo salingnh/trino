@@ -24,6 +24,7 @@ import org.intellij.lang.annotations.Language;
 import org.junit.jupiter.api.Test;
 
 import java.io.IOException;
+import java.util.Arrays;
 import java.util.Map;
 
 import static io.trino.testing.TestingNames.randomNameSuffix;
@@ -335,6 +336,110 @@ public abstract class BaseElasticsearchUnsafeArrayPushdownTest
             assertThat(query(unsafe, "SELECT id FROM " + indexName + " WHERE any_match(names, x -> x = 'Nguyen Van' OR x LIKE 'Ng% yen')"))
                     .matches("VALUES VARCHAR '1', VARCHAR '8'")
                     .isNotFullyPushedDown(FilterNode.class);
+        }
+        finally {
+            deleteIndex(indexName);
+        }
+    }
+
+    @Test
+    public void testUnsafeAnalyzedArraySemanticBoundaries()
+            throws IOException
+    {
+        String indexName = "unsafe_array_boundaries_" + randomNameSuffix();
+        @Language("JSON")
+        String body =
+                """
+                {
+                  "settings": {
+                    "analysis": {
+                      "analyzer": {
+                        "folded_text": {
+                          "type": "custom",
+                          "tokenizer": "standard",
+                          "filter": ["lowercase", "asciifolding"]
+                        }
+                      }
+                    }
+                  },
+                  "mappings": {
+                    "_meta": {
+                      "trino": {
+                        "names": { "isArray": true },
+                        "exact_names": { "isArray": true }
+                      }
+                    },
+                    "properties": {
+                      "id": { "type": "keyword" },
+                      "names": { "type": "text", "analyzer": "folded_text" },
+                      "exact_names": {
+                        "type": "text",
+                        "fields": { "keyword": { "type": "keyword" } }
+                      }
+                    }
+                  }
+                }
+                """;
+        createIndex(indexName, body);
+        try {
+            index(indexName, ImmutableMap.of(
+                    "id", "1",
+                    "names", Arrays.asList("Nguyen Anh", "Le Van"),
+                    "exact_names", ImmutableList.of("unrelated")));
+            index(indexName, ImmutableMap.of(
+                    "id", "2",
+                    "names", Arrays.asList("Nguyen Van", null),
+                    "exact_names", ImmutableList.of("Nguyen Van")));
+            index(indexName, ImmutableMap.of(
+                    "id", "3",
+                    "names", Arrays.asList((String) null),
+                    "exact_names", ImmutableList.of("unrelated")));
+            index(indexName, ImmutableMap.of(
+                    "id", "4",
+                    "names", ImmutableList.of(),
+                    "exact_names", ImmutableList.of("unrelated")));
+            index(indexName, ImmutableMap.of("id", "5", "exact_names", ImmutableList.of("unrelated")));
+            index(indexName, ImmutableMap.of(
+                    "id", "6",
+                    "names", Arrays.asList("Nguyen Van", "Nguyen Van"),
+                    "exact_names", ImmutableList.of("unrelated")));
+            index(indexName, ImmutableMap.of(
+                    "id", "7",
+                    "names", ImmutableList.of("social network"),
+                    "exact_names", ImmutableList.of("unrelated")));
+            index(indexName, ImmutableMap.of(
+                    "id", "8",
+                    "names", ImmutableList.of("NGÔ VĂN"),
+                    "exact_names", ImmutableList.of("unrelated")));
+
+            Session unsafe = sessionWithFullTextMode("UNSAFE");
+
+            // Different elements satisfy the two sides. The generic analyzed-text AND must remain local.
+            assertThat(query(unsafe, "SELECT id FROM " + indexName + " WHERE any_match(names, x -> x LIKE 'Nguyen%' AND x LIKE '%Van%')"))
+                    .matches("VALUES VARCHAR '2', VARCHAR '6'")
+                    .isNotFullyPushedDown(FilterNode.class);
+
+            // NULL, empty, missing, and duplicate source values remain ordinary ARRAY cases around the approximate
+            // positive membership candidate.
+            assertThat(query(unsafe, "SELECT id FROM " + indexName + " WHERE contains(names, 'Nguyen Van')"))
+                    .matches("VALUES VARCHAR '2', VARCHAR '6'")
+                    .skipResultsCorrectnessCheckForPushdown()
+                    .isFullyPushedDown();
+            assertThat(query(unsafe, "SELECT id FROM " + indexName + " WHERE any_match(names, x -> x LIKE '%social network%')"))
+                    .matches("VALUES VARCHAR '7'")
+                    .skipResultsCorrectnessCheckForPushdown()
+                    .isFullyPushedDown();
+            assertThat(query(unsafe, "SELECT id FROM " + indexName + " WHERE any_match(names, x -> x LIKE '%ngo%')"))
+                    .matches("VALUES VARCHAR '8'")
+                    .skipResultsCorrectnessCheckForPushdown()
+                    .isFullyPushedDown();
+
+            // The top-level OR deliberately mixes an approximate analyzed ARRAY branch with an exact keyword
+            // subfield ARRAY branch. The composer must retain the strongest effective APPROXIMATE enforcement.
+            assertThat(query(unsafe, "SELECT id FROM " + indexName + " WHERE contains(names, 'Nguyen Van') OR contains(exact_names, 'Nguyen Van')"))
+                    .matches("VALUES VARCHAR '2', VARCHAR '6'")
+                    .skipResultsCorrectnessCheckForPushdown()
+                    .isFullyPushedDown();
         }
         finally {
             deleteIndex(indexName);
