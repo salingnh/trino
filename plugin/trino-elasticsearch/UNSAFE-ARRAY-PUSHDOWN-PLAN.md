@@ -2,7 +2,7 @@
 
 ## Status
 
-**IMPLEMENTATION IN PROGRESS — A0 PASS; A1 PASS; A2 PASS; A3 PASS; A4 PASS; A5 NOT STARTED**
+**IMPLEMENTATION IN PROGRESS — A0 PASS; A1 PASS; A2 PASS; A3 PASS; A4 PASS; A5 PASS; A6 NOT STARTED**
 
 Planning branch: `docs/elasticsearch-unsafe-array-pushdown-plan`
 
@@ -334,6 +334,72 @@ contradiction with `ROADMAP-PUSHDOWN.md`.
 
 Feature implementation commit: `d4301a52f93`.
 Current gate HEAD before this evidence commit: `d4301a52f93`.
+
+### A5 — UNSAFE `regexp_like` parity inside `any_match`
+
+**Status:** PASS
+
+Array-element regexp translation now invokes the same
+`CasePreservingElasticsearchMetadata.translateRegexpLike` classifier used by scalar regexp
+pushdown through `ElasticsearchFullTextPredicateTranslator`. Valid simple, alternation, and
+non-capturing-group patterns become `Regexp` IR nodes with explicit `APPROXIMATE` enforcement
+for analyzed ARRAY elements in `UNSAFE`. Unsupported lookaround syntax produces a local
+residual even under `UNSAFE`; raw SQL/Joni syntax is never sent directly to Lucene.
+
+Files changed in A5:
+
+```text
+plugin/trino-elasticsearch/src/main/java/io/trino/plugin/elasticsearch/ElasticsearchArrayPredicateTranslator.java
+plugin/trino-elasticsearch/src/test/java/io/trino/plugin/elasticsearch/BaseElasticsearchUnsafeArrayPushdownTest.java
+plugin/trino-elasticsearch/src/test/java/io/trino/plugin/elasticsearch/TestElasticsearchArrayPredicateTranslator.java
+```
+
+Test-first RED check:
+
+```text
+docker compose exec -T maven ./mvnw -Dmaven.gitcommitid.skip=true \
+  -pl :trino-elasticsearch -Dtest=TestElasticsearchArrayPredicateTranslator test
+RESULT: expected failure; Tests run: 28, Failures: 1, Errors: 0, Skipped: 0 because the new valid regexp array expectation was still local before production wiring.
+```
+
+Focused and scalar-regression verification:
+
+```text
+docker compose exec -T maven ./mvnw -Dmaven.gitcommitid.skip=true \
+  -pl :trino-elasticsearch \
+  -Dtest=TestElasticsearchArrayPredicateTranslator,TestElasticsearchPredicatePushdownPlanner test
+RESULT: BUILD SUCCESS; Tests run: 38, Failures: 0, Errors: 0, Skipped: 0
+
+docker compose exec -T maven ./mvnw -Dmaven.gitcommitid.skip=true \
+  -pl :trino-elasticsearch \
+  -Dtest=TestElasticsearch7ConnectorTest#testRegexpLikeIsNotPushedDown test
+RESULT: BUILD SUCCESS; Tests run: 1, Failures: 0, Errors: 0, Skipped: 0
+
+docker compose exec -T maven ./mvnw -Dmaven.gitcommitid.skip=true \
+  -pl :trino-elasticsearch \
+  -Dtest=TestElasticsearch8ConnectorTest#testRegexpLikeIsNotPushedDown test
+RESULT: BUILD SUCCESS; Tests run: 1, Failures: 0, Errors: 0, Skipped: 0
+
+docker compose exec -T maven ./mvnw -Dmaven.gitcommitid.skip=true \
+  -pl :trino-elasticsearch \
+  -Dtest=TestElasticsearch7ConnectorTest#testUnsafeAnalyzedArrayRegexpPushdown test
+RESULT: BUILD SUCCESS; Tests run: 1, Failures: 0, Errors: 0, Skipped: 0
+
+docker compose exec -T maven ./mvnw -Dmaven.gitcommitid.skip=true \
+  -pl :trino-elasticsearch \
+  -Dtest=TestElasticsearch8ConnectorTest#testUnsafeAnalyzedArrayRegexpPushdown test
+RESULT: BUILD SUCCESS; Tests run: 1, Failures: 0, Errors: 0, Skipped: 0
+```
+
+The focused Maven runs also passed AirStyle/checkstyle before executing tests. Semantic findings:
+valid analyzed ARRAY regexp translations are authoritative only in UNSAFE and have no residual;
+SAFE remains local for the analyzed array; unsupported regex remains local in both the planner
+contract and connector acceptance. Unicode/case-folded fixture values continue to exercise
+analysis semantics. Scalar regexp acceptance/rejection is unchanged. There is no architectural
+contradiction with `ROADMAP-PUSHDOWN.md`.
+
+Feature implementation commit: `764e41da035`.
+Current gate HEAD before this evidence commit: `764e41da035`.
 
 This document is an implementation handoff for extending `full_text_pushdown_mode=UNSAFE` to primitive Elasticsearch arrays, especially `ARRAY(VARCHAR)` backed by analyzed `text` fields.
 
