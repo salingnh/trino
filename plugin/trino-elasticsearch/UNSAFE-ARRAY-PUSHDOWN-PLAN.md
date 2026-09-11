@@ -2,7 +2,7 @@
 
 ## Status
 
-**IMPLEMENTATION IN PROGRESS — A0 PASS; A1 NOT STARTED**
+**IMPLEMENTATION IN PROGRESS — A0 PASS; A1 PASS; A2 NOT STARTED**
 
 Planning branch: `docs/elasticsearch-unsafe-array-pushdown-plan`
 
@@ -81,9 +81,66 @@ local. No production source was changed during A0.
 Gate files changed: this evidence section and the committed implementation plan at
 `docs/superpowers/plans/2026-09-11-elasticsearch-unsafe-array-full-text.md`.
 
-Current gate HEAD: `fb5ccfcf97f5da01fedb96788596e48dd06c6aa2` before committing this evidence
-update. A1 remains blocked only on the required test-first implementation work; there is no
-architectural contradiction with `ROADMAP-PUSHDOWN.md`.
+The A0 evidence update was committed at `06e4b74a651`.
+
+### A1 — Enforcement-aware ARRAY translation
+
+**Status:** PASS
+
+`ElasticsearchArrayPredicateTranslator` now returns the permanent
+`Optional<ElasticsearchPredicateTranslation<ConnectorExpression>>` contract and accepts the
+connector session and full-text mode at the translation boundary. Recognized array predicates
+that cannot be translated are returned as `unsupported(..., remaining)` rather than being
+silently treated as exact or falling through a temporary representation. The planner consumes
+the translation directly; it no longer wraps every returned ARRAY remote predicate as `EXACT`.
+Existing exact paths still produce `EXACT_ARRAY` or `EXACT_ANY_MATCH`, and the contract's
+invariant rejects any attempt to strengthen an `APPROXIMATE` IR node to `EXACT`.
+
+Files changed in A1:
+
+```text
+plugin/trino-elasticsearch/src/main/java/io/trino/plugin/elasticsearch/ElasticsearchArrayPredicateTranslator.java
+plugin/trino-elasticsearch/src/main/java/io/trino/plugin/elasticsearch/ElasticsearchPredicatePushdownPlanner.java
+plugin/trino-elasticsearch/src/test/java/io/trino/plugin/elasticsearch/TestElasticsearchArrayPredicateTranslator.java
+plugin/trino-elasticsearch/src/test/java/io/trino/plugin/elasticsearch/TestElasticsearchPredicateTranslation.java
+plugin/trino-elasticsearch/src/test/java/io/trino/plugin/elasticsearch/TestElasticsearchSourceValueSemantics.java
+```
+
+Test-first RED check:
+
+```text
+docker compose exec -T maven ./mvnw -Dmaven.gitcommitid.skip=true \
+  -pl :trino-elasticsearch \
+  -Dtest=TestElasticsearchArrayPredicateTranslator,TestElasticsearchPredicateTranslation test
+RESULT: expected compilation failure; tests required the new four-argument permanent API while production still exposed the old two-argument API.
+```
+
+Focused A1 verification:
+
+```text
+docker compose exec -T maven ./mvnw -Dmaven.gitcommitid.skip=true \
+  -pl :trino-elasticsearch \
+  -Dtest=TestElasticsearchArrayPredicateTranslator,TestElasticsearchPredicateTranslation,TestElasticsearchPredicatePushdownPlanner,TestElasticsearchSourceValueSemantics test
+RESULT: BUILD SUCCESS; Tests run: 42, Failures: 0, Errors: 0, Skipped: 0
+
+docker compose exec -T maven ./mvnw -Dmaven.gitcommitid.skip=true \
+  -pl :trino-elasticsearch \
+  -Dtest=TestElasticsearch7ConnectorTest#testPrimitiveArrayExactMembershipPushdown test
+RESULT: BUILD SUCCESS; Tests run: 1, Failures: 0, Errors: 0, Skipped: 0
+
+docker compose exec -T maven ./mvnw -Dmaven.gitcommitid.skip=true \
+  -pl :trino-elasticsearch \
+  -Dtest=TestElasticsearch7ConnectorTest#testAnyMatchPrimitiveArrayExactPushdown test
+RESULT: BUILD SUCCESS; Tests run: 1, Failures: 0, Errors: 0, Skipped: 0
+```
+
+The tests prove exact ARRAY translation remains `EXACT`, unsupported analyzed-text ARRAY
+translation remains local, approximate IR is representable through the same contract, and
+approximate IR cannot be strengthened to exact. A1 intentionally adds no analyzed-text ARRAY
+capability yet; `contains(text_tags, ...)` and analyzed `any_match` remain local until A3.
+There is no architectural contradiction with `ROADMAP-PUSHDOWN.md`, and no remaining A1 blocker.
+
+Current gate HEAD: `7215c16e705`.
 
 This document is an implementation handoff for extending `full_text_pushdown_mode=UNSAFE` to primitive Elasticsearch arrays, especially `ARRAY(VARCHAR)` backed by analyzed `text` fields.
 
