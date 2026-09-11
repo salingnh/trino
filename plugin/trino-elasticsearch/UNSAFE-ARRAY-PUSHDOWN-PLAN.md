@@ -2,7 +2,7 @@
 
 ## Status
 
-**IMPLEMENTATION IN PROGRESS — A0 PASS; A1 PASS; A2 PASS; A3 PASS; A4 PASS; A5 PASS; A6 NOT STARTED**
+**IMPLEMENTATION IN PROGRESS — A0 PASS; A1 PASS; A2 PASS; A3 PASS; A4 PASS; A5 PASS; A6 PASS; A7 NOT STARTED**
 
 Planning branch: `docs/elasticsearch-unsafe-array-pushdown-plan`
 
@@ -400,6 +400,62 @@ contradiction with `ROADMAP-PUSHDOWN.md`.
 
 Feature implementation commit: `764e41da035`.
 Current gate HEAD before this evidence commit: `764e41da035`.
+
+### A6 — UNSAFE OR composition within `any_match`
+
+**Status:** PASS
+
+Analyzed `any_match` OR branches are now translated recursively and composed through the
+permanent `ElasticsearchPredicateComposer`. Every branch must provide a remote translation;
+unsupported or invalid branches cause the composer to retain the complete enclosing
+`any_match` as one residual. Supported equality, LIKE/prefix, and regexp branches are emitted
+as one approximate `Or` IR node. This is safe for existential OR because
+`exists(element, P(element) OR Q(element))` distributes to the OR of same-field existential
+branches; no lambda AND is accepted by this path.
+
+Files changed in A6:
+
+```text
+plugin/trino-elasticsearch/src/main/java/io/trino/plugin/elasticsearch/ElasticsearchArrayPredicateTranslator.java
+plugin/trino-elasticsearch/src/test/java/io/trino/plugin/elasticsearch/BaseElasticsearchUnsafeArrayPushdownTest.java
+plugin/trino-elasticsearch/src/test/java/io/trino/plugin/elasticsearch/TestElasticsearchArrayPredicateTranslator.java
+```
+
+Test-first RED check:
+
+```text
+docker compose exec -T maven ./mvnw -Dmaven.gitcommitid.skip=true \
+  -pl :trino-elasticsearch -Dtest=TestElasticsearchArrayPredicateTranslator test
+RESULT: expected failure; Tests run: 30, Failures: 2, Errors: 0, Skipped: 0 because supported analyzed OR had no remote predicate and the partial-OR contract had not yet been delegated to the composer.
+```
+
+Focused and connector acceptance verification:
+
+```text
+docker compose exec -T maven ./mvnw -Dmaven.gitcommitid.skip=true \
+  -pl :trino-elasticsearch \
+  -Dtest=TestElasticsearchArrayPredicateTranslator,TestElasticsearchPredicateComposer,TestElasticsearchPredicateCompositionPolicy test
+RESULT: BUILD SUCCESS; Tests run: 48, Failures: 0, Errors: 0, Skipped: 0
+
+docker compose exec -T maven ./mvnw -Dmaven.gitcommitid.skip=true \
+  -pl :trino-elasticsearch \
+  -Dtest=TestElasticsearch7ConnectorTest#testUnsafeAnalyzedArrayOrPushdownRequiresEveryBranch test
+RESULT: BUILD SUCCESS; Tests run: 1, Failures: 0, Errors: 0, Skipped: 0
+
+docker compose exec -T maven ./mvnw -Dmaven.gitcommitid.skip=true \
+  -pl :trino-elasticsearch \
+  -Dtest=TestElasticsearch8ConnectorTest#testUnsafeAnalyzedArrayOrPushdownRequiresEveryBranch test
+RESULT: BUILD SUCCESS; Tests run: 1, Failures: 0, Errors: 0, Skipped: 0
+```
+
+Semantic findings: fully translatable analyzed ORs are `APPROXIMATE` with no residual;
+partial ORs are not pushed at all and remain one Trino residual. The cross-element AND trap is
+still not handled by this implementation and remains reserved for A7 hardening. Composer
+request/resource policy and diagnostics remain the single shared path. There is no architectural
+contradiction with `ROADMAP-PUSHDOWN.md`.
+
+Feature implementation commit: `2217824367c`.
+Current gate HEAD before this evidence commit: `2217824367c`.
 
 This document is an implementation handoff for extending `full_text_pushdown_mode=UNSAFE` to primitive Elasticsearch arrays, especially `ARRAY(VARCHAR)` backed by analyzed `text` fields.
 
