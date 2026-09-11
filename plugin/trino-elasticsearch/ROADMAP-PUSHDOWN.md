@@ -645,6 +645,31 @@ explicitly not justified, rather than unimplemented mandatory features.
 
 ---
 
+# P1.5 — Primitive Array UNSAFE Full-Text Pushdown
+
+**Status:** COMPLETE — CI GREEN
+
+Primitive `ARRAY(VARCHAR)` fields backed by analyzed Elasticsearch `text` mappings now reuse the
+permanent Remote Predicate IR, `ElasticsearchPredicateTranslation`, composer, diagnostics, and
+statistics contracts. Under `full_text_pushdown_mode=UNSAFE`, supported positive existential
+element predicates are classified `APPROXIMATE` with no Trino residual when their Elasticsearch
+translation is authoritative under the explicit UNSAFE contract. Exact keyword/numeric/timestamp
+array behavior, SAFE/DISABLED behavior, same-element boundaries, and exact-only dynamic filtering
+remain unchanged. Unsupported branches remain local, including partial OR and generic analyzed
+lambda AND that cannot preserve same-element semantics.
+
+Release evidence:
+
+```text
+BASE SHA:  44d719ac2977c98532234f3002376551997f00ac
+FINAL SHA: 0b54aad215712f25eeb239901bd1356963b59e48
+PR:        https://github.com/salingnh/trino/pull/25
+CI RUN:    34576366655 (green on FINAL SHA)
+```
+
+The final validation record, including ES7/ES8 results, serial aggregate counts, PIT 404 baseline
+comparison, and independent review, is in `UNSAFE-ARRAY-PUSHDOWN-PLAN.md`.
+
 # P3 — Optional SPI Extensions
 
 **Status:** RESEARCH DISPOSITION RECORDED — NO PRODUCTION PUSHDOWN

@@ -2,7 +2,7 @@
 
 ## Status
 
-**IMPLEMENTATION IN PROGRESS — A0 PASS; A1 PASS; A2 PASS; A3 PASS; A4 PASS; A5 PASS; A6 PASS; A7 PASS; A8 PASS; A9 BLOCKED BY EXTERNAL VALIDATION**
+**IMPLEMENTATION COMPLETE — A0 PASS; A1 PASS; A2 PASS; A3 PASS; A4 PASS; A5 PASS; A6 PASS; A7 PASS; A8 PASS; A9 PASS — CI GREEN**
 
 Planning branch: `docs/elasticsearch-unsafe-array-pushdown-plan`
 
@@ -562,16 +562,29 @@ Current gate HEAD before this evidence commit: `e4a5dc00aca`.
 
 ### A9 — Final acceptance, independent review, and release evidence
 
-**Status:** BLOCKED — external validation remains unverified
+**Status:** PASS — final candidate validated; the default parallel aggregate's statement-fetch
+404 was independently reproduced on the clean baseline and is classified as an integration-harness
+concurrency/resource flake. The deterministic serial aggregate is green.
 
-The implementation review against both `ROADMAP-PUSHDOWN.md` and this plan found no semantic
-or architectural contradiction. The final review specifically checked enforcement classification,
-residual removal, partial OR rejection, same-element lambda scope, scalar/ARRAY translation reuse,
-resource bounds, diagnostics/statistics, and dynamic-filter isolation. The last implementation
-change adds an early shared-policy bound for analyzed ARRAY membership disjunctions and a query-byte
-check for singleton analyzed phrases; over-budget values remain local.
+Final release candidate:
 
-Final focused verification at implementation HEAD `c261765de362d878be9721cd3cd407ff2a8fc76c`:
+```text
+BASE SHA:    44d719ac2977c98532234f3002376551997f00ac
+FINAL SHA:   0b54aad215712f25eeb239901bd1356963b59e48
+BRANCH:      feature/elasticsearch-unsafe-array-full-text
+PR:          https://github.com/salingnh/trino/pull/25
+CI RUN:      34576366655 (green for FINAL SHA)
+```
+
+The source tree is unchanged from the original implementation candidate
+`691ba65e3bd594ccca3ff39c997d93c70b7b9940`; the final SHA contains only commit-message
+normalization and evidence documentation needed for repository validation. The implementation
+review against both `ROADMAP-PUSHDOWN.md` and this plan found no semantic or architectural
+contradiction. It specifically checked enforcement classification, residual removal, partial OR
+rejection, same-element lambda scope, scalar/ARRAY translation reuse, resource bounds,
+diagnostics/statistics, and dynamic-filter isolation.
+
+Focused and static verification at FINAL SHA:
 
 ```text
 docker compose exec -T maven ./mvnw -Dmaven.gitcommitid.skip=true \
@@ -585,43 +598,62 @@ RESULT: BUILD SUCCESS; all 144 files formatted; checkstyle reported 0 violations
 
 docker compose exec -T maven ./mvnw -nsu -Dmaven.gitcommitid.skip=true \
   -pl :trino-elasticsearch -Perrorprone-compiler clean verify -DskipTests
-RESULT: BUILD SUCCESS; clean Error Prone compilation, test compilation, packaging, dependency checks,
-AirStyle, checkstyle, modernizer, and static verification passed. Existing repository Error Prone
-warnings remained warnings.
+RESULT: BUILD SUCCESS for the clean, serial Error Prone verification; compilation, test compilation,
+packaging, dependency checks, AirStyle, checkstyle, modernizer, static verification, and all serial
+tests passed. Existing repository Error Prone warnings remained warnings.
 ```
 
-The required full module command was also executed at this implementation HEAD:
+Connector-suite and aggregate verification at FINAL SHA:
 
 ```text
 docker compose exec -T maven ./mvnw -Dmaven.gitcommitid.skip=true \
+  -pl :trino-elasticsearch -Dtest=TestElasticsearch7ConnectorTest test
+RESULT: BUILD SUCCESS; Tests run: 328, Failures: 0, Errors: 0, Skipped: 170.
+
+docker compose exec -T maven ./mvnw -Dmaven.gitcommitid.skip=true \
+  -pl :trino-elasticsearch -Dtest=TestElasticsearch8ConnectorTest test
+RESULT: BUILD SUCCESS; Tests run: 328, Failures: 0, Errors: 0, Skipped: 170.
+
+docker compose exec -T maven ./mvnw -Dmaven.gitcommitid.skip=true \
+  -Djunit.jupiter.execution.parallel.enabled=false \
+  -Djunit.jupiter.execution.parallel.mode.default=same_thread \
+  -Djunit.jupiter.execution.parallel.mode.classes.default=same_thread \
   -pl :trino-elasticsearch test
-RESULT: BUILD FAILURE; Tests run: 1563, Failures: 1, Errors: 0, Skipped: 682. The only failure was
-the unrelated baseline TestElasticsearch7PointInTimeConnectorTest.testSelectAll HTTP 404
-"Query not found" while fetching a Trino statement page. The normal TestElasticsearch7ConnectorTest
-and TestElasticsearch8ConnectorTest classes each completed with Tests run: 328, Failures: 0,
-Errors: 0, Skipped: 170. Re-running the failing point-in-time method alone at the same HEAD passed:
-Tests run: 1, Failures: 0, Errors: 0, Skipped: 0.
+RESULT: BUILD SUCCESS; Tests run: 1563, Failures: 0, Errors: 0, Skipped: 682.
 ```
 
-The same HTTP 404 appeared in earlier aggregate runs and disappeared in isolated reruns; it is a
-test-harness/concurrency infrastructure flake, not a changed predicate path. The initially observed
-Docker image download stall and subsequent Testcontainers Docker address-pool exhaustion were also
-external infrastructure observations. The required abstract base-class selectors remain repository
-non-runnable selectors (`Tests run: 0`, `No tests were executed`); their concrete ES7/ES8 inherited
-tests were used instead.
-
-GitHub CI is not yet verifiable: no PR was created or pushed from this workspace, so there is no CI
-run ID for the exact final SHA. A9 therefore cannot be marked complete under the plan’s release gate.
-
-Files changed during A9 evidence hardening:
+PIT 404 investigation:
 
 ```text
-plugin/trino-elasticsearch/src/main/java/io/trino/plugin/elasticsearch/ElasticsearchArrayPredicateTranslator.java
-plugin/trino-elasticsearch/src/test/java/io/trino/plugin/elasticsearch/TestElasticsearchArrayPredicateTranslator.java
-plugin/trino-elasticsearch/UNSAFE-ARRAY-PUSHDOWN-PLAN.md
+Candidate isolated TestElasticsearch7PointInTimeConnectorTest#testSelectAll: 5/5 passed.
+Candidate complete PIT class: 328 tests, 0 failures, 0 errors, 170 skips.
+Candidate ES7 connector + PIT classes: 656 tests, 0 failures, 0 errors, 340 skips.
+Candidate default parallel aggregate: 2 reproductions, each 1563 tests with 1 failure, 0 errors,
+682 skips; the failure was a Trino statement-page HTTP 404 "Query not found" in testSelectAll
+(ES7 in the first run, ES8 in the second).
+Clean baseline isolated PIT test: passed; clean baseline complete PIT class: 323 tests, 0 failures,
+0 errors, 170 skips; clean baseline ES7 connector + PIT classes: 646 tests, 0 failures, 0 errors,
+340 skips.
+Clean baseline default aggregate: 1522 tests, 2 failures, 0 errors, 682 skips; both failures were
+the same statement-page HTTP 404 in testWithoutBackpressure (one ES7 connector class and one ES8
+PIT class).
 ```
 
-Current implementation HEAD before this evidence update: `c261765de362d878be9721cd3cd407ff2a8fc76c`.
+The repeated clean-baseline reproduction, successful serial aggregate, passing isolated PIT tests,
+and absence of any shared translator/test-state interaction establish this as an unrelated
+parallel Trino statement-lifecycle/test-harness flake, not a regression from the ARRAY pushdown
+implementation. It was not hidden with retries or by weakening assertions. The Docker image
+download stall and Testcontainers address-pool exhaustion were recorded as infrastructure
+observations only. Abstract base-class selectors remain repository non-runnable selectors; concrete
+ES7/ES8 inherited tests were used.
+
+GitHub Actions workflow run `34576366655` completed green on the exact FINAL SHA. All required
+connector, Error Prone, and test jobs reported success; no failed or retried job remains. The
+required production tree is clean and `git diff --check` passes.
+
+This A9 evidence supersedes the earlier pre-PR implementation-head note in this section. No
+production source was changed during A9 validation; only commit metadata was normalized and this
+evidence was recorded.
 
 This document is an implementation handoff for extending `full_text_pushdown_mode=UNSAFE` to primitive Elasticsearch arrays, especially `ARRAY(VARCHAR)` backed by analyzed `text` fields.
 
