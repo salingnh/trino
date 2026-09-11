@@ -79,7 +79,7 @@ final class RewriteAnalyzedTextLike
     {
         Variable variable = captures.get(LIKE_VALUE);
         Constant pattern = captures.get(LIKE_PATTERN);
-        return rewrite(expression, (ElasticsearchColumnHandle) context.getAssignment(variable.getName()), pattern);
+        return rewrite((ElasticsearchColumnHandle) context.getAssignment(variable.getName()), pattern);
     }
 
     static Optional<ElasticsearchExpressionRewrite> rewrite(
@@ -90,11 +90,10 @@ final class RewriteAnalyzedTextLike
                 || !(expression.getArguments().get(1) instanceof Constant pattern)) {
             return Optional.empty();
         }
-        return rewrite(expression, column, pattern);
+        return rewrite(column, pattern);
     }
 
     private static Optional<ElasticsearchExpressionRewrite> rewrite(
-            Call expression,
             ElasticsearchColumnHandle column,
             Constant pattern)
     {

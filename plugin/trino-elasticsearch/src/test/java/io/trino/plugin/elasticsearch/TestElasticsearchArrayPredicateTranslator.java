@@ -22,6 +22,7 @@ import io.trino.plugin.elasticsearch.decoders.VarcharDecoder;
 import io.trino.plugin.elasticsearch.expression.ElasticsearchRemotePredicate;
 import io.trino.spi.block.Block;
 import io.trino.spi.block.BlockBuilder;
+import io.trino.spi.connector.ColumnHandle;
 import io.trino.spi.expression.Call;
 import io.trino.spi.expression.ConnectorExpression;
 import io.trino.spi.expression.Constant;
@@ -759,7 +760,7 @@ public class TestElasticsearchArrayPredicateTranslator
 
     private static Optional<ElasticsearchPredicateTranslation<ConnectorExpression>> translateWithContract(
             ConnectorExpression expression,
-            Map<String, io.trino.spi.connector.ColumnHandle> assignments,
+            Map<String, ColumnHandle> assignments,
             FullTextPushdownMode fullTextMode)
     {
         return ElasticsearchArrayPredicateTranslator.translate(
@@ -771,7 +772,7 @@ public class TestElasticsearchArrayPredicateTranslator
 
     private static Optional<ElasticsearchRemotePredicate> translate(
             ConnectorExpression expression,
-            Map<String, io.trino.spi.connector.ColumnHandle> assignments)
+            Map<String, ColumnHandle> assignments)
     {
         return translateWithContract(expression, assignments, SAFE)
                 .flatMap(ElasticsearchPredicateTranslation::remotePredicate);
