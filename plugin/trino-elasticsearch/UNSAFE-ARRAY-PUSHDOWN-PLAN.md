@@ -2,7 +2,7 @@
 
 ## Status
 
-**IMPLEMENTATION IN PROGRESS — A0 PASS; A1 PASS; A2 PASS; A3 NOT STARTED**
+**IMPLEMENTATION IN PROGRESS — A0 PASS; A1 PASS; A2 PASS; A3 PASS; A4 NOT STARTED**
 
 Planning branch: `docs/elasticsearch-unsafe-array-pushdown-plan`
 
@@ -177,6 +177,96 @@ ARRAY equality/membership is still intentionally local; A3 is the first capabili
 UNSAFE approximate element predicates.
 
 Current gate HEAD: `5880dcea1fd`.
+
+### A3 — UNSAFE analyzed equality and membership
+
+**Status:** PASS
+
+The permanent ARRAY translation contract now has one shared element-membership path for
+`contains`, `arrays_overlap`, `any_match` equality, and `any_match` IN. Exact mappings still
+use `Term`/`Terms` and report `EXACT_ARRAY` or `EXACT_ANY_MATCH`. Analyzed `text` arrays with
+no keyword subfield are accepted only in `UNSAFE`; each value lowers to `MatchPhrase` and is
+explicitly marked `APPROXIMATE_ARRAY` or `APPROXIMATE_ANY_MATCH`. Multi-value membership is
+composed through `ElasticsearchPredicateComposer`, so the same permanent boolean, residual,
+diagnostics, and resource-policy contracts apply. SAFE and DISABLED remain local for analyzed
+ARRAY membership.
+
+The shared request guard now covers both query bytes and recursive Elasticsearch boolean-clause
+counts. Scalar analyzed discrete-domain disjunctions and analyzed ARRAY membership therefore
+fall back to local evaluation together when the common policy is exceeded; no array-only bound
+was introduced. Dynamic filters continue to use exact term/domain planning only.
+
+Files changed in A3:
+
+```text
+plugin/trino-elasticsearch/src/main/java/io/trino/plugin/elasticsearch/ElasticsearchArrayPredicateTranslator.java
+plugin/trino-elasticsearch/src/main/java/io/trino/plugin/elasticsearch/ElasticsearchPredicateComposer.java
+plugin/trino-elasticsearch/src/main/java/io/trino/plugin/elasticsearch/ElasticsearchPredicateTranslation.java
+plugin/trino-elasticsearch/src/main/java/io/trino/plugin/elasticsearch/ElasticsearchPushdownDiagnostics.java
+plugin/trino-elasticsearch/src/main/java/io/trino/plugin/elasticsearch/ElasticsearchRemotePredicateTranslator.java
+plugin/trino-elasticsearch/src/test/java/io/trino/plugin/elasticsearch/BaseElasticsearchParallelConnectorTest.java
+plugin/trino-elasticsearch/src/test/java/io/trino/plugin/elasticsearch/BaseElasticsearchUnsafeArrayPushdownTest.java
+plugin/trino-elasticsearch/src/test/java/io/trino/plugin/elasticsearch/TestElasticsearchArrayPredicateTranslator.java
+plugin/trino-elasticsearch/src/test/java/io/trino/plugin/elasticsearch/TestElasticsearchRemotePredicateTranslator.java
+```
+
+Test-first RED check:
+
+```text
+docker compose exec -T maven ./mvnw -Dmaven.gitcommitid.skip=true \
+  -pl :trino-elasticsearch -Dtest=TestElasticsearchArrayPredicateTranslator test
+RESULT: expected test-compilation failure before production changes; the new approximate-array reason categories and
+analyzed ARRAY expectations were not yet represented by the production contract.
+```
+
+Focused unit and resource-safety verification:
+
+```text
+docker compose exec -T maven ./mvnw -Dmaven.gitcommitid.skip=true \
+  -pl :trino-elasticsearch \
+  -Dtest=TestElasticsearchArrayPredicateTranslator,TestElasticsearchRemotePredicateTranslator,TestElasticsearchPredicateCompositionPolicy,TestElasticsearchPushdownDiagnostics test
+RESULT: BUILD SUCCESS; Tests run: 43, Failures: 0, Errors: 0, Skipped: 0
+
+docker compose exec -T maven ./mvnw -Dmaven.gitcommitid.skip=true \
+  -pl :trino-elasticsearch \
+  -Dtest=TestElasticsearchArrayPredicateTranslator,TestElasticsearchPredicateComposer,TestElasticsearchPredicateCompositionPlanner,TestElasticsearchPredicateCompositionPolicy,TestElasticsearchPredicateCompositionRequestBudget,TestElasticsearchPredicatePushdownPlanner,TestElasticsearchPushdownDiagnostics,TestElasticsearchSourceValueSemantics,TestElasticsearchRemotePredicateTranslator test
+RESULT: BUILD SUCCESS; Tests run: 77, Failures: 0, Errors: 0, Skipped: 0
+```
+
+Connector acceptance and exact regression verification:
+
+```text
+docker compose exec -T maven ./mvnw -Dmaven.gitcommitid.skip=true \
+  -pl :trino-elasticsearch \
+  -Dtest=TestElasticsearch7ConnectorTest#testUnsafeAnalyzedArrayEqualityAndMembershipPushdown test
+RESULT: BUILD SUCCESS; Tests run: 1, Failures: 0, Errors: 0, Skipped: 0
+
+docker compose exec -T maven ./mvnw -Dmaven.gitcommitid.skip=true \
+  -pl :trino-elasticsearch \
+  -Dtest=TestElasticsearch8ConnectorTest#testUnsafeAnalyzedArrayEqualityAndMembershipPushdown test
+RESULT: BUILD SUCCESS; Tests run: 1, Failures: 0, Errors: 0, Skipped: 0
+
+docker compose exec -T maven ./mvnw -Dmaven.gitcommitid.skip=true \
+  -pl :trino-elasticsearch \
+  -Dtest=TestElasticsearch7ConnectorTest#testPrimitiveArrayExactMembershipPushdown,TestElasticsearch7ConnectorTest#testAnyMatchPrimitiveArrayExactPushdown test
+RESULT: BUILD SUCCESS; Tests run: 2, Failures: 0, Errors: 0, Skipped: 0
+
+docker compose exec -T maven ./mvnw -Dmaven.gitcommitid.skip=true \
+  -pl :trino-elasticsearch \
+  -Dtest=TestElasticsearch8ConnectorTest#testPrimitiveArrayExactMembershipPushdown,TestElasticsearch8ConnectorTest#testAnyMatchPrimitiveArrayExactPushdown test
+RESULT: BUILD SUCCESS; Tests run: 2, Failures: 0, Errors: 0, Skipped: 0
+```
+
+Semantic findings: analyzed ARRAY translations are authoritative only under explicit UNSAFE
+semantics and carry effective `APPROXIMATE` enforcement; no SQL residual remains for accepted
+single-value or bounded multi-value membership. Invalid or NULL-containing constants remain
+local. Exact keyword/text.keyword arrays and exact numeric/timestamp paths remain unchanged.
+The shared non-`Terms` disjunction guard prevents oversized analyzed requests. No same-element
+boundary was widened: analyzed lambda bodies other than direct equality/IN remain local until
+their own semantic gates. There is no architectural contradiction with `ROADMAP-PUSHDOWN.md`.
+
+Feature implementation commit: `1748b84758b`.
+Current gate HEAD before this evidence commit: `1748b84758b`.
 
 This document is an implementation handoff for extending `full_text_pushdown_mode=UNSAFE` to primitive Elasticsearch arrays, especially `ARRAY(VARCHAR)` backed by analyzed `text` fields.
 
@@ -894,12 +984,12 @@ Enforcement = APPROXIMATE
 
 ### Design requirements
 
-- [ ] Reuse the same analyzed-text value semantics as scalar UNSAFE discrete domains.
-- [ ] Do not use `Term`/`Terms` against analyzed text merely because the source SQL is equality/IN.
-- [ ] Keep exact keyword/text.keyword arrays on the existing exact path.
-- [ ] Do not retain a SQL residual for a valid analyzed translation in `UNSAFE`.
-- [ ] Keep unsupported/invalid constants residual.
-- [ ] Preserve NULL handling of current array operators.
+- [x] Reuse the same analyzed-text value semantics as scalar UNSAFE discrete domains.
+- [x] Do not use `Term`/`Terms` against analyzed text merely because the source SQL is equality/IN.
+- [x] Keep exact keyword/text.keyword arrays on the existing exact path.
+- [x] Do not retain a SQL residual for a valid analyzed translation in `UNSAFE`.
+- [x] Keep unsupported/invalid constants residual.
+- [x] Preserve NULL handling of current array operators.
 
 ### Resource-safety requirement
 
@@ -921,23 +1011,23 @@ over generating an Elasticsearch request likely to exceed clause/request limits.
 
 UNSAFE:
 
-- [ ] `contains(analyzed_array, single_token)` fully pushed.
-- [ ] `contains(analyzed_array, multi_token)` fully pushed.
-- [ ] `arrays_overlap(analyzed_array, two_values)` fully pushed.
-- [ ] `any_match(analyzed_array, x -> x = C)` fully pushed.
-- [ ] `any_match(analyzed_array, x -> x IN (...))` fully pushed.
-- [ ] IR enforcement is `APPROXIMATE`, never `EXACT`.
-- [ ] no residual `FilterNode` remains for accepted UNSAFE translations.
+- [x] `contains(analyzed_array, single_token)` fully pushed.
+- [x] `contains(analyzed_array, multi_token)` fully pushed.
+- [x] `arrays_overlap(analyzed_array, two_values)` fully pushed.
+- [x] `any_match(analyzed_array, x -> x = C)` fully pushed.
+- [x] `any_match(analyzed_array, x -> x IN (...))` fully pushed.
+- [x] IR enforcement is `APPROXIMATE`, never `EXACT`.
+- [x] no residual `FilterNode` remains for accepted UNSAFE translations.
 
 Control modes:
 
-- [ ] same queries under `DISABLED` behave exactly as before.
-- [ ] same queries under `SAFE` behave exactly as before.
+- [x] same queries under `DISABLED` behave exactly as before.
+- [x] same queries under `SAFE` behave exactly as before.
 
 Exact-field regression:
 
-- [ ] keyword arrays remain `EXACT` even when session mode is `UNSAFE`.
-- [ ] text-with-keyword arrays continue to target the keyword subfield and remain exact.
+- [x] keyword arrays remain `EXACT` even when session mode is `UNSAFE`.
+- [x] text-with-keyword arrays continue to target the keyword subfield and remain exact.
 
 ### A3 completion gate
 
