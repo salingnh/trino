@@ -18,6 +18,7 @@ import io.trino.plugin.elasticsearch.client.IndexMetadata.PrimitiveType;
 import io.trino.plugin.elasticsearch.expression.ElasticsearchRemotePredicate;
 import io.trino.spi.block.Block;
 import io.trino.spi.connector.ColumnHandle;
+import io.trino.spi.connector.ConnectorSession;
 import io.trino.spi.expression.Call;
 import io.trino.spi.expression.ConnectorExpression;
 import io.trino.spi.expression.Constant;
@@ -50,28 +51,48 @@ import static io.trino.spi.type.SmallintType.SMALLINT;
 import static io.trino.spi.type.TimestampType.TIMESTAMP_MILLIS;
 import static io.trino.spi.type.TinyintType.TINYINT;
 import static io.trino.spi.type.TypeUtils.readNativeValue;
+import static java.util.Objects.requireNonNull;
 
 /**
- * Exact Elasticsearch membership pushdown for primitive arrays.
+ * Elasticsearch predicate translation for primitive arrays.
  */
 final class ElasticsearchArrayPredicateTranslator
 {
     private ElasticsearchArrayPredicateTranslator() {}
 
-    public static Optional<ElasticsearchRemotePredicate> translate(
+    public static Optional<ElasticsearchPredicateTranslation<ConnectorExpression>> translate(
+            ConnectorSession session,
             ConnectorExpression expression,
-            Map<String, ColumnHandle> assignments)
+            Map<String, ColumnHandle> assignments,
+            FullTextPushdownMode fullTextMode)
     {
+        requireNonNull(session, "session is null");
+        requireNonNull(expression, "expression is null");
+        requireNonNull(assignments, "assignments is null");
+        requireNonNull(fullTextMode, "fullTextMode is null");
+
         if (!(expression instanceof Call call)) {
             return Optional.empty();
         }
 
         return switch (call.getFunctionName().getName()) {
-            case "contains" -> translateContains(call, assignments);
-            case "arrays_overlap" -> translateArraysOverlap(call, assignments);
-            case "any_match" -> translateAnyMatch(call, assignments);
+            case "contains" -> exactOrUnsupported(expression, translateContains(call, assignments), ElasticsearchPredicateTranslation.Reason.EXACT_ARRAY);
+            case "arrays_overlap" -> exactOrUnsupported(expression, translateArraysOverlap(call, assignments), ElasticsearchPredicateTranslation.Reason.EXACT_ARRAY);
+            case "any_match" -> exactOrUnsupported(expression, translateAnyMatch(call, assignments), ElasticsearchPredicateTranslation.Reason.EXACT_ANY_MATCH);
             default -> Optional.empty();
         };
+    }
+
+    private static Optional<ElasticsearchPredicateTranslation<ConnectorExpression>> exactOrUnsupported(
+            ConnectorExpression expression,
+            Optional<ElasticsearchRemotePredicate> predicate,
+            ElasticsearchPredicateTranslation.Reason exactReason)
+    {
+        return Optional.of(predicate
+                .<ElasticsearchPredicateTranslation<ConnectorExpression>>map(value -> ElasticsearchPredicateTranslation.exact(value, exactReason))
+                .orElseGet(() -> ElasticsearchPredicateTranslation.unsupported(
+                        expression,
+                        ElasticsearchPredicateTranslation.Reason.UNSUPPORTED_EXPRESSION)));
     }
 
     private static Optional<ElasticsearchRemotePredicate> translateContains(Call call, Map<String, ColumnHandle> assignments)

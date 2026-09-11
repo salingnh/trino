@@ -30,6 +30,7 @@ import io.trino.spi.expression.Lambda;
 import io.trino.spi.expression.Variable;
 import io.trino.spi.type.ArrayType;
 import io.trino.spi.type.FunctionType;
+import io.trino.testing.TestingConnectorSession;
 import org.junit.jupiter.api.Test;
 
 import java.util.List;
@@ -38,6 +39,13 @@ import java.util.Optional;
 import java.util.function.Function;
 
 import static io.airlift.slice.Slices.utf8Slice;
+import static io.trino.plugin.elasticsearch.ElasticsearchPredicateTranslation.Reason.EXACT_ANY_MATCH;
+import static io.trino.plugin.elasticsearch.ElasticsearchPredicateTranslation.Reason.EXACT_ARRAY;
+import static io.trino.plugin.elasticsearch.ElasticsearchPredicateTranslation.Reason.FULL_TEXT_UNSAFE_APPROXIMATE;
+import static io.trino.plugin.elasticsearch.ElasticsearchPredicateTranslation.Reason.UNSUPPORTED_EXPRESSION;
+import static io.trino.plugin.elasticsearch.FullTextPushdownMode.SAFE;
+import static io.trino.plugin.elasticsearch.FullTextPushdownMode.UNSAFE;
+import static io.trino.plugin.elasticsearch.expression.ElasticsearchRemotePredicate.Enforcement.EXACT;
 import static io.trino.spi.expression.StandardFunctions.AND_FUNCTION_NAME;
 import static io.trino.spi.expression.StandardFunctions.EQUAL_OPERATOR_FUNCTION_NAME;
 import static io.trino.spi.expression.StandardFunctions.GREATER_THAN_OPERATOR_FUNCTION_NAME;
@@ -63,7 +71,7 @@ public class TestElasticsearchArrayPredicateTranslator
                 new FunctionName("contains"),
                 List.of(new Variable("numbers", arrayType), new Constant(42L, INTEGER)));
 
-        assertThat(ElasticsearchArrayPredicateTranslator.translate(contains, Map.of("numbers", column)))
+        assertThat(translate(contains, Map.of("numbers", column)))
                 .contains(new ElasticsearchRemotePredicate.Term("Numbers", 42L));
     }
 
@@ -83,7 +91,7 @@ public class TestElasticsearchArrayPredicateTranslator
                 new FunctionName("contains"),
                 List.of(new Variable("flags", arrayType), new Constant(true, BOOLEAN)));
 
-        assertThat(ElasticsearchArrayPredicateTranslator.translate(contains, Map.of("flags", column)))
+        assertThat(translate(contains, Map.of("flags", column)))
                 .contains(new ElasticsearchRemotePredicate.Term("Flags", true));
     }
 
@@ -103,7 +111,7 @@ public class TestElasticsearchArrayPredicateTranslator
                 new FunctionName("contains"),
                 List.of(new Variable("times", arrayType), new Constant(1_000_000L, TIMESTAMP_MILLIS)));
 
-        assertThat(ElasticsearchArrayPredicateTranslator.translate(contains, Map.of("times", column)))
+        assertThat(translate(contains, Map.of("times", column)))
                 .contains(new ElasticsearchRemotePredicate.Term("Times", "1970-01-01T00:00:01"));
     }
 
@@ -123,7 +131,7 @@ public class TestElasticsearchArrayPredicateTranslator
                 new FunctionName("contains"),
                 List.of(new Variable("tags", arrayType), new Constant(utf8Slice("ExactValue"), VARCHAR)));
 
-        assertThat(ElasticsearchArrayPredicateTranslator.translate(contains, Map.of("tags", column)))
+        assertThat(translate(contains, Map.of("tags", column)))
                 .contains(new ElasticsearchRemotePredicate.Term("Tags.keyword", "ExactValue"));
     }
 
@@ -137,7 +145,7 @@ public class TestElasticsearchArrayPredicateTranslator
                 new FunctionName("contains"),
                 List.of(new Variable("tags", arrayType), new Constant(utf8Slice("value"), VARCHAR)));
 
-        assertThat(ElasticsearchArrayPredicateTranslator.translate(contains, Map.of("tags", column))).isEmpty();
+        assertThat(translate(contains, Map.of("tags", column))).isEmpty();
     }
 
     @Test
@@ -150,7 +158,7 @@ public class TestElasticsearchArrayPredicateTranslator
                 new FunctionName("arrays_overlap"),
                 List.of(new Variable("numbers", arrayType), new Constant(integerBlock(1, 2, 3), arrayType)));
 
-        assertThat(ElasticsearchArrayPredicateTranslator.translate(arraysOverlap, Map.of("numbers", column)))
+        assertThat(translate(arraysOverlap, Map.of("numbers", column)))
                 .contains(new ElasticsearchRemotePredicate.Terms("Numbers", List.of(1L, 2L, 3L)));
     }
 
@@ -164,7 +172,7 @@ public class TestElasticsearchArrayPredicateTranslator
                 new FunctionName("arrays_overlap"),
                 List.of(new Variable("numbers", arrayType), new Constant(integerBlock(), arrayType)));
 
-        assertThat(ElasticsearchArrayPredicateTranslator.translate(arraysOverlap, Map.of("numbers", column))).isEmpty();
+        assertThat(translate(arraysOverlap, Map.of("numbers", column))).isEmpty();
     }
 
     @Test
@@ -180,7 +188,7 @@ public class TestElasticsearchArrayPredicateTranslator
                 new FunctionName("arrays_overlap"),
                 List.of(new Variable("numbers", arrayType), new Constant(builder.build(), arrayType)));
 
-        assertThat(ElasticsearchArrayPredicateTranslator.translate(arraysOverlap, Map.of("numbers", column))).isEmpty();
+        assertThat(translate(arraysOverlap, Map.of("numbers", column))).isEmpty();
     }
 
     @Test
@@ -193,7 +201,7 @@ public class TestElasticsearchArrayPredicateTranslator
                 EQUAL_OPERATOR_FUNCTION_NAME,
                 List.of(element, new Constant(42L, INTEGER))));
 
-        assertThat(ElasticsearchArrayPredicateTranslator.translate(anyMatch, Map.of("numbers", column)))
+        assertThat(translate(anyMatch, Map.of("numbers", column)))
                 .contains(new ElasticsearchRemotePredicate.Term("Numbers", 42L));
     }
 
@@ -207,7 +215,7 @@ public class TestElasticsearchArrayPredicateTranslator
                 IN_PREDICATE_FUNCTION_NAME,
                 List.of(element, new Constant(integerBlock(1, 2, 3), arrayType))));
 
-        assertThat(ElasticsearchArrayPredicateTranslator.translate(anyMatch, Map.of("numbers", column)))
+        assertThat(translate(anyMatch, Map.of("numbers", column)))
                 .contains(new ElasticsearchRemotePredicate.Terms("Numbers", List.of(1L, 2L, 3L)));
     }
 
@@ -221,7 +229,7 @@ public class TestElasticsearchArrayPredicateTranslator
                 GREATER_THAN_OPERATOR_FUNCTION_NAME,
                 List.of(element, new Constant(10L, INTEGER))));
 
-        assertThat(ElasticsearchArrayPredicateTranslator.translate(anyMatch, Map.of("numbers", column)))
+        assertThat(translate(anyMatch, Map.of("numbers", column)))
                 .contains(new ElasticsearchRemotePredicate.Range(
                         "Numbers",
                         Optional.of(new ElasticsearchRemotePredicate.Bound(10L, false)),
@@ -240,7 +248,7 @@ public class TestElasticsearchArrayPredicateTranslator
                         new Call(BOOLEAN, GREATER_THAN_OPERATOR_FUNCTION_NAME, List.of(element, new Constant(10L, INTEGER))),
                         new Call(BOOLEAN, LESS_THAN_OPERATOR_FUNCTION_NAME, List.of(element, new Constant(20L, INTEGER))))));
 
-        assertThat(ElasticsearchArrayPredicateTranslator.translate(anyMatch, Map.of("numbers", column)))
+        assertThat(translate(anyMatch, Map.of("numbers", column)))
                 .contains(new ElasticsearchRemotePredicate.Range(
                         "Numbers",
                         Optional.of(new ElasticsearchRemotePredicate.Bound(10L, false)),
@@ -259,7 +267,7 @@ public class TestElasticsearchArrayPredicateTranslator
                         new Call(BOOLEAN, EQUAL_OPERATOR_FUNCTION_NAME, List.of(element, new Constant(1L, INTEGER))),
                         new Call(BOOLEAN, EQUAL_OPERATOR_FUNCTION_NAME, List.of(element, new Constant(2L, INTEGER))))));
 
-        assertThat(ElasticsearchArrayPredicateTranslator.translate(anyMatch, Map.of("numbers", column)))
+        assertThat(translate(anyMatch, Map.of("numbers", column)))
                 .contains(new ElasticsearchRemotePredicate.Or(List.of(
                         new ElasticsearchRemotePredicate.Term("Numbers", 1L),
                         new ElasticsearchRemotePredicate.Term("Numbers", 2L))));
@@ -277,7 +285,7 @@ public class TestElasticsearchArrayPredicateTranslator
                         new Call(BOOLEAN, EQUAL_OPERATOR_FUNCTION_NAME, List.of(element, new Constant(1L, INTEGER))),
                         new Call(BOOLEAN, EQUAL_OPERATOR_FUNCTION_NAME, List.of(element, new Constant(2L, INTEGER))))));
 
-        assertThat(ElasticsearchArrayPredicateTranslator.translate(anyMatch, Map.of("numbers", column))).isEmpty();
+        assertThat(translate(anyMatch, Map.of("numbers", column))).isEmpty();
     }
 
     @Test
@@ -290,7 +298,7 @@ public class TestElasticsearchArrayPredicateTranslator
                 EQUAL_OPERATOR_FUNCTION_NAME,
                 List.of(element, new Constant(utf8Slice("value"), VARCHAR))));
 
-        assertThat(ElasticsearchArrayPredicateTranslator.translate(anyMatch, Map.of("tags", column))).isEmpty();
+        assertThat(translate(anyMatch, Map.of("tags", column))).isEmpty();
     }
 
     @Test
@@ -306,7 +314,110 @@ public class TestElasticsearchArrayPredicateTranslator
                 IN_PREDICATE_FUNCTION_NAME,
                 List.of(element, new Constant(builder.build(), arrayType))));
 
-        assertThat(ElasticsearchArrayPredicateTranslator.translate(anyMatch, Map.of("numbers", column))).isEmpty();
+        assertThat(translate(anyMatch, Map.of("numbers", column))).isEmpty();
+    }
+
+    @Test
+    public void testExactArrayTranslationReportsExactEnforcement()
+    {
+        ArrayType arrayType = new ArrayType(INTEGER);
+        ElasticsearchColumnHandle column = integerArrayColumn("Numbers");
+        Call contains = new Call(
+                BOOLEAN,
+                new FunctionName("contains"),
+                List.of(new Variable("numbers", arrayType), new Constant(42L, INTEGER)));
+
+        ElasticsearchPredicateTranslation<ConnectorExpression> translation = translateWithContract(
+                contains,
+                Map.of("numbers", column),
+                SAFE).orElseThrow();
+
+        assertThat(translation.remotePredicate()).contains(new ElasticsearchRemotePredicate.Term("Numbers", 42L));
+        assertThat(translation.enforcement()).contains(EXACT);
+        assertThat(translation.reason()).isEqualTo(EXACT_ARRAY);
+        assertThat(translation.remaining()).isEmpty();
+        assertThat(translation.residual()).isEmpty();
+    }
+
+    @Test
+    public void testExactAnyMatchTranslationReportsExactEnforcement()
+    {
+        ArrayType arrayType = new ArrayType(INTEGER);
+        ElasticsearchColumnHandle column = integerArrayColumn("Numbers");
+        Call anyMatch = anyMatch("numbers", arrayType, element -> new Call(
+                BOOLEAN,
+                EQUAL_OPERATOR_FUNCTION_NAME,
+                List.of(element, new Constant(42L, INTEGER))));
+
+        ElasticsearchPredicateTranslation<ConnectorExpression> translation = translateWithContract(
+                anyMatch,
+                Map.of("numbers", column),
+                SAFE).orElseThrow();
+
+        assertThat(translation.remotePredicate()).contains(new ElasticsearchRemotePredicate.Term("Numbers", 42L));
+        assertThat(translation.enforcement()).contains(EXACT);
+        assertThat(translation.reason()).isEqualTo(EXACT_ANY_MATCH);
+        assertThat(translation.remaining()).isEmpty();
+        assertThat(translation.residual()).isEmpty();
+    }
+
+    @Test
+    public void testUnsupportedArrayTranslationRemainsLocal()
+    {
+        ArrayType arrayType = new ArrayType(VARCHAR);
+        ElasticsearchColumnHandle column = analyzedTextArrayColumn("Tags");
+        Call contains = new Call(
+                BOOLEAN,
+                new FunctionName("contains"),
+                List.of(new Variable("tags", arrayType), new Constant(utf8Slice("value"), VARCHAR)));
+
+        ElasticsearchPredicateTranslation<ConnectorExpression> translation = translateWithContract(
+                contains,
+                Map.of("tags", column),
+                UNSAFE).orElseThrow();
+
+        assertThat(translation.remotePredicate()).isEmpty();
+        assertThat(translation.enforcement()).isEmpty();
+        assertThat(translation.remaining()).contains(contains);
+        assertThat(translation.residual()).isEmpty();
+        assertThat(translation.reason()).isEqualTo(UNSUPPORTED_EXPRESSION);
+    }
+
+    @Test
+    public void testApproximateArrayTranslationIsRepresentableWithoutExactStrengthening()
+    {
+        ElasticsearchRemotePredicate approximatePredicate = new ElasticsearchRemotePredicate.Enforced(
+                new ElasticsearchRemotePredicate.MatchPhrase("Tags", "value"),
+                ElasticsearchRemotePredicate.Enforcement.APPROXIMATE);
+
+        ElasticsearchPredicateTranslation<ConnectorExpression> translation = ElasticsearchPredicateTranslation.approximate(
+                approximatePredicate,
+                FULL_TEXT_UNSAFE_APPROXIMATE);
+
+        assertThat(translation.enforcement()).contains(ElasticsearchRemotePredicate.Enforcement.APPROXIMATE);
+        assertThat(translation.remotePredicate()).contains(approximatePredicate);
+        assertThat(translation.remaining()).isEmpty();
+        assertThat(translation.residual()).isEmpty();
+    }
+
+    private static Optional<ElasticsearchPredicateTranslation<ConnectorExpression>> translateWithContract(
+            ConnectorExpression expression,
+            Map<String, io.trino.spi.connector.ColumnHandle> assignments,
+            FullTextPushdownMode fullTextMode)
+    {
+        return ElasticsearchArrayPredicateTranslator.translate(
+                TestingConnectorSession.builder().build(),
+                expression,
+                assignments,
+                fullTextMode);
+    }
+
+    private static Optional<ElasticsearchRemotePredicate> translate(
+            ConnectorExpression expression,
+            Map<String, io.trino.spi.connector.ColumnHandle> assignments)
+    {
+        return translateWithContract(expression, assignments, SAFE)
+                .flatMap(ElasticsearchPredicateTranslation::remotePredicate);
     }
 
     private static Call anyMatch(String arrayName, ArrayType arrayType, Function<Variable, ConnectorExpression> body)
