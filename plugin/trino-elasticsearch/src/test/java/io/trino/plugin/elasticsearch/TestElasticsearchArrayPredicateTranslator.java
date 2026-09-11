@@ -627,6 +627,38 @@ public class TestElasticsearchArrayPredicateTranslator
     }
 
     @Test
+    public void testUnsafeAnyMatchFullTextPredicatesMustUseLambdaElement()
+    {
+        ArrayType arrayType = new ArrayType(VARCHAR);
+        ElasticsearchColumnHandle column = analyzedTextArrayColumn("Tags");
+        Variable outerVariable = new Variable("outer", VARCHAR);
+        List<Call> predicates = List.of(
+                anyMatch("tags", arrayType, _ -> new Call(
+                        BOOLEAN,
+                        LIKE_FUNCTION_NAME,
+                        List.of(outerVariable, new Constant(utf8Slice("Nguyen%"), VARCHAR)))),
+                anyMatch("tags", arrayType, _ -> new Call(
+                        BOOLEAN,
+                        new FunctionName("starts_with"),
+                        List.of(outerVariable, new Constant(utf8Slice("Nguyen"), VARCHAR)))),
+                anyMatch("tags", arrayType, _ -> new Call(
+                        BOOLEAN,
+                        new FunctionName("regexp_like"),
+                        List.of(outerVariable, new Constant(utf8Slice("Nguyen"), VARCHAR)))));
+
+        for (Call predicate : predicates) {
+            ElasticsearchPredicateTranslation<ConnectorExpression> translation = translateWithContract(
+                    predicate,
+                    Map.of("tags", column),
+                    UNSAFE).orElseThrow();
+
+            assertThat(translation.remotePredicate()).isEmpty();
+            assertThat(translation.remaining()).contains(predicate);
+            assertThat(translation.residual()).isEmpty();
+        }
+    }
+
+    @Test
     public void testAnyMatchInWithNullConstantRemainsResidual()
     {
         ArrayType arrayType = new ArrayType(INTEGER);

@@ -234,6 +234,7 @@ final class ElasticsearchArrayPredicateTranslator
                 session,
                 source,
                 call,
+                lambdaVariable,
                 column,
                 fullTextMode,
                 APPROXIMATE_ANY_MATCH);
@@ -244,6 +245,7 @@ final class ElasticsearchArrayPredicateTranslator
         Optional<ElasticsearchPredicateTranslation<ConnectorExpression>> startsWith = ElasticsearchFullTextPredicateTranslator.translateStartsWithElement(
                 source,
                 call,
+                lambdaVariable,
                 column,
                 fullTextMode,
                 APPROXIMATE_ANY_MATCH);
@@ -254,6 +256,7 @@ final class ElasticsearchArrayPredicateTranslator
         Optional<ElasticsearchPredicateTranslation<ConnectorExpression>> regexp = ElasticsearchFullTextPredicateTranslator.translateRegexpElement(
                 source,
                 call,
+                lambdaVariable,
                 column,
                 fullTextMode,
                 APPROXIMATE_ANY_MATCH);
