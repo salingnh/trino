@@ -234,6 +234,16 @@ final class ElasticsearchArrayPredicateTranslator
             return startsWith.orElseThrow();
         }
 
+        Optional<ElasticsearchPredicateTranslation<ConnectorExpression>> regexp = ElasticsearchFullTextPredicateTranslator.translateRegexpElement(
+                source,
+                call,
+                column,
+                fullTextMode,
+                APPROXIMATE_ANY_MATCH);
+        if (regexp.isPresent()) {
+            return regexp.orElseThrow();
+        }
+
         if (EQUAL_OPERATOR_FUNCTION_NAME.equals(call.getFunctionName())) {
             if (call.getArguments().size() != 2) {
                 return ElasticsearchPredicateTranslation.unsupported(source, UNSUPPORTED_EXPRESSION);
