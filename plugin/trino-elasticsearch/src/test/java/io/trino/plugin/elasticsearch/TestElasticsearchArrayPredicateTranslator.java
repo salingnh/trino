@@ -39,12 +39,15 @@ import java.util.Optional;
 import java.util.function.Function;
 
 import static io.airlift.slice.Slices.utf8Slice;
+import static io.trino.plugin.elasticsearch.ElasticsearchPredicateTranslation.Reason.APPROXIMATE_ANY_MATCH;
+import static io.trino.plugin.elasticsearch.ElasticsearchPredicateTranslation.Reason.APPROXIMATE_ARRAY;
 import static io.trino.plugin.elasticsearch.ElasticsearchPredicateTranslation.Reason.EXACT_ANY_MATCH;
 import static io.trino.plugin.elasticsearch.ElasticsearchPredicateTranslation.Reason.EXACT_ARRAY;
 import static io.trino.plugin.elasticsearch.ElasticsearchPredicateTranslation.Reason.FULL_TEXT_UNSAFE_APPROXIMATE;
 import static io.trino.plugin.elasticsearch.ElasticsearchPredicateTranslation.Reason.UNSUPPORTED_EXPRESSION;
 import static io.trino.plugin.elasticsearch.FullTextPushdownMode.SAFE;
 import static io.trino.plugin.elasticsearch.FullTextPushdownMode.UNSAFE;
+import static io.trino.plugin.elasticsearch.expression.ElasticsearchRemotePredicate.Enforcement.APPROXIMATE;
 import static io.trino.plugin.elasticsearch.expression.ElasticsearchRemotePredicate.Enforcement.EXACT;
 import static io.trino.spi.expression.StandardFunctions.AND_FUNCTION_NAME;
 import static io.trino.spi.expression.StandardFunctions.EQUAL_OPERATOR_FUNCTION_NAME;
@@ -302,6 +305,91 @@ public class TestElasticsearchArrayPredicateTranslator
     }
 
     @Test
+    public void testUnsafeContainsAnalyzedTextArrayUsesApproximateMatchPhrase()
+    {
+        ArrayType arrayType = new ArrayType(VARCHAR);
+        ElasticsearchColumnHandle column = analyzedTextArrayColumn("Tags");
+        Call contains = new Call(
+                BOOLEAN,
+                new FunctionName("contains"),
+                List.of(new Variable("tags", arrayType), new Constant(utf8Slice("Nguyen Van"), VARCHAR)));
+
+        ElasticsearchPredicateTranslation<ConnectorExpression> translation = translateWithContract(
+                contains,
+                Map.of("tags", column),
+                UNSAFE).orElseThrow();
+
+        assertThat(translation.remotePredicate()).contains(new ElasticsearchRemotePredicate.Enforced(
+                new ElasticsearchRemotePredicate.MatchPhrase("Tags", "Nguyen Van"),
+                APPROXIMATE));
+        assertThat(translation.enforcement()).contains(APPROXIMATE);
+        assertThat(translation.reason()).isEqualTo(APPROXIMATE_ARRAY);
+        assertThat(translation.remaining()).isEmpty();
+        assertThat(translation.residual()).isEmpty();
+    }
+
+    @Test
+    public void testUnsafeArraysOverlapAnalyzedTextArrayUsesApproximateMatchPhrases()
+    {
+        ArrayType arrayType = new ArrayType(VARCHAR);
+        ElasticsearchColumnHandle column = analyzedTextArrayColumn("Tags");
+        Call arraysOverlap = new Call(
+                BOOLEAN,
+                new FunctionName("arrays_overlap"),
+                List.of(new Variable("tags", arrayType), new Constant(varcharBlock("Nguyen Van", "Tran Thi"), arrayType)));
+
+        ElasticsearchPredicateTranslation<ConnectorExpression> translation = translateWithContract(
+                arraysOverlap,
+                Map.of("tags", column),
+                UNSAFE).orElseThrow();
+
+        assertThat(translation.remotePredicate()).contains(new ElasticsearchRemotePredicate.Or(List.of(
+                new ElasticsearchRemotePredicate.Enforced(new ElasticsearchRemotePredicate.MatchPhrase("Tags", "Nguyen Van"), APPROXIMATE),
+                new ElasticsearchRemotePredicate.Enforced(new ElasticsearchRemotePredicate.MatchPhrase("Tags", "Tran Thi"), APPROXIMATE))));
+        assertThat(translation.enforcement()).contains(APPROXIMATE);
+        assertThat(translation.reason()).isEqualTo(ElasticsearchPredicateTranslation.Reason.BOOLEAN_OR);
+        assertThat(translation.remaining()).isEmpty();
+        assertThat(translation.residual()).isEmpty();
+    }
+
+    @Test
+    public void testUnsafeAnyMatchEqualityAndInAnalyzedTextArrayAreApproximate()
+    {
+        ArrayType arrayType = new ArrayType(VARCHAR);
+        ElasticsearchColumnHandle column = analyzedTextArrayColumn("Tags");
+        Call equality = anyMatch("tags", arrayType, element -> new Call(
+                BOOLEAN,
+                EQUAL_OPERATOR_FUNCTION_NAME,
+                List.of(element, new Constant(utf8Slice("Nguyen Van"), VARCHAR))));
+        Call in = anyMatch("tags", arrayType, element -> new Call(
+                BOOLEAN,
+                IN_PREDICATE_FUNCTION_NAME,
+                List.of(element, new Constant(varcharBlock("Nguyen Van", "Tran Thi"), arrayType))));
+
+        ElasticsearchPredicateTranslation<ConnectorExpression> equalityTranslation = translateWithContract(
+                equality,
+                Map.of("tags", column),
+                UNSAFE).orElseThrow();
+        ElasticsearchPredicateTranslation<ConnectorExpression> inTranslation = translateWithContract(
+                in,
+                Map.of("tags", column),
+                UNSAFE).orElseThrow();
+
+        assertThat(equalityTranslation.remotePredicate()).contains(new ElasticsearchRemotePredicate.Enforced(
+                new ElasticsearchRemotePredicate.MatchPhrase("Tags", "Nguyen Van"),
+                APPROXIMATE));
+        assertThat(equalityTranslation.enforcement()).contains(APPROXIMATE);
+        assertThat(equalityTranslation.reason()).isEqualTo(APPROXIMATE_ANY_MATCH);
+        assertThat(equalityTranslation.remaining()).isEmpty();
+        assertThat(equalityTranslation.residual()).isEmpty();
+
+        assertThat(inTranslation.enforcement()).contains(APPROXIMATE);
+        assertThat(inTranslation.remotePredicate()).isPresent();
+        assertThat(inTranslation.remaining()).isEmpty();
+        assertThat(inTranslation.residual()).isEmpty();
+    }
+
+    @Test
     public void testAnyMatchInWithNullConstantRemainsResidual()
     {
         ArrayType arrayType = new ArrayType(INTEGER);
@@ -362,7 +450,7 @@ public class TestElasticsearchArrayPredicateTranslator
     }
 
     @Test
-    public void testUnsupportedArrayTranslationRemainsLocal()
+    public void testAnalyzedArrayTranslationRemainsLocalOutsideUnsafe()
     {
         ArrayType arrayType = new ArrayType(VARCHAR);
         ElasticsearchColumnHandle column = analyzedTextArrayColumn("Tags");
@@ -374,7 +462,7 @@ public class TestElasticsearchArrayPredicateTranslator
         ElasticsearchPredicateTranslation<ConnectorExpression> translation = translateWithContract(
                 contains,
                 Map.of("tags", column),
-                UNSAFE).orElseThrow();
+                SAFE).orElseThrow();
 
         assertThat(translation.remotePredicate()).isEmpty();
         assertThat(translation.enforcement()).isEmpty();
@@ -458,6 +546,15 @@ public class TestElasticsearchArrayPredicateTranslator
         BlockBuilder builder = INTEGER.createBlockBuilder(null, values.length);
         for (long value : values) {
             INTEGER.writeLong(builder, value);
+        }
+        return builder.build();
+    }
+
+    private static Block varcharBlock(String... values)
+    {
+        BlockBuilder builder = VARCHAR.createBlockBuilder(null, values.length);
+        for (String value : values) {
+            VARCHAR.writeSlice(builder, utf8Slice(value));
         }
         return builder.build();
     }

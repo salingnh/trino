@@ -17,7 +17,7 @@ import org.junit.jupiter.api.Disabled;
 import org.junit.jupiter.api.Test;
 
 public abstract class BaseElasticsearchParallelConnectorTest
-        extends BaseElasticsearchPredicateCompositionTest
+        extends BaseElasticsearchUnsafeArrayPushdownTest
 {
     protected BaseElasticsearchParallelConnectorTest(ElasticsearchServer server)
     {

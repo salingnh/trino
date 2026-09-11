@@ -27,6 +27,7 @@ import java.util.Map;
 import java.util.Optional;
 import java.util.OptionalLong;
 import java.util.Set;
+import java.util.stream.IntStream;
 
 import static io.trino.plugin.elasticsearch.ElasticsearchRemotePredicateTranslator.canonicalize;
 import static io.trino.plugin.elasticsearch.ElasticsearchRemotePredicateTranslator.combine;
@@ -168,5 +169,15 @@ public class TestElasticsearchRemotePredicateTranslator
         assertThat(predicate).isEqualTo(new ElasticsearchRemotePredicate.And(List.of(
                 new ElasticsearchRemotePredicate.Exists("UserID"),
                 new ElasticsearchRemotePredicate.Not(new ElasticsearchRemotePredicate.Terms("UserID", List.of(1L, 2L, 3L))))));
+    }
+
+    @Test
+    public void testNonTermDisjunctionUsesSharedBooleanClauseBudget()
+    {
+        List<ElasticsearchRemotePredicate> predicates = IntStream.range(0, 1_001)
+                .mapToObj(value -> (ElasticsearchRemotePredicate) new ElasticsearchRemotePredicate.MatchPhrase("message", "value-" + value))
+                .toList();
+
+        assertThat(ElasticsearchRemotePredicateTranslator.disjunction(predicates)).isEmpty();
     }
 }

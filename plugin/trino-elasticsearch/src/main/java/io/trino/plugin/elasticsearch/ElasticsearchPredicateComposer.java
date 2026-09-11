@@ -290,7 +290,7 @@ final class ElasticsearchPredicateComposer
         return Optional.of(List.copyOf(result));
     }
 
-    private static boolean isWithinRequestBudget(
+    static boolean isWithinRequestBudget(
             ElasticsearchRemotePredicate predicate,
             ElasticsearchPredicateCompositionPolicy policy)
     {
@@ -298,7 +298,20 @@ final class ElasticsearchPredicateComposer
         .toString()
         .getBytes(StandardCharsets.UTF_8)
         .length;
-        return bytes <= policy.maxQueryBytes();
+        return bytes <= policy.maxQueryBytes() && hasBooleanClauseBudget(predicate, policy.maxBooleanClauses());
+    }
+
+    private static boolean hasBooleanClauseBudget(ElasticsearchRemotePredicate predicate, int maxBooleanClauses)
+    {
+        return switch (predicate) {
+            case ElasticsearchRemotePredicate.And and -> and.predicates().size() <= maxBooleanClauses
+                    && and.predicates().stream().allMatch(child -> hasBooleanClauseBudget(child, maxBooleanClauses));
+            case ElasticsearchRemotePredicate.Or or -> or.predicates().size() <= maxBooleanClauses
+                    && or.predicates().stream().allMatch(child -> hasBooleanClauseBudget(child, maxBooleanClauses));
+            case ElasticsearchRemotePredicate.Not not -> hasBooleanClauseBudget(not.predicate(), maxBooleanClauses);
+            case ElasticsearchRemotePredicate.Enforced enforced -> hasBooleanClauseBudget(enforced.predicate(), maxBooleanClauses);
+            default -> true;
+        };
     }
 
     private static Optional<ConnectorExpression> andExpressions(List<ConnectorExpression> expressions)
