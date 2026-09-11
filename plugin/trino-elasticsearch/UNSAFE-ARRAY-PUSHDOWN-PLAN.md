@@ -2,7 +2,7 @@
 
 ## Status
 
-**PLANNED — NOT IMPLEMENTED**
+**IMPLEMENTATION IN PROGRESS — A0 PASS; A1 NOT STARTED**
 
 Planning branch: `docs/elasticsearch-unsafe-array-pushdown-plan`
 
@@ -11,6 +11,79 @@ Baseline audited from `master` at commit:
 ```text
 44d719ac2977c98532234f3002376551997f00ac
 ```
+
+## Implementation evidence
+
+### A0 — Baseline freeze
+
+**Status:** PASS
+
+The production baseline is `44d719ac2977c98532234f3002376551997f00ac`. `origin/master`
+was verified at the same SHA before implementation, so the plan's audited baseline had not
+advanced. Implementation is isolated in worktree
+`/home/admin/github/trino/.claude/worktrees/feature-elasticsearch-unsafe-array-full-text`
+on branch `feature/elasticsearch-unsafe-array-full-text`. The worktree was clean before
+production changes; the current HEAD at the time of this evidence update is recorded by the
+gate commit below.
+
+The initial `docker compose up -d --build` attempt stalled while downloading the external base
+image. The already available `trino-maven:latest` image subsequently started successfully with
+`docker compose up -d`; this is an infrastructure observation, not a code blocker. The linked
+worktree mount also required the documented Maven option
+`-Dmaven.gitcommitid.skip=true` because its `.git` file points outside the mounted container
+workspace.
+
+Reactor bootstrap:
+
+```text
+docker compose exec -T maven ./mvnw -Dmaven.gitcommitid.skip=true \
+  -pl :trino-elasticsearch -am -DskipTests install
+RESULT: BUILD SUCCESS (11:17)
+```
+
+The requested abstract base-class selectors were confirmed not to be runnable selectors in this
+repository (`Tests run: 0`, `No tests were executed`). Their concrete ES7 inherited methods were
+used for the focused baseline instead:
+
+```text
+docker compose exec -T maven ./mvnw -Dmaven.gitcommitid.skip=true \
+  -pl :trino-elasticsearch \
+  -Dtest=TestElasticsearch7ConnectorTest#testPrimitiveArrayExactMembershipPushdown test
+RESULT: BUILD SUCCESS; Tests run: 1, Failures: 0, Errors: 0, Skipped: 0
+
+docker compose exec -T maven ./mvnw -Dmaven.gitcommitid.skip=true \
+  -pl :trino-elasticsearch \
+  -Dtest=TestElasticsearch7ConnectorTest#testAnyMatchPrimitiveArrayExactPushdown test
+RESULT: BUILD SUCCESS; Tests run: 1, Failures: 0, Errors: 0, Skipped: 0
+
+docker compose exec -T maven ./mvnw -Dmaven.gitcommitid.skip=true \
+  -pl :trino-elasticsearch \
+  -Dtest=TestElasticsearch7ConnectorTest#testUnsafeLikePushdownUsesTextAnalyzer test
+RESULT: BUILD SUCCESS; Tests run: 1, Failures: 0, Errors: 0, Skipped: 0
+
+docker compose exec -T maven ./mvnw -Dmaven.gitcommitid.skip=true \
+  -pl :trino-elasticsearch \
+  -Dtest=TestElasticsearch7ConnectorTest#testRegexpLikeIsNotPushedDown test
+RESULT: BUILD SUCCESS; Tests run: 1, Failures: 0, Errors: 0, Skipped: 0
+
+docker compose exec -T maven ./mvnw -Dmaven.gitcommitid.skip=true \
+  -pl :trino-elasticsearch \
+  -Dtest=TestElasticsearchArrayPredicateTranslator,TestElasticsearchPredicatePushdownPlanner test
+RESULT: BUILD SUCCESS; Tests run: 26, Failures: 0, Errors: 0, Skipped: 0
+```
+
+Current semantic observations are unchanged from the audited baseline: `contains(text_tags,
+'telegram')` and `any_match(text_tags, x -> x = 'telegram')` remain local with a Trino
+`FilterNode`; exact keyword/numeric/timestamp array paths remain fully pushed. Scalar `UNSAFE`
+LIKE and valid regexp translations are authoritative, while unsupported regexp syntax remains
+local. No production source was changed during A0.
+
+Gate files changed: this evidence section and the committed implementation plan at
+`docs/superpowers/plans/2026-09-11-elasticsearch-unsafe-array-full-text.md`.
+
+Current gate HEAD: `fb5ccfcf97f5da01fedb96788596e48dd06c6aa2` before committing this evidence
+update. A1 remains blocked only on the required test-first implementation work; there is no
+architectural contradiction with `ROADMAP-PUSHDOWN.md`.
 
 This document is an implementation handoff for extending `full_text_pushdown_mode=UNSAFE` to primitive Elasticsearch arrays, especially `ARRAY(VARCHAR)` backed by analyzed `text` fields.
 
