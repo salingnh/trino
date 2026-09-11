@@ -90,6 +90,7 @@ final class ElasticsearchFullTextPredicateTranslator
             ConnectorSession session,
             ConnectorExpression source,
             Call call,
+            Variable element,
             ElasticsearchColumnHandle column,
             FullTextPushdownMode fullTextMode,
             Reason approximateReason)
@@ -97,6 +98,7 @@ final class ElasticsearchFullTextPredicateTranslator
         requireNonNull(session, "session is null");
         requireNonNull(source, "source is null");
         requireNonNull(call, "call is null");
+        requireNonNull(element, "element is null");
         requireNonNull(column, "column is null");
         requireNonNull(fullTextMode, "fullTextMode is null");
         requireNonNull(approximateReason, "approximateReason is null");
@@ -104,7 +106,9 @@ final class ElasticsearchFullTextPredicateTranslator
         if (!LIKE_FUNCTION_NAME.equals(call.getFunctionName())) {
             return Optional.empty();
         }
-        if (!ElasticsearchMetadata.isSupportedLikeCall(call) || !isAnalyzedTextOnly(column)) {
+        if (!ElasticsearchMetadata.isSupportedLikeCall(call)
+                || !isLambdaElement(call, element)
+                || !isAnalyzedTextOnly(column)) {
             return Optional.of(ElasticsearchPredicateTranslation.unsupported(source, UNSUPPORTED_EXPRESSION));
         }
         return Optional.of(translateLikeCall(session, source, call, column, fullTextMode, approximateReason));
@@ -134,12 +138,14 @@ final class ElasticsearchFullTextPredicateTranslator
     static Optional<ElasticsearchPredicateTranslation<ConnectorExpression>> translateRegexpElement(
             ConnectorExpression source,
             Call call,
+            Variable element,
             ElasticsearchColumnHandle column,
             FullTextPushdownMode fullTextMode,
             Reason approximateReason)
     {
         requireNonNull(source, "source is null");
         requireNonNull(call, "call is null");
+        requireNonNull(element, "element is null");
         requireNonNull(column, "column is null");
         requireNonNull(fullTextMode, "fullTextMode is null");
         requireNonNull(approximateReason, "approximateReason is null");
@@ -147,7 +153,7 @@ final class ElasticsearchFullTextPredicateTranslator
         if (!call.getFunctionName().getName().equals("regexp_like")) {
             return Optional.empty();
         }
-        if (!isAnalyzedTextOnly(column)) {
+        if (!isLambdaElement(call, element) || !isAnalyzedTextOnly(column)) {
             return Optional.of(ElasticsearchPredicateTranslation.unsupported(source, UNSUPPORTED_EXPRESSION));
         }
         return Optional.of(translateRegexpCall(source, call, column, fullTextMode, approximateReason));
@@ -214,12 +220,14 @@ final class ElasticsearchFullTextPredicateTranslator
     static Optional<ElasticsearchPredicateTranslation<ConnectorExpression>> translateStartsWithElement(
             ConnectorExpression source,
             Call call,
+            Variable element,
             ElasticsearchColumnHandle column,
             FullTextPushdownMode fullTextMode,
             Reason approximateReason)
     {
         requireNonNull(source, "source is null");
         requireNonNull(call, "call is null");
+        requireNonNull(element, "element is null");
         requireNonNull(column, "column is null");
         requireNonNull(fullTextMode, "fullTextMode is null");
         requireNonNull(approximateReason, "approximateReason is null");
@@ -229,6 +237,7 @@ final class ElasticsearchFullTextPredicateTranslator
         }
         List<ConnectorExpression> arguments = call.getArguments();
         if (arguments.size() != 2
+                || !isLambdaElement(call, element)
                 || !(arguments.get(1) instanceof Constant constant)
                 || !(constant.getValue() instanceof Slice prefix)
                 || !isAnalyzedTextOnly(column)) {
@@ -244,6 +253,13 @@ final class ElasticsearchFullTextPredicateTranslator
                 && column.elasticsearchType() instanceof PrimitiveType primitiveType
                 && primitiveType.name().equalsIgnoreCase("text")
                 && primitiveType.keyword().isEmpty();
+    }
+
+    private static boolean isLambdaElement(Call call, Variable element)
+    {
+        return !call.getArguments().isEmpty()
+                && call.getArguments().getFirst() instanceof Variable variable
+                && variable.equals(element);
     }
 
     private static ElasticsearchPredicateTranslation<ConnectorExpression> translateLikeCall(
