@@ -2,7 +2,7 @@
 
 ## Status
 
-**IMPLEMENTATION IN PROGRESS — A0 PASS; A1 PASS; A2 PASS; A3 PASS; A4 PASS; A5 PASS; A6 PASS; A7 PASS; A8 NOT STARTED**
+**IMPLEMENTATION IN PROGRESS — A0 PASS; A1 PASS; A2 PASS; A3 PASS; A4 PASS; A5 PASS; A6 PASS; A7 PASS; A8 PASS; A9 NOT STARTED**
 
 Planning branch: `docs/elasticsearch-unsafe-array-pushdown-plan`
 
@@ -511,6 +511,50 @@ the shared composer as approximate. There is no architectural contradiction with
 
 Feature implementation commit: `12ca0225aa7`.
 Current gate HEAD before this evidence commit: `12ca0225aa7`.
+
+### A8 — Diagnostics, statistics, and lifecycle integration
+
+**Status:** PASS
+
+No second diagnostics pipeline was introduced. Existing P1.3 accounting now observes
+`APPROXIMATE_ARRAY` and `APPROXIMATE_ANY_MATCH` through the established approximate, ARRAY, and
+ANY_MATCH counters; approximate `MatchPhrase` remote IR nodes use the existing recursive node
+accounting. The statistics guard already treats any non-EXACT remote predicate as unknown, and
+now has an explicit analyzed-array `MatchPhrase` regression. Dynamic filtering remains owned by
+`ElasticsearchDynamicFilterPlanner`, which rejects both analyzed scalar and analyzed primitive
+ARRAY columns before any approximate full-text translation can enter the dynamic-filter path.
+
+Files changed in A8:
+
+```text
+plugin/trino-elasticsearch/src/test/java/io/trino/plugin/elasticsearch/TestElasticsearchDynamicFilterPlanner.java
+plugin/trino-elasticsearch/src/test/java/io/trino/plugin/elasticsearch/TestElasticsearchPushdownDiagnostics.java
+plugin/trino-elasticsearch/src/test/java/io/trino/plugin/elasticsearch/TestElasticsearchRemoteStatistics.java
+```
+
+Verification:
+
+```text
+docker compose exec -T maven ./mvnw -Dmaven.gitcommitid.skip=true \
+  -pl :trino-elasticsearch -Dtest=TestElasticsearchPushdownDiagnostics,TestElasticsearchDynamicFilterPlanner,TestElasticsearchRemoteStatistics test
+RESULT: first attempt stopped at AirStyle because the new dynamic-filter fixture needed formatting; no tests ran.
+
+docker compose exec -T maven ./mvnw -Dmaven.gitcommitid.skip=true \
+  -pl :trino-elasticsearch airstyle:format
+RESULT: BUILD SUCCESS; formatted 1 file.
+
+docker compose exec -T maven ./mvnw -Dmaven.gitcommitid.skip=true \
+  -pl :trino-elasticsearch -Dtest=TestElasticsearchPushdownDiagnostics,TestElasticsearchDynamicFilterPlanner,TestElasticsearchRemoteStatistics test
+RESULT: BUILD SUCCESS; Tests run: 30, Failures: 0, Errors: 0, Skipped: 0; AirStyle and checkstyle passed.
+```
+
+Semantic findings: approximate ARRAY and ANY_MATCH decisions are observable through the existing
+P1.3 categories; filtered statistics remain conservative/unknown for approximate IR; dynamic
+filters accept only exact term/range/domain paths, including analyzed primitive ARRAY columns.
+There is no architectural contradiction with `ROADMAP-PUSHDOWN.md`.
+
+Feature implementation commit: `e4a5dc00aca`.
+Current gate HEAD before this evidence commit: `e4a5dc00aca`.
 
 This document is an implementation handoff for extending `full_text_pushdown_mode=UNSAFE` to primitive Elasticsearch arrays, especially `ARRAY(VARCHAR)` backed by analyzed `text` fields.
 
