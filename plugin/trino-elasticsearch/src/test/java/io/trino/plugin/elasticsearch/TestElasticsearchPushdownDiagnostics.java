@@ -38,6 +38,7 @@ import static io.trino.plugin.elasticsearch.ElasticsearchPushdownDiagnostics.Rem
 import static io.trino.plugin.elasticsearch.ElasticsearchQueryBuilder.buildSearchQuery;
 import static io.trino.plugin.elasticsearch.ElasticsearchRemotePredicateTranslator.withRemotePredicate;
 import static io.trino.plugin.elasticsearch.ElasticsearchTableHandle.Type.SCAN;
+import static io.trino.plugin.elasticsearch.expression.ElasticsearchRemotePredicate.Enforcement.APPROXIMATE;
 import static io.trino.plugin.elasticsearch.expression.ElasticsearchRemotePredicate.Enforcement.EXACT;
 import static io.trino.plugin.elasticsearch.expression.ElasticsearchRemotePredicate.Enforcement.PREFILTER;
 import static org.assertj.core.api.Assertions.assertThat;
@@ -199,6 +200,40 @@ public class TestElasticsearchPushdownDiagnostics
         assertThat(snapshot.rangePredicates()).isEqualTo(1);
         assertThat(snapshot.prefixPredicates()).isEqualTo(1);
         assertThat(snapshot.regexpPredicates()).isEqualTo(1);
+    }
+
+    @Test
+    public void testApproximateArrayAndAnyMatchAccountingUsesExistingCategories()
+    {
+        ElasticsearchPushdownDiagnostics diagnostics = new ElasticsearchPushdownDiagnostics();
+        diagnostics.recordTranslation(new Decision(
+                Reason.APPROXIMATE_ARRAY,
+                Optional.of(APPROXIMATE),
+                true,
+                false,
+                false,
+                List.of()));
+        diagnostics.recordTranslation(new Decision(
+                Reason.APPROXIMATE_ANY_MATCH,
+                Optional.of(APPROXIMATE),
+                true,
+                false,
+                false,
+                List.of()));
+        diagnostics.recordRemotePredicate(new ElasticsearchRemotePredicate.Enforced(
+                new ElasticsearchRemotePredicate.MatchPhrase("names", "Nguyen Van"),
+                APPROXIMATE));
+
+        ElasticsearchPushdownDiagnostics.Snapshot snapshot = diagnostics.snapshot();
+        assertThat(snapshot.approximateTranslations()).isEqualTo(2);
+        assertThat(snapshot.arrayMembershipTranslations()).isEqualTo(1);
+        assertThat(snapshot.anyMatchTranslations()).isEqualTo(1);
+        assertThat(snapshot.translationReasonCounts())
+                .containsEntry(Reason.APPROXIMATE_ARRAY.name(), 1L)
+                .containsEntry(Reason.APPROXIMATE_ANY_MATCH.name(), 1L);
+        assertThat(snapshot.remotePredicateNodes()).isEqualTo(2);
+        assertThat(snapshot.enforcementPredicates()).isEqualTo(1);
+        assertThat(snapshot.matchPhrasePredicates()).isEqualTo(1);
     }
 
     @Test

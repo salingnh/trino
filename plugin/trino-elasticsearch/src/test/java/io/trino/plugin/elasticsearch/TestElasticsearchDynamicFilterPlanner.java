@@ -22,6 +22,7 @@ import io.trino.spi.predicate.Domain;
 import io.trino.spi.predicate.Range;
 import io.trino.spi.predicate.TupleDomain;
 import io.trino.spi.predicate.ValueSet;
+import io.trino.spi.type.ArrayType;
 import org.junit.jupiter.api.Test;
 
 import java.util.List;
@@ -48,6 +49,13 @@ public class TestElasticsearchDynamicFilterPlanner
             VARCHAR,
             new PrimitiveType("text"),
             new VarcharDecoder.Descriptor("Message"),
+            false);
+    private static final ArrayType ANALYZED_TEXT_ARRAY_TYPE = new ArrayType(VARCHAR);
+    private static final ElasticsearchColumnHandle ANALYZED_TEXT_ARRAY = new ElasticsearchColumnHandle(
+            List.of("Names"),
+            ANALYZED_TEXT_ARRAY_TYPE,
+            new PrimitiveType("text"),
+            new VarcharDecoder.Descriptor("Names"),
             false);
     private static final ElasticsearchColumnHandle EVENT_TIME = new ElasticsearchColumnHandle(
             List.of("EventTime"),
@@ -186,6 +194,8 @@ public class TestElasticsearchDynamicFilterPlanner
 
         // Dynamic filtering must never use approximate analyzed-text matching: false negatives would corrupt join results.
         assertThat(planner.plan(TupleDomain.withColumnDomains(Map.of(ANALYZED_TEXT, domain)))).isEmpty();
+        assertThat(planner.plan(TupleDomain.withColumnDomains(Map.of(
+                ANALYZED_TEXT_ARRAY, Domain.onlyNull(ANALYZED_TEXT_ARRAY_TYPE))))).isEmpty();
     }
 
     @Test

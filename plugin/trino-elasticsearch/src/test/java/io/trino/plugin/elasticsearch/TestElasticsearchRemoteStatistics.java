@@ -202,6 +202,20 @@ public class TestElasticsearchRemoteStatistics
     }
 
     @Test
+    public void testApproximateArrayFilterRemainsUnknown()
+            throws Exception
+    {
+        try (Server server = new Server(false)) {
+            ElasticsearchRemotePredicate predicate = new Enforced(
+                    new ElasticsearchRemotePredicate.MatchPhrase("names", "Nguyen Van"),
+                    Enforcement.APPROXIMATE);
+
+            assertThat(server.metadata.getTableStatistics(SESSION, withRemotePredicate(TABLE, Optional.of(predicate))).getRowCount().isUnknown()).isTrue();
+            assertThat(server.requests).isEmpty();
+        }
+    }
+
+    @Test
     public void testLimitBoundsRowEstimate()
             throws Exception
     {
