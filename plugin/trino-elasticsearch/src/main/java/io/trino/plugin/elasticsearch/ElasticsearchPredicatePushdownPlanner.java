@@ -200,12 +200,13 @@ final class ElasticsearchPredicatePushdownPlanner
             return ElasticsearchPredicateComposer.not(expression);
         }
 
-        Optional<ElasticsearchRemotePredicate> arrayPredicate = ElasticsearchArrayPredicateTranslator.translate(expression, assignments);
-        if (arrayPredicate.isPresent()) {
-            Reason reason = expression instanceof Call call && call.getFunctionName().getName().equals("any_match")
-                    ? Reason.EXACT_ANY_MATCH
-                    : Reason.EXACT_ARRAY;
-            return ElasticsearchPredicateTranslation.exact(arrayPredicate.orElseThrow(), reason);
+        Optional<ElasticsearchPredicateTranslation<ConnectorExpression>> arrayTranslation = ElasticsearchArrayPredicateTranslator.translate(
+                session,
+                expression,
+                assignments,
+                fullTextMode);
+        if (arrayTranslation.isPresent()) {
+            return arrayTranslation.orElseThrow();
         }
 
         Optional<ElasticsearchPredicateTranslation<ConnectorExpression>> regexpPredicate = translateRegexp(expression, assignments, fullTextMode);
