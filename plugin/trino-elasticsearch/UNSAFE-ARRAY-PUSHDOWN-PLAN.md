@@ -2,7 +2,7 @@
 
 ## Status
 
-**IMPLEMENTATION IN PROGRESS — A0 PASS; A1 PASS; A2 NOT STARTED**
+**IMPLEMENTATION IN PROGRESS — A0 PASS; A1 PASS; A2 PASS; A3 NOT STARTED**
 
 Planning branch: `docs/elasticsearch-unsafe-array-pushdown-plan`
 
@@ -141,6 +141,42 @@ capability yet; `contains(text_tags, ...)` and analyzed `any_match` remain local
 There is no architectural contradiction with `ROADMAP-PUSHDOWN.md`, and no remaining A1 blocker.
 
 Current gate HEAD: `7215c16e705`.
+
+### A2 — Preserve exact ARRAY behavior
+
+**Status:** PASS
+
+A2 introduced no capability changes. Existing exact primitive-array translation and composition
+remain on the same IR paths, including keyword/text.keyword, numeric, timestamp, boolean, IP,
+membership, exact OR, and same-element-safe fused range AND behavior. The permanent translation
+contract migration did not change exact results or dynamic-filter ownership.
+
+Files changed in A2: none beyond the A1 implementation and tests already listed above.
+
+Exact regression verification:
+
+```text
+docker compose exec -T maven ./mvnw -Dmaven.gitcommitid.skip=true \
+  -pl :trino-elasticsearch \
+  -Dtest=TestElasticsearchArrayPredicateTranslator,TestElasticsearchPredicateComposer,TestElasticsearchPredicateCompositionPlanner,TestElasticsearchPredicateCompositionPolicy,TestElasticsearchPredicateCompositionRequestBudget,TestElasticsearchPredicatePushdownPlanner,TestElasticsearchPushdownDiagnostics,TestElasticsearchSourceValueSemantics test
+RESULT: BUILD SUCCESS; Tests run: 64, Failures: 0, Errors: 0, Skipped: 0
+
+docker compose exec -T maven ./mvnw -Dmaven.gitcommitid.skip=true \
+  -pl :trino-elasticsearch \
+  -Dtest=TestElasticsearch7ConnectorTest#testPrimitiveArrayExactMembershipPushdown test
+RESULT: BUILD SUCCESS; Tests run: 1, Failures: 0, Errors: 0, Skipped: 0
+
+docker compose exec -T maven ./mvnw -Dmaven.gitcommitid.skip=true \
+  -pl :trino-elasticsearch \
+  -Dtest=TestElasticsearch7ConnectorTest#testAnyMatchPrimitiveArrayExactPushdown test
+RESULT: BUILD SUCCESS; Tests run: 1, Failures: 0, Errors: 0, Skipped: 0
+```
+
+Semantic finding: exact array behavior is unchanged and no A2 blocker remains. Analyzed-text
+ARRAY equality/membership is still intentionally local; A3 is the first capability gate for
+UNSAFE approximate element predicates.
+
+Current gate HEAD: `5880dcea1fd`.
 
 This document is an implementation handoff for extending `full_text_pushdown_mode=UNSAFE` to primitive Elasticsearch arrays, especially `ARRAY(VARCHAR)` backed by analyzed `text` fields.
 
