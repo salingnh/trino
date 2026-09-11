@@ -2,7 +2,7 @@
 
 ## Status
 
-**IMPLEMENTATION IN PROGRESS — A0 PASS; A1 PASS; A2 PASS; A3 PASS; A4 PASS; A5 PASS; A6 PASS; A7 NOT STARTED**
+**IMPLEMENTATION IN PROGRESS — A0 PASS; A1 PASS; A2 PASS; A3 PASS; A4 PASS; A5 PASS; A6 PASS; A7 PASS; A8 NOT STARTED**
 
 Planning branch: `docs/elasticsearch-unsafe-array-pushdown-plan`
 
@@ -456,6 +456,61 @@ contradiction with `ROADMAP-PUSHDOWN.md`.
 
 Feature implementation commit: `2217824367c`.
 Current gate HEAD before this evidence commit: `2217824367c`.
+
+### A7 — Same-element hardening and semantic traps
+
+**Status:** PASS
+
+No new remote capability was added in A7. The tests explicitly preserve the boundary between
+document scope and ARRAY-element scope. Generic analyzed-text lambda AND remains unsupported;
+the regression fixture contains `names = ['Nguyen Anh', 'Le Van']` and proves
+`x LIKE 'Nguyen%' AND x LIKE '%Van%'` retains a Trino `FilterNode` rather than becoming two
+independent remote predicates. Only the existing same-element-safe exact fused numeric range
+path remains unchanged.
+
+The acceptance fixture also covers NULL elements, an only-NULL array, an empty array, a missing
+field, duplicate values, multi-token analyzed values, custom standard/lowercase/asciifolding
+analysis, case folding, asciifolding, Unicode text, unsupported regexp syntax, and a top-level
+OR mixing an approximate analyzed ARRAY branch with an exact keyword-subfield ARRAY branch.
+
+Files changed in A7:
+
+```text
+plugin/trino-elasticsearch/src/test/java/io/trino/plugin/elasticsearch/BaseElasticsearchUnsafeArrayPushdownTest.java
+plugin/trino-elasticsearch/src/test/java/io/trino/plugin/elasticsearch/TestElasticsearchArrayPredicateTranslator.java
+```
+
+Focused and acceptance verification:
+
+```text
+docker compose exec -T maven ./mvnw -Dmaven.gitcommitid.skip=true \
+  -pl :trino-elasticsearch -Dtest=TestElasticsearchArrayPredicateTranslator test
+RESULT: BUILD SUCCESS; Tests run: 31, Failures: 0, Errors: 0, Skipped: 0
+
+docker compose exec -T maven ./mvnw -Dmaven.gitcommitid.skip=true \
+  -pl :trino-elasticsearch \
+  -Dtest=TestElasticsearch7ConnectorTest#testUnsafeAnalyzedArraySemanticBoundaries test
+RESULT: initial fixture assertion failed because the correct local result includes single-element matches (IDs 2 and 6); no pushdown assertion was reached. The fixture expectation was corrected from empty to `VALUES VARCHAR '2', VARCHAR '6'`.
+
+docker compose exec -T maven ./mvnw -Dmaven.gitcommitid.skip=true \
+  -pl :trino-elasticsearch \
+  -Dtest=TestElasticsearch7ConnectorTest#testUnsafeAnalyzedArraySemanticBoundaries test
+RESULT: BUILD SUCCESS; Tests run: 1, Failures: 0, Errors: 0, Skipped: 0
+
+docker compose exec -T maven ./mvnw -Dmaven.gitcommitid.skip=true \
+  -pl :trino-elasticsearch \
+  -Dtest=TestElasticsearch8ConnectorTest#testUnsafeAnalyzedArraySemanticBoundaries test
+RESULT: BUILD SUCCESS; Tests run: 1, Failures: 0, Errors: 0, Skipped: 0
+```
+
+Semantic findings: the cross-element trap remains local on both backends; null/missing/empty
+and duplicate source behavior is exercised without weakening the translation contract; analyzed
+Unicode and folded values use full-text strategies; mixed exact/approximate OR is classified by
+the shared composer as approximate. There is no architectural contradiction with
+`ROADMAP-PUSHDOWN.md`.
+
+Feature implementation commit: `12ca0225aa7`.
+Current gate HEAD before this evidence commit: `12ca0225aa7`.
 
 This document is an implementation handoff for extending `full_text_pushdown_mode=UNSAFE` to primitive Elasticsearch arrays, especially `ARRAY(VARCHAR)` backed by analyzed `text` fields.
 
