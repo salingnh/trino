@@ -324,12 +324,20 @@ final class ElasticsearchArrayPredicateTranslator
         }
 
         if (fullTextMode == FullTextPushdownMode.UNSAFE && isAnalyzedTextArray(column) && elementType instanceof VarcharType) {
+            ElasticsearchPredicateCompositionPolicy policy = ElasticsearchPredicateCompositionPolicy.DEFAULT;
+            if (values.size() > policy.maxBooleanClauses()) {
+                return ElasticsearchPredicateTranslation.unsupported(source, UNSUPPORTED_EXPRESSION);
+            }
             List<ElasticsearchPredicateTranslation<ConnectorExpression>> predicates = values.stream()
                     .map(value -> ElasticsearchPredicateTranslation.<ConnectorExpression>approximate(
                             new ElasticsearchRemotePredicate.MatchPhrase(column.predicateName(), (String) value),
                             approximateReason))
                     .toList();
             if (predicates.size() == 1) {
+                ElasticsearchRemotePredicate predicate = predicates.getFirst().remotePredicate().orElseThrow();
+                if (!ElasticsearchPredicateComposer.isWithinRequestBudget(predicate, policy)) {
+                    return ElasticsearchPredicateTranslation.unsupported(source, UNSUPPORTED_EXPRESSION);
+                }
                 return predicates.getFirst();
             }
             return ElasticsearchPredicateComposer.or(source, predicates);

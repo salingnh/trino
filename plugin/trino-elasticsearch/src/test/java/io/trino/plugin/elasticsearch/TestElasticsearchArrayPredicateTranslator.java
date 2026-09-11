@@ -51,6 +51,7 @@ import static io.trino.plugin.elasticsearch.FullTextPushdownMode.UNSAFE;
 import static io.trino.plugin.elasticsearch.expression.ElasticsearchRemotePredicate.Enforcement.APPROXIMATE;
 import static io.trino.plugin.elasticsearch.expression.ElasticsearchRemotePredicate.Enforcement.EXACT;
 import static io.trino.spi.expression.StandardFunctions.AND_FUNCTION_NAME;
+import static io.trino.spi.expression.StandardFunctions.ARRAY_CONSTRUCTOR_FUNCTION_NAME;
 import static io.trino.spi.expression.StandardFunctions.EQUAL_OPERATOR_FUNCTION_NAME;
 import static io.trino.spi.expression.StandardFunctions.GREATER_THAN_OPERATOR_FUNCTION_NAME;
 import static io.trino.spi.expression.StandardFunctions.IN_PREDICATE_FUNCTION_NAME;
@@ -61,6 +62,7 @@ import static io.trino.spi.type.BooleanType.BOOLEAN;
 import static io.trino.spi.type.IntegerType.INTEGER;
 import static io.trino.spi.type.TimestampType.TIMESTAMP_MILLIS;
 import static io.trino.spi.type.VarcharType.VARCHAR;
+import static java.util.stream.IntStream.range;
 import static org.assertj.core.api.Assertions.assertThat;
 
 public class TestElasticsearchArrayPredicateTranslator
@@ -351,6 +353,30 @@ public class TestElasticsearchArrayPredicateTranslator
         assertThat(translation.enforcement()).contains(APPROXIMATE);
         assertThat(translation.reason()).isEqualTo(ElasticsearchPredicateTranslation.Reason.BOOLEAN_OR);
         assertThat(translation.remaining()).isEmpty();
+        assertThat(translation.residual()).isEmpty();
+    }
+
+    @Test
+    public void testUnsafeAnalyzedArrayMembershipRejectsOversizedBooleanDisjunction()
+    {
+        ArrayType arrayType = new ArrayType(VARCHAR);
+        List<ConnectorExpression> values = range(0, ElasticsearchPredicateCompositionPolicy.DEFAULT.maxBooleanClauses() + 1)
+                .mapToObj(index -> (ConnectorExpression) new Constant(utf8Slice("value" + index), VARCHAR))
+                .toList();
+        Call arraysOverlap = new Call(
+                BOOLEAN,
+                new FunctionName("arrays_overlap"),
+                List.of(
+                        new Variable("tags", arrayType),
+                        new Call(arrayType, ARRAY_CONSTRUCTOR_FUNCTION_NAME, values)));
+
+        ElasticsearchPredicateTranslation<ConnectorExpression> translation = translateWithContract(
+                arraysOverlap,
+                Map.of("tags", analyzedTextArrayColumn("Tags")),
+                UNSAFE).orElseThrow();
+
+        assertThat(translation.remotePredicate()).isEmpty();
+        assertThat(translation.remaining()).contains(arraysOverlap);
         assertThat(translation.residual()).isEmpty();
     }
 
