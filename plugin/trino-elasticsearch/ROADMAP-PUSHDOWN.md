@@ -661,14 +661,19 @@ lambda AND that cannot preserve same-element semantics.
 Release evidence:
 
 ```text
-BASE SHA:  44d719ac2977c98532234f3002376551997f00ac
-FINAL SHA: 0b54aad215712f25eeb239901bd1356963b59e48
-PR:        https://github.com/salingnh/trino/pull/25
-CI RUN:    34576366655 (green on FINAL SHA)
+BASE SHA:            44d719ac2977c98532234f3002376551997f00ac
+IMPLEMENTATION SHA:  0b54aad215712f25eeb239901bd1356963b59e48
+REVIEW BASELINE SHA: 125548b22070f2bd4dfadeb57f9e78a0ad45287f
+FINAL CODE SHA:      8713b1cdcad0e67ede9c0eb2d2730baa160d7503
+PR:                  https://github.com/salingnh/trino/pull/25
+CI RUN:              34684378551 (green on FINAL CODE SHA)
+CHECK SUITE:         93953453750 (91/91 checks successful)
 ```
 
-The final validation record, including ES7/ES8 results, serial aggregate counts, PIT 404 baseline
-comparison, and independent review, is in `UNSAFE-ARRAY-PUSHDOWN-PLAN.md`.
+The final validation record, including review-fix resource ownership, ES7/ES8 results, serial
+aggregate counts, PIT 404 baseline comparison, exact-SHA CI, and independent review, is in
+`UNSAFE-ARRAY-PUSHDOWN-PLAN.md`. The final branch head after this documentation-only closure is
+validated separately by the exact-SHA CI recorded in PR #25 and the completion report.
 
 # P3 — Optional SPI Extensions
 

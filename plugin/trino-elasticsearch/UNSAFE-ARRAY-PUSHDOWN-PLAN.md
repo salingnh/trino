@@ -557,110 +557,125 @@ P1.3 categories; filtered statistics remain conservative/unknown for approximate
 filters accept only exact term/range/domain paths, including analyzed primitive ARRAY columns.
 There is no architectural contradiction with `ROADMAP-PUSHDOWN.md`.
 
-Feature implementation commit: `e4a5dc00aca`.
-Current gate HEAD before this evidence commit: `e4a5dc00aca`.
+Original implementation SHA: `0b54aad215712f25eeb239901bd1356963b59e48`.
+Review baseline SHA: `125548b22070f2bd4dfadeb57f9e78a0ad45287f`.
+Review-fix source SHA: `8713b1cdcad0e67ede9c0eb2d2730baa160d7503`.
 
 ### A9 — Final acceptance, independent review, and release evidence
 
-**Status:** PASS — final candidate validated; the default parallel aggregate's statement-fetch
-404 was independently reproduced on the clean baseline and is classified as an integration-harness
-concurrency/resource flake. The deterministic serial aggregate is green.
+**Status:** PASS — review findings 1–4 are fixed; the final implementation candidate has green
+GitHub CI. The default parallel aggregate's statement-fetch 404 was independently reproduced on
+the clean baseline and is classified as an integration-harness concurrency/resource flake. The
+deterministic serial aggregate is green.
 
-Final release candidate:
+Final implementation candidate and release identities:
 
 ```text
-BASE SHA:    44d719ac2977c98532234f3002376551997f00ac
-FINAL SHA:   0b54aad215712f25eeb239901bd1356963b59e48
-BRANCH:      feature/elasticsearch-unsafe-array-full-text
-PR:          https://github.com/salingnh/trino/pull/25
-CI RUN:      34576366655 (green for FINAL SHA)
+BASE SHA:              44d719ac2977c98532234f3002376551997f00ac
+IMPLEMENTATION SHA:    0b54aad215712f25eeb239901bd1356963b59e48
+REVIEW BASELINE SHA:   125548b22070f2bd4dfadeb57f9e78a0ad45287f
+FINAL CODE SHA:        8713b1cdcad0e67ede9c0eb2d2730baa160d7503
+BRANCH:                feature/elasticsearch-unsafe-array-full-text
+PR:                    https://github.com/salingnh/trino/pull/25
+CI RUN:                34684378551 (green on FINAL CODE SHA)
+CHECK SUITE:           93953453750 (91/91 checks successful)
 ```
 
-The source tree is unchanged from the original implementation candidate
-`691ba65e3bd594ccca3ff39c997d93c70b7b9940`; the final SHA contains only commit-message
-normalization and evidence documentation needed for repository validation. The implementation
-review against both `ROADMAP-PUSHDOWN.md` and this plan found no semantic or architectural
-contradiction. It specifically checked enforcement classification, residual removal, partial OR
-rejection, same-element lambda scope, scalar/ARRAY translation reuse, resource bounds,
-diagnostics/statistics, and dynamic-filter isolation.
+The review-fix source tree is unchanged by the final branch history normalization: the rewritten
+corrective commits have the same trees as `37554bde8b508432851257872c203464b6b4bd13` and
+`e421d81e2ea863c3857966623cd185da569acf44`; only their subjects were normalized to satisfy the
+repository commit-message check. The independent review against both `ROADMAP-PUSHDOWN.md` and
+this plan found no semantic or architectural contradiction. It specifically checked enforcement
+classification, residual preservation, partial OR rejection, same-element lambda scope,
+scalar/ARRAY translation reuse, resource bounds, diagnostics/statistics, dynamic-filter isolation,
+and legacy canonicalization safety.
 
-Focused and static verification at FINAL SHA:
+Focused and static verification at FINAL CODE SHA:
 
 ```text
 docker compose exec -T maven ./mvnw -Dmaven.gitcommitid.skip=true \
   -pl :trino-elasticsearch \
-  -Dtest=TestElasticsearchArrayPredicateTranslator,TestElasticsearchPredicateTranslation,TestElasticsearchPredicateComposer,TestElasticsearchPredicateCompositionPlanner,TestElasticsearchPredicateCompositionPolicy,TestElasticsearchPredicateCompositionRequestBudget,TestElasticsearchPredicatePushdownPlanner,TestElasticsearchPushdownDiagnostics,TestElasticsearchSourceValueSemantics,TestElasticsearchRemotePredicateTranslator,TestElasticsearchDynamicFilterPlanner,TestElasticsearchRemoteStatistics test
-RESULT: BUILD SUCCESS; Tests run: 121, Failures: 0, Errors: 0, Skipped: 0
+  -Dtest=TestElasticsearchPredicateComposer,TestElasticsearchArrayPredicateTranslator,TestElasticsearchPredicatePushdownPlanner,TestElasticsearchDynamicFilterPlanner,TestRuleBasedElasticsearchMetadata test
+RESULT: BUILD SUCCESS; Tests run: 88, Failures: 0, Errors: 0, Skipped: 0
+
+docker compose exec -T maven ./mvnw -Dmaven.gitcommitid.skip=true \
+  -pl :trino-elasticsearch \
+  -Dtest=TestElasticsearchArrayPredicateTranslator,TestElasticsearchPredicateTranslation,TestElasticsearchPredicateComposer,TestElasticsearchPredicateCompositionPlanner,TestElasticsearchPredicateCompositionPolicy,TestElasticsearchPredicateCompositionRequestBudget,TestElasticsearchPredicatePushdownPlanner,TestElasticsearchPushdownDiagnostics,TestElasticsearchSourceValueSemantics,TestElasticsearchRemotePredicateTranslator,TestElasticsearchDynamicFilterPlanner,TestElasticsearchRemoteStatistics,TestRuleBasedElasticsearchMetadata test
+RESULT: BUILD SUCCESS; Tests run: 140, Failures: 0, Errors: 0, Skipped: 0
 
 docker compose exec -T maven ./mvnw -Dmaven.gitcommitid.skip=true \
   -pl :trino-elasticsearch airstyle:check
 RESULT: BUILD SUCCESS; all 144 files formatted; checkstyle reported 0 violations.
 
 docker compose exec -T maven ./mvnw -nsu -Dmaven.gitcommitid.skip=true \
-  -pl :trino-elasticsearch -Perrorprone-compiler clean verify -DskipTests
-RESULT: BUILD SUCCESS; clean Error Prone compilation, test compilation, packaging, dependency checks,
-AirStyle, checkstyle, modernizer, and static verification passed at the unchanged implementation
-source. Existing repository Error Prone warnings remained warnings.
+  -Djunit.jupiter.execution.parallel.enabled=false \
+  -Djunit.jupiter.execution.parallel.mode.default=same_thread \
+  -Djunit.jupiter.execution.parallel.mode.classes.default=same_thread \
+  -pl :trino-elasticsearch -Perrorprone-compiler clean verify
+RESULT: BUILD SUCCESS; clean Error Prone compilation, test compilation, connector tests, packaging,
+dependency checks, AirStyle, checkstyle, modernizer, and static verification passed. Tests run:
+1575, Failures: 0, Errors: 0, Skipped: 682. Existing repository Error Prone warnings remained
+warnings. The literal linked-worktree Docker invocation without `-Dmaven.gitcommitid.skip=true`
+stopped before compilation because the container cannot resolve the worktree's `.git` indirection;
+the adjusted container command above completed the required verification.
 ```
 
-The full local clean-verify command was also attempted with serial JUnit settings. It reached the
-reactor tests but encountered unrelated core Trino failures in
-`TestFileSingleStreamSpillerFactory` (two spill-path assertions), outside this connector and all
-changed files; that broad run was stopped after the independent failure. The exact final PR head's
-GitHub `error-prone-checks` job is green, and the connector's deterministic serial aggregate is
-green.
-
-Connector-suite and aggregate verification at FINAL SHA:
+Connector-suite and aggregate verification at FINAL CODE SHA:
 
 ```text
-docker compose exec -T maven ./mvnw -Dmaven.gitcommitid.skip=true \
-  -pl :trino-elasticsearch -Dtest=TestElasticsearch7ConnectorTest test
-RESULT: BUILD SUCCESS; Tests run: 328, Failures: 0, Errors: 0, Skipped: 170.
-
-docker compose exec -T maven ./mvnw -Dmaven.gitcommitid.skip=true \
-  -pl :trino-elasticsearch -Dtest=TestElasticsearch8ConnectorTest test
-RESULT: BUILD SUCCESS; Tests run: 328, Failures: 0, Errors: 0, Skipped: 170.
-
 docker compose exec -T maven ./mvnw -Dmaven.gitcommitid.skip=true \
   -Djunit.jupiter.execution.parallel.enabled=false \
   -Djunit.jupiter.execution.parallel.mode.default=same_thread \
   -Djunit.jupiter.execution.parallel.mode.classes.default=same_thread \
   -pl :trino-elasticsearch test
-RESULT: BUILD SUCCESS; Tests run: 1563, Failures: 0, Errors: 0, Skipped: 682.
+RESULT: BUILD SUCCESS; Tests run: 1575, Failures: 0, Errors: 0, Skipped: 682. This includes
+TestElasticsearch7ConnectorTest (328/0/0/170), TestElasticsearch8ConnectorTest (328/0/0/170),
+TestElasticsearch7PointInTimeConnectorTest (328/0/0/170), and
+TestElasticsearch8PointInTimeConnectorTest (328/0/0/170).
 ```
 
 PIT 404 investigation:
 
 ```text
-Candidate isolated TestElasticsearch7PointInTimeConnectorTest#testSelectAll: 5/5 passed.
-Candidate complete PIT class: 328 tests, 0 failures, 0 errors, 170 skips.
-Candidate ES7 connector + PIT classes: 656 tests, 0 failures, 0 errors, 340 skips.
-Candidate default parallel aggregate: 2 reproductions, each 1563 tests with 1 failure, 0 errors,
-682 skips; the failure was a Trino statement-page HTTP 404 "Query not found" in testSelectAll
-(ES7 in the first run, ES8 in the second).
-Clean baseline isolated PIT test: passed; clean baseline complete PIT class: 323 tests, 0 failures,
-0 errors, 170 skips; clean baseline ES7 connector + PIT classes: 646 tests, 0 failures, 0 errors,
-340 skips.
-Clean baseline default aggregate: 1522 tests, 2 failures, 0 errors, 682 skips; both failures were
-the same statement-page HTTP 404 in testWithoutBackpressure (one ES7 connector class and one ES8
-PIT class).
+Candidate isolated TestElasticsearch7ConnectorTest#testSelectAll: 2/2 passed.
+Candidate isolated PIT test and complete PIT class: passed; the complete class was 328 tests,
+0 failures, 0 errors, 170 skips.
+Candidate default parallel aggregate: one 404 reproduction in
+TestElasticsearch7ConnectorTest.testSelectAll, with 1575 tests, 1 failure, 0 errors, 682 skips.
+Clean baseline 44d719ac2977c98532234f3002376551997f00ac isolated
+TestElasticsearch7ConnectorTest#testSelectAll: passed.
+Candidate deterministic serial aggregate: 1575 tests, 0 failures, 0 errors, 682 skips.
 ```
 
-The repeated clean-baseline reproduction, successful serial aggregate, passing isolated PIT tests,
-and absence of any shared translator/test-state interaction establish this as an unrelated
-parallel Trino statement-lifecycle/test-harness flake, not a regression from the ARRAY pushdown
-implementation. It was not hidden with retries or by weakening assertions. The Docker image
-download stall and Testcontainers address-pool exhaustion were recorded as infrastructure
-observations only. Abstract base-class selectors remain repository non-runnable selectors; concrete
-ES7/ES8 inherited tests were used.
+The candidate/baseline comparison, passing isolated PIT tests, successful serial aggregate, and
+absence of shared translator/test-state interaction establish this as an unrelated parallel Trino
+statement-lifecycle/test-harness concurrency/resource flake, not a regression from the ARRAY
+pushdown implementation. It was not hidden with retries or by weakening assertions. The Docker
+image download stall was recorded as an infrastructure observation only.
 
-GitHub Actions workflow run `34576366655` completed green on the exact FINAL SHA. All required
-connector, Error Prone, and test jobs reported success; no failed or retried job remains. The
-required production tree is clean and `git diff --check` passes.
+Review-fix closure:
+
+```text
+Finding 1: ElasticsearchRemotePredicateTranslator.disjunction() is semantic-only again; request
+budget admission is owned by the composer/planner/metadata layers, which preserve the original
+predicate locally across legacy canonicalization.
+Finding 2: Dynamic-filter limits remain independently owned; final nullable/domain composition is
+checked fail-open and cannot throw on ordinary resource rejection. Dynamic filters remain exact-only.
+Finding 3: MatchPhrase, MatchPhrasePrefix, and Regexp leaves use the shared full-text budget helper
+for scalar and ARRAY paths; over-budget leaves become local residuals and under-budget leaves push.
+Finding 4: stale final-SHA evidence is replaced by the explicit identity record above.
+```
+
+GitHub Actions workflow run `34684378551` completed green on exact FINAL CODE SHA
+`8713b1cdcad0e67ede9c0eb2d2730baa160d7503`; all 91 checks in check suite `93953453750` reported
+success, including `error-prone-checks`, connector test, and product-test matrix checks. The
+documentation closure commit below is documentation-only; its exact PR-head SHA and CI run are
+recorded in the final completion report and PR #25 after that commit is pushed.
 
 This A9 evidence supersedes the earlier pre-PR implementation-head note in this section. No
-production source was changed during A9 validation; only commit metadata was normalized and this
-evidence was recorded.
+production source was changed during A9 validation after the review fixes; only corrective source
+changes, commit-message normalization, and this evidence documentation are present in the final
+branch.
 
 This document is an implementation handoff for extending `full_text_pushdown_mode=UNSAFE` to primitive Elasticsearch arrays, especially `ARRAY(VARCHAR)` backed by analyzed `text` fields.
 
