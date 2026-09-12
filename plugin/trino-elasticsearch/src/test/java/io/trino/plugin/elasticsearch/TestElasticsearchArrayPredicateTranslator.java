@@ -227,6 +227,27 @@ public class TestElasticsearchArrayPredicateTranslator
     }
 
     @Test
+    public void testAnyMatchInOverTermValueBudgetRemainsLocal()
+    {
+        ArrayType arrayType = new ArrayType(INTEGER);
+        ElasticsearchColumnHandle column = integerArrayColumn("Numbers");
+        Call anyMatch = anyMatch("numbers", arrayType, element -> new Call(
+                BOOLEAN,
+                IN_PREDICATE_FUNCTION_NAME,
+                List.of(element, new Constant(integerBlock(1, 2, 3), arrayType))));
+
+        ElasticsearchPredicateTranslation<ConnectorExpression> translation = translateWithContract(
+                anyMatch,
+                Map.of("numbers", column),
+                SAFE,
+                new ElasticsearchPredicateCompositionPolicy(2, 10, 10, 4_096)).orElseThrow();
+
+        assertThat(translation.remotePredicate()).isEmpty();
+        assertThat(translation.remaining()).isEmpty();
+        assertThat(translation.residual()).contains(anyMatch);
+    }
+
+    @Test
     public void testAnyMatchRangeUsesRange()
     {
         ArrayType arrayType = new ArrayType(INTEGER);

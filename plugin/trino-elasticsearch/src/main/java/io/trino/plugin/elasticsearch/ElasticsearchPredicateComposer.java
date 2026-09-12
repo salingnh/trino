@@ -294,11 +294,45 @@ final class ElasticsearchPredicateComposer
             ElasticsearchRemotePredicate predicate,
             ElasticsearchPredicateCompositionPolicy policy)
     {
+        return countTermValues(predicate) <= policy.maxTermsValues()
+                && isWithinQueryBudget(predicate, policy.maxBooleanClauses(), policy.maxQueryBytes());
+    }
+
+    static boolean isWithinQueryBudget(
+            ElasticsearchRemotePredicate predicate,
+            int maxBooleanClauses,
+            int maxQueryBytes)
+    {
         int bytes = ElasticsearchRemotePredicateQueryBuilder.build(predicate)
         .toString()
         .getBytes(StandardCharsets.UTF_8)
         .length;
-        return bytes <= policy.maxQueryBytes() && hasBooleanClauseBudget(predicate, policy.maxBooleanClauses());
+        return bytes <= maxQueryBytes && hasBooleanClauseBudget(predicate, maxBooleanClauses);
+    }
+
+    static <R> ElasticsearchPredicateTranslation<R> approximateWithinBudget(
+            R source,
+            ElasticsearchRemotePredicate predicate,
+            Reason reason,
+            ElasticsearchPredicateCompositionPolicy policy)
+    {
+        if (!isWithinRequestBudget(predicate, policy)) {
+            return ElasticsearchPredicateTranslation.residual(source, Reason.UNSUPPORTED_EXPRESSION);
+        }
+        return ElasticsearchPredicateTranslation.approximate(predicate, reason);
+    }
+
+    private static long countTermValues(ElasticsearchRemotePredicate predicate)
+    {
+        return switch (predicate) {
+            case ElasticsearchRemotePredicate.And and -> and.predicates().stream().mapToLong(ElasticsearchPredicateComposer::countTermValues).sum();
+            case ElasticsearchRemotePredicate.Or or -> or.predicates().stream().mapToLong(ElasticsearchPredicateComposer::countTermValues).sum();
+            case ElasticsearchRemotePredicate.Not not -> countTermValues(not.predicate());
+            case ElasticsearchRemotePredicate.Enforced enforced -> countTermValues(enforced.predicate());
+            case ElasticsearchRemotePredicate.Term _ -> 1;
+            case ElasticsearchRemotePredicate.Terms terms -> terms.values().size();
+            default -> 0;
+        };
     }
 
     private static boolean hasBooleanClauseBudget(ElasticsearchRemotePredicate predicate, int maxBooleanClauses)

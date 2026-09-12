@@ -87,11 +87,26 @@ public class RuleBasedElasticsearchMetadata
         Constraint preparedConstraint = predicatePlan.remainingConstraint();
 
         Optional<ElasticsearchRemotePredicate> inheritedPredicate = combine(input.remotePredicate(), predicatePlan.remotePredicate());
+        if (predicatePlan.remotePredicate().isPresent()
+                && inheritedPredicate.filter(predicate -> !ElasticsearchPredicateComposer.isWithinRequestBudget(
+                predicate,
+                ElasticsearchPredicateCompositionPolicy.DEFAULT)).isPresent()) {
+            // Keep the original constraint local when adding the new predicate would exceed the final request budget.
+            // Returning empty is intentional: no compatibility-boundary state has been installed yet.
+            return Optional.empty();
+        }
         Optional<ConstraintApplicationResult<ConnectorTableHandle>> legacyResult = super.applyFilter(session, table, preparedConstraint);
 
         if (legacyResult.isPresent()) {
             ConstraintApplicationResult<ConnectorTableHandle> result = legacyResult.orElseThrow();
             ElasticsearchTableHandle canonicalHandle = canonicalize((ElasticsearchTableHandle) result.getHandle(), inheritedPredicate);
+            if (canonicalHandle.remotePredicate().filter(predicate -> !ElasticsearchPredicateComposer.isWithinRequestBudget(
+                    predicate,
+                    ElasticsearchPredicateCompositionPolicy.DEFAULT)).isPresent()) {
+                // Legacy state may add predicates after the planner has admitted its own IR. Do not return a handle
+                // whose final request violates the shared safety budget.
+                return Optional.empty();
+            }
             ConnectorExpression remainingExpression = appendResidualExpressions(
                     result.getRemainingExpression().orElse(preparedConstraint.getExpression()),
                     predicatePlan.residualExpressions());

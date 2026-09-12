@@ -104,7 +104,9 @@ public class ElasticsearchPageSourceProvider
         // re-checking can remove false positives, but cannot recover rows lost to an approximate false negative.
         TupleDomain<ElasticsearchColumnHandle> dynamicFilterPredicate = dynamicFilter.getCurrentPredicate()
                 .transformKeys(ElasticsearchColumnHandle.class::cast);
-        Optional<ElasticsearchRemotePredicate> plannedDynamicFilter = dynamicFilterPlanner.plan(dynamicFilterPredicate);
+        Optional<ElasticsearchRemotePredicate> plannedDynamicFilter = dynamicFilterPlanner.plan(
+                dynamicFilterPredicate,
+                elasticsearchTable.remotePredicate());
         if (dynamicFilterPredicate.isNone()) {
             return new EmptyPageSource();
         }

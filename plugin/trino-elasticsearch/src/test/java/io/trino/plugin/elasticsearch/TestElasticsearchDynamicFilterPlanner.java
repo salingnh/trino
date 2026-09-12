@@ -27,6 +27,7 @@ import org.junit.jupiter.api.Test;
 
 import java.util.List;
 import java.util.Map;
+import java.util.Optional;
 import java.util.stream.IntStream;
 
 import static io.airlift.slice.Slices.utf8Slice;
@@ -194,6 +195,31 @@ public class TestElasticsearchDynamicFilterPlanner
         Domain domain = Domain.create(ValueSet.copyOf(INTEGER, values(10)), true);
 
         assertThat(planner.plan(TupleDomain.withColumnDomains(Map.of(ID, domain)))).isEmpty();
+        assertThat(diagnostics.getDynamicFilterOutcomes()).containsEntry("REJECTED", 1L);
+    }
+
+    @Test
+    public void testSmallTermsBatchesDoNotExceedBooleanClauseBudget()
+    {
+        ElasticsearchPushdownDiagnostics diagnostics = new ElasticsearchPushdownDiagnostics();
+        ElasticsearchDynamicFilterPlanner planner = new ElasticsearchDynamicFilterPlanner(2_000, 1, 1_048_576, diagnostics);
+        Domain domain = Domain.multipleValues(INTEGER, values(1_001));
+
+        assertThat(planner.plan(TupleDomain.withColumnDomains(Map.of(ID, domain)))).isEmpty();
+        assertThat(diagnostics.getDynamicFilterOutcomes()).containsEntry("REJECTED", 1L);
+    }
+
+    @Test
+    public void testExistingRemotePredicateConsumesDynamicFilterBudget()
+    {
+        ElasticsearchPushdownDiagnostics diagnostics = new ElasticsearchPushdownDiagnostics();
+        ElasticsearchDynamicFilterPlanner planner = new ElasticsearchDynamicFilterPlanner(100, 100, 256, diagnostics);
+        Domain domain = Domain.singleValue(INTEGER, 1L);
+        ElasticsearchRemotePredicate existing = new ElasticsearchRemotePredicate.MatchPhrase("message", "x".repeat(1_000));
+
+        assertThat(planner.plan(
+                TupleDomain.withColumnDomains(Map.of(ID, domain)),
+                Optional.of(existing))).isEmpty();
         assertThat(diagnostics.getDynamicFilterOutcomes()).containsEntry("REJECTED", 1L);
     }
 

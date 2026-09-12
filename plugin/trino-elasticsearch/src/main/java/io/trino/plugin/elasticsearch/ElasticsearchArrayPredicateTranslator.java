@@ -102,8 +102,12 @@ final class ElasticsearchArrayPredicateTranslator
     private static ElasticsearchPredicateTranslation<ConnectorExpression> exactOrUnsupported(
             ConnectorExpression expression,
             Optional<ElasticsearchRemotePredicate> predicate,
-            ElasticsearchPredicateTranslation.Reason exactReason)
+            ElasticsearchPredicateTranslation.Reason exactReason,
+            ElasticsearchPredicateCompositionPolicy policy)
     {
+        if (predicate.isPresent() && !ElasticsearchPredicateComposer.isWithinRequestBudget(predicate.orElseThrow(), policy)) {
+            return ElasticsearchPredicateTranslation.residual(expression, UNSUPPORTED_EXPRESSION);
+        }
         return predicate
                 .<ElasticsearchPredicateTranslation<ConnectorExpression>>map(value -> ElasticsearchPredicateTranslation.exact(value, exactReason))
                 .orElseGet(() -> ElasticsearchPredicateTranslation.unsupported(
@@ -214,7 +218,8 @@ final class ElasticsearchArrayPredicateTranslator
         return exactOrUnsupported(
                 call,
                 translateAnyMatchBody(lambda.getBody(), lambdaVariable, column, elementType.orElseThrow()),
-                EXACT_ANY_MATCH);
+                EXACT_ANY_MATCH,
+                policy);
     }
 
     private static ElasticsearchPredicateTranslation<ConnectorExpression> translateAnalyzedAnyMatch(
@@ -356,7 +361,7 @@ final class ElasticsearchArrayPredicateTranslator
                 return ElasticsearchPredicateTranslation.residual(source, UNSUPPORTED_EXPRESSION);
             }
             List<ElasticsearchPredicateTranslation<ConnectorExpression>> predicates = values.stream()
-                    .map(value -> ElasticsearchFullTextPredicateTranslator.approximateWithinBudget(
+                    .map(value -> ElasticsearchPredicateComposer.approximateWithinBudget(
                             source,
                             new ElasticsearchRemotePredicate.MatchPhrase(column.predicateName(), (String) value),
                             approximateReason,

@@ -403,7 +403,7 @@ final class ElasticsearchFullTextPredicateTranslator
         if (rewrite.isPresent()) {
             ElasticsearchExpressionRewrite translated = rewrite.orElseThrow();
             return switch (translated.queryType()) {
-                case MATCH_PHRASE -> approximateWithinBudget(
+                case MATCH_PHRASE -> ElasticsearchPredicateComposer.approximateWithinBudget(
                         source,
                         new ElasticsearchRemotePredicate.MatchPhrase(translated.column().remoteName(), translated.value()),
                         approximateReason,
@@ -413,7 +413,7 @@ final class ElasticsearchFullTextPredicateTranslator
 
         Optional<String> prefix = ElasticsearchMetadata.likePrefix(pattern, escape);
         if (prefix.isPresent()) {
-            return approximateWithinBudget(
+            return ElasticsearchPredicateComposer.approximateWithinBudget(
                     source,
                     new ElasticsearchRemotePredicate.MatchPhrasePrefix(column.remoteName(), prefix.orElseThrow()),
                     approximateReason,
@@ -424,7 +424,7 @@ final class ElasticsearchFullTextPredicateTranslator
             return ElasticsearchPredicateTranslation.unsupported(source, UNSUPPORTED_EXPRESSION);
         }
 
-        return approximateWithinBudget(
+        return ElasticsearchPredicateComposer.approximateWithinBudget(
                 source,
                 new ElasticsearchRemotePredicate.Regexp(column.remoteName(), ElasticsearchMetadata.likeToRegexp(pattern, escape)),
                 approximateReason,
@@ -462,13 +462,13 @@ final class ElasticsearchFullTextPredicateTranslator
         }
 
         ElasticsearchRemotePredicate predicate = new ElasticsearchRemotePredicate.Regexp(column.predicateName(), translation.pattern());
-        if (!ElasticsearchPredicateComposer.isWithinRequestBudget(predicate, policy)) {
-            return ElasticsearchPredicateTranslation.residual(source, UNSUPPORTED_EXPRESSION);
-        }
         if (fullTextMode == SAFE) {
+            if (!ElasticsearchPredicateComposer.isWithinRequestBudget(predicate, policy)) {
+                return ElasticsearchPredicateTranslation.residual(source, UNSUPPORTED_EXPRESSION);
+            }
             return ElasticsearchPredicateTranslation.prefilter(predicate, source, FULL_TEXT_SAFE_PREFILTER);
         }
-        return ElasticsearchPredicateTranslation.approximate(predicate, approximateReason);
+        return ElasticsearchPredicateComposer.approximateWithinBudget(source, predicate, approximateReason, policy);
     }
 
     private static ElasticsearchPredicateTranslation<ConnectorExpression> translateStartsWith(
@@ -493,23 +493,11 @@ final class ElasticsearchFullTextPredicateTranslator
         if (fullTextMode == SAFE) {
             return ElasticsearchPredicateTranslation.residual(source, FULL_TEXT_SAFE_UNPROVEN);
         }
-        return approximateWithinBudget(
+        return ElasticsearchPredicateComposer.approximateWithinBudget(
                 source,
                 new ElasticsearchRemotePredicate.MatchPhrasePrefix(column.remoteName(), prefix.toStringUtf8()),
                 approximateReason,
                 policy);
-    }
-
-    static <R> ElasticsearchPredicateTranslation<R> approximateWithinBudget(
-            R source,
-            ElasticsearchRemotePredicate predicate,
-            Reason reason,
-            ElasticsearchPredicateCompositionPolicy policy)
-    {
-        if (!ElasticsearchPredicateComposer.isWithinRequestBudget(predicate, policy)) {
-            return ElasticsearchPredicateTranslation.residual(source, UNSUPPORTED_EXPRESSION);
-        }
-        return ElasticsearchPredicateTranslation.approximate(predicate, reason);
     }
 
     private static boolean supportsExactLikePushdown(ElasticsearchColumnHandle column)
