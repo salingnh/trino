@@ -21,6 +21,7 @@ import io.trino.spi.expression.Variable;
 import org.junit.jupiter.api.Test;
 
 import java.util.List;
+import java.util.stream.IntStream;
 
 import static io.trino.spi.type.BooleanType.BOOLEAN;
 import static org.assertj.core.api.Assertions.assertThat;
@@ -91,6 +92,56 @@ public class TestElasticsearchPredicateCompositionPolicy
     }
 
     @Test
+    public void testBooleanClauseBudgetCountsLeavesAcrossNestedBooleanTree()
+    {
+        ElasticsearchPredicateCompositionPolicy policy = new ElasticsearchPredicateCompositionPolicy(100, 10, 4, LARGE_QUERY_BUDGET);
+
+        ElasticsearchRemotePredicate nestedAnd = new ElasticsearchRemotePredicate.And(List.of(
+                new ElasticsearchRemotePredicate.Or(leaves(3)),
+                new ElasticsearchRemotePredicate.Or(leaves(3))));
+        ElasticsearchRemotePredicate nestedOr = new ElasticsearchRemotePredicate.Or(List.of(
+                new ElasticsearchRemotePredicate.And(leaves(3)),
+                new ElasticsearchRemotePredicate.And(leaves(3))));
+
+        assertThat(ElasticsearchPredicateComposer.isWithinRequestBudget(nestedAnd, policy)).isFalse();
+        assertThat(ElasticsearchPredicateComposer.isWithinRequestBudget(nestedOr, policy)).isFalse();
+    }
+
+    @Test
+    public void testBooleanClauseBudgetAcceptsBelowAndAtLimitAndRejectsAboveLimit()
+    {
+        ElasticsearchPredicateCompositionPolicy policy = new ElasticsearchPredicateCompositionPolicy(100, 10, 4, LARGE_QUERY_BUDGET);
+
+        assertThat(ElasticsearchPredicateComposer.isWithinRequestBudget(nestedBooleanTree(3), policy)).isTrue();
+        assertThat(ElasticsearchPredicateComposer.isWithinRequestBudget(nestedBooleanTree(4), policy)).isTrue();
+        assertThat(ElasticsearchPredicateComposer.isWithinRequestBudget(nestedBooleanTree(5), policy)).isFalse();
+    }
+
+    @Test
+    public void testTermsValuesAreIndependentFromBooleanClauseBudget()
+    {
+        ElasticsearchRemotePredicate predicate = new ElasticsearchRemotePredicate.Terms("status", IntStream.range(0, 100)
+                .mapToObj(Integer::toString)
+                .toList());
+
+        assertThat(ElasticsearchPredicateComposer.isWithinRequestBudget(
+                predicate,
+                new ElasticsearchPredicateCompositionPolicy(100, 100, 1, LARGE_QUERY_BUDGET))).isTrue();
+        assertThat(ElasticsearchPredicateComposer.isWithinRequestBudget(
+                predicate,
+                new ElasticsearchPredicateCompositionPolicy(99, 100, 1, LARGE_QUERY_BUDGET))).isFalse();
+    }
+
+    @Test
+    public void testBooleanDepthBudgetRejectsAlternatingBooleanTree()
+    {
+        ElasticsearchPredicateCompositionPolicy policy = new ElasticsearchPredicateCompositionPolicy(1_000, 100, 1_000, LARGE_QUERY_BUDGET, 3);
+
+        assertThat(ElasticsearchPredicateComposer.isWithinRequestBudget(alternatingBooleanTree(3), policy)).isTrue();
+        assertThat(ElasticsearchPredicateComposer.isWithinRequestBudget(alternatingBooleanTree(4), policy)).isFalse();
+    }
+
+    @Test
     public void testSemanticDisjunctionDoesNotUndoDynamicFilterBatches()
     {
         ElasticsearchRemotePredicate first = new ElasticsearchRemotePredicate.Terms("key", List.of(1L, 2L));
@@ -105,5 +156,34 @@ public class TestElasticsearchPredicateCompositionPolicy
         return ElasticsearchPredicateTranslation.exact(
                 new ElasticsearchRemotePredicate.Term("status", value),
                 Reason.EXACT_DOMAIN);
+    }
+
+    private static List<ElasticsearchRemotePredicate> leaves(int count)
+    {
+        return IntStream.range(0, count)
+                .mapToObj(index -> new ElasticsearchRemotePredicate.Term("status", index))
+                .map(predicate -> (ElasticsearchRemotePredicate) predicate)
+                .toList();
+    }
+
+    private static ElasticsearchRemotePredicate nestedBooleanTree(int leaves)
+    {
+        int leftLeaves = leaves / 2;
+        int rightLeaves = leaves - leftLeaves;
+        return new ElasticsearchRemotePredicate.And(List.of(
+                new ElasticsearchRemotePredicate.Or(TestElasticsearchPredicateCompositionPolicy.leaves(leftLeaves)),
+                new ElasticsearchRemotePredicate.Or(TestElasticsearchPredicateCompositionPolicy.leaves(rightLeaves))));
+    }
+
+    private static ElasticsearchRemotePredicate alternatingBooleanTree(int depth)
+    {
+        ElasticsearchRemotePredicate predicate = new ElasticsearchRemotePredicate.Term("status", "leaf");
+        for (int index = 0; index < depth; index++) {
+            ElasticsearchRemotePredicate sibling = new ElasticsearchRemotePredicate.Term("status", "sibling-" + index);
+            predicate = index % 2 == 0
+                    ? new ElasticsearchRemotePredicate.And(List.of(predicate, sibling))
+                    : new ElasticsearchRemotePredicate.Or(List.of(predicate, sibling));
+        }
+        return predicate;
     }
 }

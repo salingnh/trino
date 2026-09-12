@@ -59,6 +59,7 @@ final class ElasticsearchDynamicFilterPlanner
     private final int maxValues;
     private final int termsBatchSize;
     private final int maxQueryBytes;
+    private final ElasticsearchPredicateCompositionPolicy resourcePolicy;
     private final ElasticsearchPushdownDiagnostics diagnostics;
 
     public ElasticsearchDynamicFilterPlanner()
@@ -79,6 +80,7 @@ final class ElasticsearchDynamicFilterPlanner
         this.maxValues = maxValues;
         this.termsBatchSize = termsBatchSize;
         this.maxQueryBytes = maxQueryBytes;
+        this.resourcePolicy = new ElasticsearchPredicateCompositionPolicy(maxValues, termsBatchSize, MAX_BOOLEAN_CLAUSES, maxQueryBytes);
         this.diagnostics = requireNonNull(diagnostics, "diagnostics is null");
     }
 
@@ -158,7 +160,7 @@ final class ElasticsearchDynamicFilterPlanner
 
     private boolean isWithinDynamicRequestBudget(ElasticsearchRemotePredicate predicate)
     {
-        return ElasticsearchPredicateComposer.isWithinQueryBudget(predicate, MAX_BOOLEAN_CLAUSES, maxQueryBytes);
+        return ElasticsearchPredicateComposer.isWithinRequestBudget(predicate, resourcePolicy);
     }
 
     private Optional<ElasticsearchRemotePredicate> planDomain(ElasticsearchColumnHandle column, Domain domain)

@@ -236,6 +236,18 @@ public class TestRuleBasedElasticsearchMetadata
         assertThat(input.remotePredicate()).contains(existing);
     }
 
+    @Test
+    public void testOverBudgetFinalLeafCompositionRemainsLocal()
+    {
+        ElasticsearchRemotePredicate existing = new ElasticsearchRemotePredicate.Or(IntStream.range(0, 1_000)
+                .mapToObj(value -> (ElasticsearchRemotePredicate) new ElasticsearchRemotePredicate.Term("status", value))
+                .toList());
+        ElasticsearchTableHandle input = withRemotePredicate(emptyTable(), Optional.of(existing));
+
+        assertThat(metadata.applyFilter(session, input, exactConstraint(10L))).isEmpty();
+        assertThat(input.remotePredicate()).contains(existing);
+    }
+
     private static Constraint exactConstraint(long value)
     {
         return new Constraint(
