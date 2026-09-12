@@ -224,6 +224,33 @@ public class TestElasticsearchDynamicFilterPlanner
     }
 
     @Test
+    public void testExistingStaticPredicateConsumesTotalLeafBudget()
+    {
+        ElasticsearchPushdownDiagnostics diagnostics = new ElasticsearchPushdownDiagnostics();
+        ElasticsearchDynamicFilterPlanner planner = new ElasticsearchDynamicFilterPlanner(2_000, 1, 1_048_576, diagnostics);
+        Domain domain = Domain.multipleValues(INTEGER, values(1_000));
+        ElasticsearchRemotePredicate existing = new ElasticsearchRemotePredicate.Term("status", "active");
+
+        assertThat(planner.plan(
+                TupleDomain.withColumnDomains(Map.of(ID, domain)),
+                Optional.of(existing))).isEmpty();
+        assertThat(diagnostics.getDynamicFilterOutcomes()).containsEntry("REJECTED", 1L);
+    }
+
+    @Test
+    public void testExistingStaticPredicateConsumesBooleanDepthBudget()
+    {
+        ElasticsearchPushdownDiagnostics diagnostics = new ElasticsearchPushdownDiagnostics();
+        ElasticsearchDynamicFilterPlanner planner = new ElasticsearchDynamicFilterPlanner(100, 100, 1_048_576, diagnostics);
+        ElasticsearchRemotePredicate existing = alternatingPredicate(32);
+
+        assertThat(planner.plan(
+                TupleDomain.withColumnDomains(Map.of(ID, Domain.singleValue(INTEGER, 1L))),
+                Optional.of(existing))).isEmpty();
+        assertThat(diagnostics.getDynamicFilterOutcomes()).containsEntry("REJECTED", 1L);
+    }
+
+    @Test
     public void testAnalyzedTextAlwaysFallsBack()
     {
         ElasticsearchDynamicFilterPlanner planner = new ElasticsearchDynamicFilterPlanner();
@@ -280,5 +307,17 @@ public class TestElasticsearchDynamicFilterPlanner
         return IntStream.range(0, count)
                 .mapToObj(value -> (long) value)
                 .toList();
+    }
+
+    private static ElasticsearchRemotePredicate alternatingPredicate(int depth)
+    {
+        ElasticsearchRemotePredicate predicate = new ElasticsearchRemotePredicate.Term("status", "leaf");
+        for (int index = 0; index < depth; index++) {
+            ElasticsearchRemotePredicate sibling = new ElasticsearchRemotePredicate.Term("status", "sibling-" + index);
+            predicate = index % 2 == 0
+                    ? new ElasticsearchRemotePredicate.And(List.of(predicate, sibling))
+                    : new ElasticsearchRemotePredicate.Or(List.of(predicate, sibling));
+        }
+        return predicate;
     }
 }
