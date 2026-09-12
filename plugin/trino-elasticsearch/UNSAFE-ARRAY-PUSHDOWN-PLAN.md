@@ -564,9 +564,10 @@ Review-fix source SHA: `8713b1cdcad0e67ede9c0eb2d2730baa160d7503`.
 ### A9 — Final acceptance, independent review, and release evidence
 
 **Status:** PASS — review findings 1–4 are fixed; the final implementation candidate has green
-GitHub CI. The default parallel aggregate's statement-fetch 404 was independently reproduced on
-the clean baseline and is classified as an integration-harness concurrency/resource flake. The
-deterministic serial aggregate is green.
+GitHub CI. The default parallel aggregate's statement-fetch 404 was reproduced on the candidate,
+while the affected PIT test passed in isolation on both the candidate and the clean baseline. The
+deterministic serial aggregate is green, so the failure is classified as an integration-harness
+concurrency/resource flake rather than an ARRAY implementation regression.
 
 Final implementation candidate and release identities:
 
