@@ -79,6 +79,18 @@ public class TestElasticsearchPredicateTranslation
     }
 
     @Test
+    public void testApproximateTranslationCannotBeStrengthenedToExact()
+    {
+        ElasticsearchRemotePredicate approximatePredicate = new ElasticsearchRemotePredicate.Enforced(
+                new ElasticsearchRemotePredicate.MatchPhrase("message", "fatal error"),
+                APPROXIMATE);
+
+        assertThatThrownBy(() -> ElasticsearchPredicateTranslation.exact(approximatePredicate, Reason.EXACT_ARRAY))
+                .isInstanceOf(IllegalArgumentException.class)
+                .hasMessageContaining("exact predicate has non-exact enforcement");
+    }
+
+    @Test
     public void testUnsupportedAndOwnedResidualAreDifferentOutcomes()
     {
         ElasticsearchPredicateTranslation<String> unsupported = ElasticsearchPredicateTranslation.unsupported(

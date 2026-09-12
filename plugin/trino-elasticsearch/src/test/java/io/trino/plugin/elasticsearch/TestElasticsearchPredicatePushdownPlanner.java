@@ -22,6 +22,7 @@ import io.trino.plugin.elasticsearch.expression.ElasticsearchRemotePredicate;
 import io.trino.spi.connector.ColumnHandle;
 import io.trino.spi.connector.Constraint;
 import io.trino.spi.expression.Call;
+import io.trino.spi.expression.ConnectorExpression;
 import io.trino.spi.expression.Constant;
 import io.trino.spi.expression.FunctionName;
 import io.trino.spi.expression.Lambda;
@@ -46,8 +47,10 @@ import static io.trino.plugin.elasticsearch.expression.ElasticsearchRemotePredic
 import static io.trino.plugin.elasticsearch.expression.ElasticsearchRemotePredicate.Enforcement.EXACT;
 import static io.trino.plugin.elasticsearch.expression.ElasticsearchRemotePredicate.Enforcement.PREFILTER;
 import static io.trino.spi.expression.Constant.TRUE;
+import static io.trino.spi.expression.StandardFunctions.AND_FUNCTION_NAME;
 import static io.trino.spi.expression.StandardFunctions.EQUAL_OPERATOR_FUNCTION_NAME;
 import static io.trino.spi.expression.StandardFunctions.LIKE_FUNCTION_NAME;
+import static io.trino.spi.expression.StandardFunctions.OR_FUNCTION_NAME;
 import static io.trino.spi.type.BigintType.BIGINT;
 import static io.trino.spi.type.BooleanType.BOOLEAN;
 import static io.trino.spi.type.IntegerType.INTEGER;
@@ -84,6 +87,75 @@ public class TestElasticsearchPredicatePushdownPlanner
         assertThat(result.decisions()).hasSize(2);
         assertThat(result.decisions().get(0).reason()).isEqualTo(Reason.EXACT_DOMAIN);
         assertThat(result.decisions().get(1).reason()).isEqualTo(Reason.NOOP);
+    }
+
+    @Test
+    public void testExactDiscreteDomainOverTermValueBudgetRemainsLocal()
+    {
+        Domain domain = Domain.multipleValues(INTEGER, List.of(1L, 2L, 3L));
+        Constraint constraint = new Constraint(
+                TupleDomain.withColumnDomains(Map.<ColumnHandle, Domain>of(USER_ID, domain)),
+                TRUE,
+                Map.of());
+        ElasticsearchPredicateCompositionPolicy policy = new ElasticsearchPredicateCompositionPolicy(2, 10, 10, 4_096);
+
+        ElasticsearchPredicatePushdownPlanner.Result result = ElasticsearchPredicatePushdownPlanner.plan(
+                TestingConnectorSession.builder().build(),
+                constraint,
+                SAFE,
+                policy);
+
+        assertThat(result.remotePredicate()).isEmpty();
+        assertThat(result.remainingConstraint().getSummary().isAll()).isTrue();
+        assertThat(result.residualFilter()).isEqualTo(TupleDomain.withColumnDomains(Map.<ColumnHandle, Domain>of(USER_ID, domain)));
+    }
+
+    @Test
+    public void testNestedExactDomainsOverGlobalLeafBudgetRemainLocal()
+    {
+        ElasticsearchColumnHandle second = integerColumn("UserID2");
+        ElasticsearchColumnHandle third = integerColumn("UserID3");
+        ElasticsearchColumnHandle fourth = integerColumn("UserID4");
+        ElasticsearchColumnHandle fifth = integerColumn("UserID5");
+        Map<ColumnHandle, Domain> domains = Map.of(
+                USER_ID, Domain.singleValue(INTEGER, 1L),
+                second, Domain.singleValue(INTEGER, 2L),
+                third, Domain.singleValue(INTEGER, 3L),
+                fourth, Domain.singleValue(INTEGER, 4L),
+                fifth, Domain.singleValue(INTEGER, 5L));
+        Constraint constraint = new Constraint(TupleDomain.withColumnDomains(domains), TRUE, Map.of());
+
+        ElasticsearchPredicatePushdownPlanner.Result result = ElasticsearchPredicatePushdownPlanner.plan(
+                TestingConnectorSession.builder().build(),
+                constraint,
+                SAFE,
+                new ElasticsearchPredicateCompositionPolicy(100, 10, 4, 4_096));
+
+        assertThat(result.remotePredicate()).isEmpty();
+        assertThat(result.remainingConstraint().getSummary().isAll()).isTrue();
+        assertThat(result.residualFilter()).isEqualTo(TupleDomain.withColumnDomains(domains));
+    }
+
+    @Test
+    public void testAlternatingBooleanExpressionOverDepthBudgetRemainsLocal()
+    {
+        ConnectorExpression expression = like("value", "Alpha%");
+        for (int index = 0; index < 3; index++) {
+            String functionName = index % 2 == 0 ? OR_FUNCTION_NAME.getName() : AND_FUNCTION_NAME.getName();
+            expression = new Call(
+                    BOOLEAN,
+                    new FunctionName(functionName),
+                    List.of(expression, like("value", "Prefix" + index + "%")));
+        }
+
+        ElasticsearchPredicatePushdownPlanner.Result result = ElasticsearchPredicatePushdownPlanner.plan(
+                TestingConnectorSession.builder().build(),
+                expressionConstraint(keywordColumn(), (Call) expression),
+                SAFE,
+                new ElasticsearchPredicateCompositionPolicy(100, 10, 100, 4_096, 2));
+
+        assertThat(result.remotePredicate()).isEmpty();
+        assertThat(result.residualExpressions()).containsExactly(expression);
     }
 
     @Test
@@ -303,6 +375,55 @@ public class TestElasticsearchPredicatePushdownPlanner
                 APPROXIMATE));
     }
 
+    @Test
+    public void testOversizedUnsafeAnalyzedFullTextLeavesRemainLocal()
+    {
+        ElasticsearchColumnHandle column = analyzedTextColumn();
+        ElasticsearchPredicateCompositionPolicy policy = new ElasticsearchPredicateCompositionPolicy(10, 10, 10, 128);
+
+        List<Call> expressions = List.of(
+                like("value", "x".repeat(100)),
+                new Call(
+                        BOOLEAN,
+                        new FunctionName("starts_with"),
+                        List.of(new Variable("value", VARCHAR), new Constant(utf8Slice("x".repeat(100)), VARCHAR))),
+                new Call(
+                        BOOLEAN,
+                        new FunctionName("regexp_like"),
+                        List.of(new Variable("value", VARCHAR), new Constant(utf8Slice("x".repeat(100)), VARCHAR))));
+
+        for (Call expression : expressions) {
+            ElasticsearchPredicatePushdownPlanner.Result result = ElasticsearchPredicatePushdownPlanner.plan(
+                    TestingConnectorSession.builder().build(),
+                    expressionConstraint(column, expression),
+                    UNSAFE,
+                    policy);
+
+            assertThat(result.remotePredicate()).isEmpty();
+            assertThat(result.remainingConstraint().getExpression()).isEqualTo(TRUE);
+            assertThat(result.residualExpressions()).containsExactly(expression);
+        }
+    }
+
+    @Test
+    public void testUnderBudgetUnsafeAnalyzedFullTextLeafStillPushes()
+    {
+        ElasticsearchColumnHandle column = analyzedTextColumn();
+        Call expression = like("value", "Alpha%");
+
+        ElasticsearchPredicatePushdownPlanner.Result result = ElasticsearchPredicatePushdownPlanner.plan(
+                TestingConnectorSession.builder().build(),
+                expressionConstraint(column, expression),
+                UNSAFE,
+                new ElasticsearchPredicateCompositionPolicy(10, 10, 10, 4_096));
+
+        assertThat(result.remotePredicate()).contains(new ElasticsearchRemotePredicate.Enforced(
+                new ElasticsearchRemotePredicate.MatchPhrasePrefix("value", "Alpha"),
+                APPROXIMATE));
+        assertThat(result.remainingConstraint().getExpression()).isEqualTo(TRUE);
+        assertThat(result.residualExpressions()).isEmpty();
+    }
+
     private static Constraint expressionConstraint(ElasticsearchColumnHandle column, Call expression)
     {
         return new Constraint(
@@ -328,6 +449,16 @@ public class TestElasticsearchPredicatePushdownPlanner
                 VARCHAR,
                 new PrimitiveType("keyword"),
                 new VarcharDecoder.Descriptor("value"),
+                true);
+    }
+
+    private static ElasticsearchColumnHandle integerColumn(String field)
+    {
+        return new ElasticsearchColumnHandle(
+                ImmutableList.of(field),
+                INTEGER,
+                new PrimitiveType("integer"),
+                new IntegerDecoder.Descriptor(field),
                 true);
     }
 

@@ -50,6 +50,7 @@ import static java.util.Objects.requireNonNull;
 final class ElasticsearchDynamicFilterPlanner
 {
     private static final int MAX_DATE_TERMS = 1_000;
+    private static final int MAX_BOOLEAN_CLAUSES = 1_000;
 
     static final int DEFAULT_MAX_VALUES = 50_000;
     static final int DEFAULT_TERMS_BATCH_SIZE = 1_000;
@@ -58,6 +59,7 @@ final class ElasticsearchDynamicFilterPlanner
     private final int maxValues;
     private final int termsBatchSize;
     private final int maxQueryBytes;
+    private final ElasticsearchPredicateCompositionPolicy resourcePolicy;
     private final ElasticsearchPushdownDiagnostics diagnostics;
 
     public ElasticsearchDynamicFilterPlanner()
@@ -78,11 +80,20 @@ final class ElasticsearchDynamicFilterPlanner
         this.maxValues = maxValues;
         this.termsBatchSize = termsBatchSize;
         this.maxQueryBytes = maxQueryBytes;
+        this.resourcePolicy = new ElasticsearchPredicateCompositionPolicy(maxValues, termsBatchSize, MAX_BOOLEAN_CLAUSES, maxQueryBytes);
         this.diagnostics = requireNonNull(diagnostics, "diagnostics is null");
     }
 
     public Optional<ElasticsearchRemotePredicate> plan(TupleDomain<ElasticsearchColumnHandle> dynamicFilter)
     {
+        return plan(dynamicFilter, Optional.empty());
+    }
+
+    Optional<ElasticsearchRemotePredicate> plan(
+            TupleDomain<ElasticsearchColumnHandle> dynamicFilter,
+            Optional<ElasticsearchRemotePredicate> existingPredicate)
+    {
+        requireNonNull(existingPredicate, "existingPredicate is null");
         if (dynamicFilter.isAll() || dynamicFilter.isNone()) {
             diagnostics.recordDynamicFilterPlan(dynamicFilter.isNone() ? EMPTY : UNRESTRICTED, 0, 0, 0, 0, 0, 0, 0);
             return Optional.empty();
@@ -117,16 +128,39 @@ final class ElasticsearchDynamicFilterPlanner
             valuesPushed += countPushedValues(plannedPredicate);
             termsBatches += countTermsPredicates(plannedPredicate);
         }
+
+        Optional<ElasticsearchRemotePredicate> plannedPredicate = conjunction(predicates);
+        boolean rejectedByBudget = plannedPredicate
+                .filter(predicate -> !isWithinDynamicRequestBudget(predicate))
+                .isPresent();
+        if (!rejectedByBudget && plannedPredicate.isPresent() && existingPredicate.isPresent()) {
+            Optional<ElasticsearchRemotePredicate> combined = conjunction(List.of(
+                    existingPredicate.orElseThrow(),
+                    plannedPredicate.orElseThrow()));
+            rejectedByBudget = combined.isEmpty()
+                    || !isWithinDynamicRequestBudget(combined.orElseThrow());
+        }
+
+        long recordedPredicates = rejectedByBudget ? 0 : predicates.size();
+        long recordedValuesPushed = rejectedByBudget ? 0 : valuesPushed;
+        long recordedTermsBatches = rejectedByBudget ? 0 : termsBatches;
+        long recordedRejectedDomains = rejectedByBudget ? domains.size() : rejectedDomains;
+        int recordedBytes = rejectedByBudget ? 0 : usedBytes;
         diagnostics.recordDynamicFilterPlan(
-                predicates.isEmpty() ? REJECTED : rejectedDomains == 0 ? PUSHED : PARTIALLY_PUSHED,
+                plannedPredicate.isEmpty() || rejectedByBudget ? REJECTED : rejectedDomains == 0 ? PUSHED : PARTIALLY_PUSHED,
                 domains.size(),
                 valuesReceived,
-                predicates.size(),
-                valuesPushed,
-                termsBatches,
-                rejectedDomains,
-                usedBytes);
-        return conjunction(predicates);
+                recordedPredicates,
+                recordedValuesPushed,
+                recordedTermsBatches,
+                recordedRejectedDomains,
+                recordedBytes);
+        return rejectedByBudget ? Optional.empty() : plannedPredicate;
+    }
+
+    private boolean isWithinDynamicRequestBudget(ElasticsearchRemotePredicate predicate)
+    {
+        return ElasticsearchPredicateComposer.isWithinRequestBudget(predicate, resourcePolicy);
     }
 
     private Optional<ElasticsearchRemotePredicate> planDomain(ElasticsearchColumnHandle column, Domain domain)
@@ -179,6 +213,9 @@ final class ElasticsearchDynamicFilterPlanner
         }
 
         Optional<ElasticsearchRemotePredicate> valuesPredicate = disjunction(batches);
+        if (valuesPredicate.isEmpty()) {
+            return Optional.empty();
+        }
         if (!domain.isNullAllowed()) {
             return valuesPredicate;
         }

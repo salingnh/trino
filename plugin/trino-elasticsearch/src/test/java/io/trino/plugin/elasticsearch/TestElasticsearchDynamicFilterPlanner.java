@@ -22,10 +22,12 @@ import io.trino.spi.predicate.Domain;
 import io.trino.spi.predicate.Range;
 import io.trino.spi.predicate.TupleDomain;
 import io.trino.spi.predicate.ValueSet;
+import io.trino.spi.type.ArrayType;
 import org.junit.jupiter.api.Test;
 
 import java.util.List;
 import java.util.Map;
+import java.util.Optional;
 import java.util.stream.IntStream;
 
 import static io.airlift.slice.Slices.utf8Slice;
@@ -48,6 +50,13 @@ public class TestElasticsearchDynamicFilterPlanner
             VARCHAR,
             new PrimitiveType("text"),
             new VarcharDecoder.Descriptor("Message"),
+            false);
+    private static final ArrayType ANALYZED_TEXT_ARRAY_TYPE = new ArrayType(VARCHAR);
+    private static final ElasticsearchColumnHandle ANALYZED_TEXT_ARRAY = new ElasticsearchColumnHandle(
+            List.of("Names"),
+            ANALYZED_TEXT_ARRAY_TYPE,
+            new PrimitiveType("text"),
+            new VarcharDecoder.Descriptor("Names"),
             false);
     private static final ElasticsearchColumnHandle EVENT_TIME = new ElasticsearchColumnHandle(
             List.of("EventTime"),
@@ -179,6 +188,69 @@ public class TestElasticsearchDynamicFilterPlanner
     }
 
     @Test
+    public void testNullableQueryByteBudgetFallsBackWithoutThrowing()
+    {
+        ElasticsearchPushdownDiagnostics diagnostics = new ElasticsearchPushdownDiagnostics();
+        ElasticsearchDynamicFilterPlanner planner = new ElasticsearchDynamicFilterPlanner(100, 100, 16, diagnostics);
+        Domain domain = Domain.create(ValueSet.copyOf(INTEGER, values(10)), true);
+
+        assertThat(planner.plan(TupleDomain.withColumnDomains(Map.of(ID, domain)))).isEmpty();
+        assertThat(diagnostics.getDynamicFilterOutcomes()).containsEntry("REJECTED", 1L);
+    }
+
+    @Test
+    public void testSmallTermsBatchesDoNotExceedBooleanClauseBudget()
+    {
+        ElasticsearchPushdownDiagnostics diagnostics = new ElasticsearchPushdownDiagnostics();
+        ElasticsearchDynamicFilterPlanner planner = new ElasticsearchDynamicFilterPlanner(2_000, 1, 1_048_576, diagnostics);
+        Domain domain = Domain.multipleValues(INTEGER, values(1_001));
+
+        assertThat(planner.plan(TupleDomain.withColumnDomains(Map.of(ID, domain)))).isEmpty();
+        assertThat(diagnostics.getDynamicFilterOutcomes()).containsEntry("REJECTED", 1L);
+    }
+
+    @Test
+    public void testExistingRemotePredicateConsumesDynamicFilterBudget()
+    {
+        ElasticsearchPushdownDiagnostics diagnostics = new ElasticsearchPushdownDiagnostics();
+        ElasticsearchDynamicFilterPlanner planner = new ElasticsearchDynamicFilterPlanner(100, 100, 256, diagnostics);
+        Domain domain = Domain.singleValue(INTEGER, 1L);
+        ElasticsearchRemotePredicate existing = new ElasticsearchRemotePredicate.MatchPhrase("message", "x".repeat(1_000));
+
+        assertThat(planner.plan(
+                TupleDomain.withColumnDomains(Map.of(ID, domain)),
+                Optional.of(existing))).isEmpty();
+        assertThat(diagnostics.getDynamicFilterOutcomes()).containsEntry("REJECTED", 1L);
+    }
+
+    @Test
+    public void testExistingStaticPredicateConsumesTotalLeafBudget()
+    {
+        ElasticsearchPushdownDiagnostics diagnostics = new ElasticsearchPushdownDiagnostics();
+        ElasticsearchDynamicFilterPlanner planner = new ElasticsearchDynamicFilterPlanner(2_000, 1, 1_048_576, diagnostics);
+        Domain domain = Domain.multipleValues(INTEGER, values(1_000));
+        ElasticsearchRemotePredicate existing = new ElasticsearchRemotePredicate.Term("status", "active");
+
+        assertThat(planner.plan(
+                TupleDomain.withColumnDomains(Map.of(ID, domain)),
+                Optional.of(existing))).isEmpty();
+        assertThat(diagnostics.getDynamicFilterOutcomes()).containsEntry("REJECTED", 1L);
+    }
+
+    @Test
+    public void testExistingStaticPredicateConsumesBooleanDepthBudget()
+    {
+        ElasticsearchPushdownDiagnostics diagnostics = new ElasticsearchPushdownDiagnostics();
+        ElasticsearchDynamicFilterPlanner planner = new ElasticsearchDynamicFilterPlanner(100, 100, 1_048_576, diagnostics);
+        ElasticsearchRemotePredicate existing = alternatingPredicate(32);
+
+        assertThat(planner.plan(
+                TupleDomain.withColumnDomains(Map.of(ID, Domain.singleValue(INTEGER, 1L))),
+                Optional.of(existing))).isEmpty();
+        assertThat(diagnostics.getDynamicFilterOutcomes()).containsEntry("REJECTED", 1L);
+    }
+
+    @Test
     public void testAnalyzedTextAlwaysFallsBack()
     {
         ElasticsearchDynamicFilterPlanner planner = new ElasticsearchDynamicFilterPlanner();
@@ -186,6 +258,8 @@ public class TestElasticsearchDynamicFilterPlanner
 
         // Dynamic filtering must never use approximate analyzed-text matching: false negatives would corrupt join results.
         assertThat(planner.plan(TupleDomain.withColumnDomains(Map.of(ANALYZED_TEXT, domain)))).isEmpty();
+        assertThat(planner.plan(TupleDomain.withColumnDomains(Map.of(
+                ANALYZED_TEXT_ARRAY, Domain.onlyNull(ANALYZED_TEXT_ARRAY_TYPE))))).isEmpty();
     }
 
     @Test
@@ -233,5 +307,17 @@ public class TestElasticsearchDynamicFilterPlanner
         return IntStream.range(0, count)
                 .mapToObj(value -> (long) value)
                 .toList();
+    }
+
+    private static ElasticsearchRemotePredicate alternatingPredicate(int depth)
+    {
+        ElasticsearchRemotePredicate predicate = new ElasticsearchRemotePredicate.Term("status", "leaf");
+        for (int index = 0; index < depth; index++) {
+            ElasticsearchRemotePredicate sibling = new ElasticsearchRemotePredicate.Term("status", "sibling-" + index);
+            predicate = index % 2 == 0
+                    ? new ElasticsearchRemotePredicate.And(List.of(predicate, sibling))
+                    : new ElasticsearchRemotePredicate.Or(List.of(predicate, sibling));
+        }
+        return predicate;
     }
 }

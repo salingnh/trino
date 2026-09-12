@@ -290,16 +290,66 @@ final class ElasticsearchPredicateComposer
         return Optional.of(List.copyOf(result));
     }
 
-    private static boolean isWithinRequestBudget(
+    static boolean isWithinRequestBudget(
             ElasticsearchRemotePredicate predicate,
             ElasticsearchPredicateCompositionPolicy policy)
     {
+        ResourceUsage usage = resourceUsage(predicate);
+        if (usage.termValues() > policy.maxTermsValues()
+                || usage.queryLeaves() > policy.maxBooleanClauses()
+                || usage.booleanDepth() > policy.maxBooleanDepth()) {
+            return false;
+        }
         int bytes = ElasticsearchRemotePredicateQueryBuilder.build(predicate)
         .toString()
         .getBytes(StandardCharsets.UTF_8)
         .length;
         return bytes <= policy.maxQueryBytes();
     }
+
+    static <R> ElasticsearchPredicateTranslation<R> approximateWithinBudget(
+            R source,
+            ElasticsearchRemotePredicate predicate,
+            Reason reason,
+            ElasticsearchPredicateCompositionPolicy policy)
+    {
+        if (!isWithinRequestBudget(predicate, policy)) {
+            return ElasticsearchPredicateTranslation.residual(source, Reason.UNSUPPORTED_EXPRESSION);
+        }
+        return ElasticsearchPredicateTranslation.approximate(predicate, reason);
+    }
+
+    private static ResourceUsage resourceUsage(ElasticsearchRemotePredicate predicate)
+    {
+        return switch (predicate) {
+            case ElasticsearchRemotePredicate.And and -> booleanNodeUsage(and.predicates());
+            case ElasticsearchRemotePredicate.Or or -> booleanNodeUsage(or.predicates());
+            case ElasticsearchRemotePredicate.Not not -> {
+                ResourceUsage child = resourceUsage(not.predicate());
+                yield new ResourceUsage(child.termValues(), child.queryLeaves(), child.booleanDepth() + 1);
+            }
+            case ElasticsearchRemotePredicate.Enforced enforced -> resourceUsage(enforced.predicate());
+            case ElasticsearchRemotePredicate.Term _ -> new ResourceUsage(1, 1, 0);
+            case ElasticsearchRemotePredicate.Terms terms -> new ResourceUsage(terms.values().size(), 1, 0);
+            default -> new ResourceUsage(0, 1, 0);
+        };
+    }
+
+    private static ResourceUsage booleanNodeUsage(List<ElasticsearchRemotePredicate> predicates)
+    {
+        long termValues = 0;
+        long queryLeaves = 0;
+        int childDepth = 0;
+        for (ElasticsearchRemotePredicate predicate : predicates) {
+            ResourceUsage child = resourceUsage(predicate);
+            termValues += child.termValues();
+            queryLeaves += child.queryLeaves();
+            childDepth = Math.max(childDepth, child.booleanDepth());
+        }
+        return new ResourceUsage(termValues, queryLeaves, childDepth + 1);
+    }
+
+    private record ResourceUsage(long termValues, long queryLeaves, int booleanDepth) {}
 
     private static Optional<ConnectorExpression> andExpressions(List<ConnectorExpression> expressions)
     {

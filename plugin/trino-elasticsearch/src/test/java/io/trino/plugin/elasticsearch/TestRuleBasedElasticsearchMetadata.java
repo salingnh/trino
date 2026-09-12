@@ -39,6 +39,7 @@ import java.io.IOException;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
+import java.util.stream.IntStream;
 
 import static io.airlift.slice.Slices.utf8Slice;
 import static io.trino.plugin.elasticsearch.ElasticsearchRemotePredicateTranslator.withRemotePredicate;
@@ -64,6 +65,12 @@ public class TestRuleBasedElasticsearchMetadata
             INTEGER,
             new IndexMetadata.PrimitiveType("integer"),
             new IntegerDecoder.Descriptor("UserID"),
+            true);
+    private static final ElasticsearchColumnHandle STATUS = new ElasticsearchColumnHandle(
+            List.of("status"),
+            VARCHAR,
+            new IndexMetadata.PrimitiveType("keyword"),
+            new VarcharDecoder.Descriptor("status"),
             true);
 
     private static ElasticsearchClient client;
@@ -194,6 +201,51 @@ public class TestRuleBasedElasticsearchMetadata
                 Map.of());
 
         assertThat(metadata.applyFilter(session, emptyTable(), constraint)).isEmpty();
+    }
+
+    @Test
+    public void testOverBudgetExactDomainIsNotErasedByLegacyCanonicalization()
+    {
+        List<Range> ranges = IntStream.range(0, 1_001)
+                .mapToObj(value -> Range.range(INTEGER, value * 3L, true, value * 3L + 1, true))
+                .toList();
+        Domain domain = Domain.create(ValueSet.ofRanges(ranges), false);
+        Constraint constraint = new Constraint(
+                TupleDomain.withColumnDomains(Map.of(
+                        USER_ID, domain,
+                        STATUS, Domain.singleValue(VARCHAR, utf8Slice("active")))),
+                TRUE,
+                Map.of());
+
+        ConstraintApplicationResult<ConnectorTableHandle> result = metadata.applyFilter(session, emptyTable(), constraint)
+                .orElseThrow();
+        ElasticsearchTableHandle handle = (ElasticsearchTableHandle) result.getHandle();
+
+        assertThat(handle.constraint().isAll()).isTrue();
+        assertThat(handle.remotePredicate()).contains(new ElasticsearchRemotePredicate.Term("status", "active"));
+        assertThat(result.getRemainingFilter().getDomains().orElseThrow()).containsEntry(USER_ID, domain);
+    }
+
+    @Test
+    public void testOverBudgetFinalRemoteCompositionRemainsLocal()
+    {
+        ElasticsearchRemotePredicate existing = new ElasticsearchRemotePredicate.MatchPhrase("message", "x".repeat(1_100_000));
+        ElasticsearchTableHandle input = withRemotePredicate(emptyTable(), Optional.of(existing));
+
+        assertThat(metadata.applyFilter(session, input, exactConstraint(10L))).isEmpty();
+        assertThat(input.remotePredicate()).contains(existing);
+    }
+
+    @Test
+    public void testOverBudgetFinalLeafCompositionRemainsLocal()
+    {
+        ElasticsearchRemotePredicate existing = new ElasticsearchRemotePredicate.Or(IntStream.range(0, 1_000)
+                .mapToObj(value -> (ElasticsearchRemotePredicate) new ElasticsearchRemotePredicate.Term("status", value))
+                .toList());
+        ElasticsearchTableHandle input = withRemotePredicate(emptyTable(), Optional.of(existing));
+
+        assertThat(metadata.applyFilter(session, input, exactConstraint(10L))).isEmpty();
+        assertThat(input.remotePredicate()).contains(existing);
     }
 
     private static Constraint exactConstraint(long value)

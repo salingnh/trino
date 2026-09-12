@@ -22,6 +22,7 @@ import io.trino.spi.expression.Variable;
 import io.trino.spi.predicate.Domain;
 import io.trino.spi.predicate.TupleDomain;
 import io.trino.spi.type.ArrayType;
+import io.trino.testing.TestingConnectorSession;
 import org.junit.jupiter.api.Test;
 
 import java.util.List;
@@ -66,7 +67,12 @@ public class TestElasticsearchSourceValueSemantics
                 new FunctionName("contains"),
                 List.of(new Variable("values", arrayType), new Constant(0L, INTEGER)));
 
-        assertThat(ElasticsearchArrayPredicateTranslator.translate(contains, Map.of("values", column)))
+        assertThat(ElasticsearchArrayPredicateTranslator.translate(
+                        TestingConnectorSession.builder().build(),
+                        contains,
+                        Map.of("values", column),
+                        FullTextPushdownMode.SAFE)
+                .flatMap(ElasticsearchPredicateTranslation::remotePredicate))
                 .isEmpty();
     }
 }
