@@ -226,6 +226,16 @@ public class TestRuleBasedElasticsearchMetadata
         assertThat(result.getRemainingFilter().getDomains().orElseThrow()).containsEntry(USER_ID, domain);
     }
 
+    @Test
+    public void testOverBudgetFinalRemoteCompositionRemainsLocal()
+    {
+        ElasticsearchRemotePredicate existing = new ElasticsearchRemotePredicate.MatchPhrase("message", "x".repeat(1_100_000));
+        ElasticsearchTableHandle input = withRemotePredicate(emptyTable(), Optional.of(existing));
+
+        assertThat(metadata.applyFilter(session, input, exactConstraint(10L))).isEmpty();
+        assertThat(input.remotePredicate()).contains(existing);
+    }
+
     private static Constraint exactConstraint(long value)
     {
         return new Constraint(

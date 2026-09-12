@@ -87,6 +87,27 @@ public class TestElasticsearchPredicatePushdownPlanner
     }
 
     @Test
+    public void testExactDiscreteDomainOverTermValueBudgetRemainsLocal()
+    {
+        Domain domain = Domain.multipleValues(INTEGER, List.of(1L, 2L, 3L));
+        Constraint constraint = new Constraint(
+                TupleDomain.withColumnDomains(Map.<ColumnHandle, Domain>of(USER_ID, domain)),
+                TRUE,
+                Map.of());
+        ElasticsearchPredicateCompositionPolicy policy = new ElasticsearchPredicateCompositionPolicy(2, 10, 10, 4_096);
+
+        ElasticsearchPredicatePushdownPlanner.Result result = ElasticsearchPredicatePushdownPlanner.plan(
+                TestingConnectorSession.builder().build(),
+                constraint,
+                SAFE,
+                policy);
+
+        assertThat(result.remotePredicate()).isEmpty();
+        assertThat(result.remainingConstraint().getSummary().isAll()).isTrue();
+        assertThat(result.residualFilter()).isEqualTo(TupleDomain.withColumnDomains(Map.<ColumnHandle, Domain>of(USER_ID, domain)));
+    }
+
+    @Test
     public void testExactRangeMovesDirectlyToIr()
     {
         Domain domain = Domain.create(
