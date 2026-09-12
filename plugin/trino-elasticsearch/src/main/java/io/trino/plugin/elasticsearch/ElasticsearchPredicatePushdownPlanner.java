@@ -66,9 +66,19 @@ final class ElasticsearchPredicatePushdownPlanner
 
     public static Result plan(ConnectorSession session, Constraint constraint, FullTextPushdownMode fullTextMode)
     {
+        return plan(session, constraint, fullTextMode, ElasticsearchPredicateCompositionPolicy.DEFAULT);
+    }
+
+    static Result plan(
+            ConnectorSession session,
+            Constraint constraint,
+            FullTextPushdownMode fullTextMode,
+            ElasticsearchPredicateCompositionPolicy policy)
+    {
         requireNonNull(session, "session is null");
         requireNonNull(constraint, "constraint is null");
         requireNonNull(fullTextMode, "fullTextMode is null");
+        requireNonNull(policy, "policy is null");
 
         Constraint normalizedConstraint = fullTextMode == UNSAFE
                 ? removeUnsafeAnalyzedPrefixSyntheticDomains(constraint)
@@ -82,11 +92,11 @@ final class ElasticsearchPredicatePushdownPlanner
         for (Map.Entry<ColumnHandle, Domain> entry : normalizedConstraint.getSummary().getDomains().orElse(Map.of()).entrySet()) {
             ElasticsearchColumnHandle column = (ElasticsearchColumnHandle) entry.getKey();
             Domain domain = entry.getValue();
-            ElasticsearchPredicateTranslation<Domain> translation = translateDomainPredicate(column, domain, fullTextMode);
+            ElasticsearchPredicateTranslation<Domain> translation = translateDomainPredicate(column, domain, fullTextMode, policy);
 
             decisions.add(translation.decision());
             translation.remotePredicate().ifPresent(remotePredicates::add);
-            if (translation.remaining().isEmpty()) {
+            if (translation.remaining().isEmpty() || translation.residual().isPresent()) {
                 remainingDomains.remove(column);
             }
             translation.residual().ifPresent(residual -> residualDomains.put(column, residual));
@@ -96,9 +106,15 @@ final class ElasticsearchPredicatePushdownPlanner
                 session,
                 normalizedConstraint.getExpression(),
                 normalizedConstraint.getAssignments(),
-                fullTextMode);
+                fullTextMode,
+                policy);
         decisions.add(expressionTranslation.decision());
         expressionTranslation.remotePredicate().ifPresent(remotePredicates::add);
+
+        Optional<ElasticsearchRemotePredicate> remotePredicate = conjunction(remotePredicates);
+        if (remotePredicate.filter(predicate -> !ElasticsearchPredicateComposer.isWithinRequestBudget(predicate, policy)).isPresent()) {
+            return localResult(normalizedConstraint, decisions);
+        }
 
         Constraint remainingConstraint = new Constraint(
                 TupleDomain.withColumnDomains(remainingDomains),
@@ -106,7 +122,7 @@ final class ElasticsearchPredicatePushdownPlanner
                 normalizedConstraint.getAssignments());
         return new Result(
                 remainingConstraint,
-                conjunction(remotePredicates),
+                remotePredicate,
                 TupleDomain.withColumnDomains(residualDomains),
                 expressionTranslation.residual().map(List::of).orElseGet(List::of),
                 decisions);
@@ -115,12 +131,16 @@ final class ElasticsearchPredicatePushdownPlanner
     private static ElasticsearchPredicateTranslation<Domain> translateDomainPredicate(
             ElasticsearchColumnHandle column,
             Domain domain,
-            FullTextPushdownMode fullTextMode)
+            FullTextPushdownMode fullTextMode,
+            ElasticsearchPredicateCompositionPolicy policy)
     {
         if (column.supportsPredicates()) {
             Optional<ElasticsearchRemotePredicate> translated = translateDomain(column, domain);
             if (translated.isEmpty()) {
                 return ElasticsearchPredicateTranslation.unsupported(domain, Reason.UNSUPPORTED_DOMAIN);
+            }
+            if (!ElasticsearchPredicateComposer.isWithinRequestBudget(translated.orElseThrow(), policy)) {
+                return ElasticsearchPredicateTranslation.residual(domain, Reason.UNSUPPORTED_DOMAIN);
             }
             return ElasticsearchPredicateTranslation.exact(translated.orElseThrow(), Reason.EXACT_DOMAIN);
         }
@@ -140,6 +160,9 @@ final class ElasticsearchPredicatePushdownPlanner
         if (translated.isEmpty()) {
             return ElasticsearchPredicateTranslation.residual(domain, Reason.UNSUPPORTED_DOMAIN);
         }
+        if (!ElasticsearchPredicateComposer.isWithinRequestBudget(translated.orElseThrow(), policy)) {
+            return ElasticsearchPredicateTranslation.residual(domain, Reason.UNSUPPORTED_DOMAIN);
+        }
         return ElasticsearchPredicateTranslation.approximate(translated.orElseThrow(), Reason.FULL_TEXT_UNSAFE_APPROXIMATE);
     }
 
@@ -147,7 +170,8 @@ final class ElasticsearchPredicatePushdownPlanner
             ConnectorSession session,
             ConnectorExpression expression,
             Map<String, ColumnHandle> assignments,
-            FullTextPushdownMode fullTextMode)
+            FullTextPushdownMode fullTextMode,
+            ElasticsearchPredicateCompositionPolicy policy)
     {
         requireNonNull(expression, "expression is null");
         if (expression.equals(TRUE)) {
@@ -160,12 +184,12 @@ final class ElasticsearchPredicatePushdownPlanner
             }
             List<ElasticsearchPredicateTranslation<ConnectorExpression>> children = call.getArguments().stream()
                     .filter(argument -> !argument.equals(TRUE))
-                    .map(argument -> translateExpression(session, argument, assignments, fullTextMode))
+                    .map(argument -> translateExpression(session, argument, assignments, fullTextMode, policy))
                     .toList();
             if (children.isEmpty()) {
                 return ElasticsearchPredicateTranslation.noop(Reason.BOOLEAN_AND);
             }
-            return ElasticsearchPredicateComposer.and(expression, children);
+            return ElasticsearchPredicateComposer.and(expression, children, policy);
         }
 
         if (expression instanceof Call call && OR_FUNCTION_NAME.equals(call.getFunctionName())) {
@@ -179,9 +203,9 @@ final class ElasticsearchPredicatePushdownPlanner
                 return ElasticsearchPredicateTranslation.unsupported(expression, Reason.BOOLEAN_OR);
             }
             List<ElasticsearchPredicateTranslation<ConnectorExpression>> children = arguments.stream()
-                    .map(argument -> translateExpression(session, argument, assignments, fullTextMode))
+                    .map(argument -> translateExpression(session, argument, assignments, fullTextMode, policy))
                     .toList();
-            return ElasticsearchPredicateComposer.or(expression, children);
+            return ElasticsearchPredicateComposer.or(expression, children, policy);
         }
 
         if (expression instanceof Call call && NOT_FUNCTION_NAME.equals(call.getFunctionName())) {
@@ -192,27 +216,38 @@ final class ElasticsearchPredicatePushdownPlanner
                 session,
                 expression,
                 assignments,
-                fullTextMode);
+                fullTextMode,
+                policy);
         if (arrayTranslation.isPresent()) {
             return arrayTranslation.orElseThrow();
         }
 
-        Optional<ElasticsearchPredicateTranslation<ConnectorExpression>> regexpPredicate = ElasticsearchFullTextPredicateTranslator.translateRegexp(expression, assignments, fullTextMode);
+        Optional<ElasticsearchPredicateTranslation<ConnectorExpression>> regexpPredicate = ElasticsearchFullTextPredicateTranslator.translateRegexp(expression, assignments, fullTextMode, policy);
         if (regexpPredicate.isPresent()) {
             return regexpPredicate.orElseThrow();
         }
 
-        Optional<ElasticsearchPredicateTranslation<ConnectorExpression>> prefixPredicate = ElasticsearchFullTextPredicateTranslator.translatePrefix(expression, assignments, fullTextMode);
+        Optional<ElasticsearchPredicateTranslation<ConnectorExpression>> prefixPredicate = ElasticsearchFullTextPredicateTranslator.translatePrefix(expression, assignments, fullTextMode, policy);
         if (prefixPredicate.isPresent()) {
             return prefixPredicate.orElseThrow();
         }
 
-        Optional<ElasticsearchPredicateTranslation<ConnectorExpression>> likePredicate = ElasticsearchFullTextPredicateTranslator.translateLike(session, expression, assignments, fullTextMode);
+        Optional<ElasticsearchPredicateTranslation<ConnectorExpression>> likePredicate = ElasticsearchFullTextPredicateTranslator.translateLike(session, expression, assignments, fullTextMode, policy);
         if (likePredicate.isPresent()) {
             return likePredicate.orElseThrow();
         }
 
         return ElasticsearchPredicateTranslation.unsupported(expression, Reason.UNSUPPORTED_EXPRESSION);
+    }
+
+    private static Result localResult(Constraint constraint, List<Decision> decisions)
+    {
+        return new Result(
+                new Constraint(TupleDomain.all(), TRUE, constraint.getAssignments()),
+                Optional.empty(),
+                constraint.getSummary(),
+                constraint.getExpression().equals(TRUE) ? List.of() : List.of(constraint.getExpression()),
+                decisions);
     }
 
     /**

@@ -172,12 +172,13 @@ public class TestElasticsearchRemotePredicateTranslator
     }
 
     @Test
-    public void testNonTermDisjunctionUsesSharedBooleanClauseBudget()
+    public void testNonTermDisjunctionIsSemanticOnly()
     {
         List<ElasticsearchRemotePredicate> predicates = IntStream.range(0, 1_001)
                 .mapToObj(value -> (ElasticsearchRemotePredicate) new ElasticsearchRemotePredicate.MatchPhrase("message", "value-" + value))
                 .toList();
 
-        assertThat(ElasticsearchRemotePredicateTranslator.disjunction(predicates)).isEmpty();
+        assertThat(ElasticsearchRemotePredicateTranslator.disjunction(predicates))
+                .contains(new ElasticsearchRemotePredicate.Or(predicates));
     }
 }
