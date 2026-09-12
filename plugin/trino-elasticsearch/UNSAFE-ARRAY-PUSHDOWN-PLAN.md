@@ -575,11 +575,11 @@ Final implementation candidate and release identities:
 BASE SHA:              44d719ac2977c98532234f3002376551997f00ac
 IMPLEMENTATION SHA:    0b54aad215712f25eeb239901bd1356963b59e48
 REVIEW BASELINE SHA:   125548b22070f2bd4dfadeb57f9e78a0ad45287f
-FINAL CODE SHA:        8713b1cdcad0e67ede9c0eb2d2730baa160d7503
+PREVIOUS FINAL CODE SHA: 8713b1cdcad0e67ede9c0eb2d2730baa160d7503
 BRANCH:                feature/elasticsearch-unsafe-array-full-text
 PR:                    https://github.com/salingnh/trino/pull/25
-CI RUN:                34684378551 (green on FINAL CODE SHA)
-CHECK SUITE:           93953453750 (91/91 checks successful)
+PREVIOUS CI RUN:       34684378551 (green on PREVIOUS FINAL CODE SHA)
+PREVIOUS CHECK SUITE:  93953453750 (91/91 checks successful)
 ```
 
 The review-fix source tree is unchanged by the final branch history normalization: the rewritten
@@ -677,6 +677,61 @@ This A9 evidence supersedes the earlier pre-PR implementation-head note in this 
 production source was changed during A9 validation after the review fixes; only corrective source
 changes, commit-message normalization, and this evidence documentation are present in the final
 branch.
+
+### Corrective resource-admission closure
+
+**Status:** PASS — the independent resource-admission findings are fixed without changing the
+accepted P1.5 semantic surface.
+
+The corrective source commit is:
+
+```text
+FINAL CODE SHA:      7850ed4acd62ad2eb1ff454aff4a1793a93da0b5
+COMMIT:              Fix(elasticsearch): Bound predicate query complexity
+REVIEW BASELINE:     a7d0372482c8ff1156afef0a18bddc9a90160b39
+PR:                  https://github.com/salingnh/trino/pull/25
+```
+
+`ElasticsearchPredicateComposer` now owns the single tree-wide admission calculation. It counts
+all rendered query leaves across the complete predicate tree, counts `Terms` as one query leaf
+plus its individual term values, accounts for rendered boolean depth, and checks rendered request
+bytes only after structural limits pass. `And`, `Or`, `Not`, and `Enforced` follow the structure
+emitted by `ElasticsearchRemotePredicateQueryBuilder`; `Enforced` adds no rendered layer.
+
+`ElasticsearchRemotePredicateTranslator.disjunction()` remains semantic-only. Static planner,
+composer, metadata final composition, and full-text translation reject over-budget candidates by
+retaining the original SQL expression/domain locally. Dynamic filtering reuses the shared final
+admission calculation while retaining its own exact-only value, batch, and byte limits; ordinary
+resource rejection returns `Optional.empty()` and records `REJECTED` without throwing.
+
+Regression coverage proves nested leaf overage, below/at/above boundaries, `Terms` leaf/value
+independence, alternating boolean-depth rejection, planner residual fallback, final metadata
+composition fallback, static-plus-dynamic leaf/depth rejection, and unchanged exact/full-text
+translator behavior.
+
+Local corrective validation:
+
+```text
+Focused resource/planner/metadata suite: BUILD SUCCESS; 65 tests, 0 failures, 0 errors, 0 skipped
+Complete focused predicate/resource suite: BUILD SUCCESS; 149 tests, 0 failures, 0 errors, 0 skipped
+AirStyle: BUILD SUCCESS; all 144 files formatted; checkstyle 0 violations
+Serial full module: BUILD SUCCESS; 1,584 tests, 0 failures, 0 errors, 682 skipped
+Error Prone clean verify: BUILD SUCCESS; 1,584 tests, 0 failures, 0 errors, 682 skipped
+Explicit ES7/ES8 connector/PIT suites: BUILD SUCCESS; 1,312 tests, 0 failures, 0 errors, 680 skipped
+```
+
+Exact-SHA GitHub evidence for the corrective code:
+
+```text
+WORKFLOW:      https://github.com/salingnh/trino/actions/runs/34705217944
+RESULT:        success
+HEAD SHA:      7850ed4acd62ad2eb1ff454aff4a1793a93da0b5
+CHECK SUITE:   94006115070 (94/94 GitHub Actions checks successful)
+```
+
+The documentation commit that records this evidence changes the PR head but not the corrective
+code SHA. Its exact PR-head SHA and corresponding CI run are recorded in the final completion
+report and PR #25 after that documentation commit is pushed.
 
 This document is an implementation handoff for extending `full_text_pushdown_mode=UNSAFE` to primitive Elasticsearch arrays, especially `ARRAY(VARCHAR)` backed by analyzed `text` fields.
 

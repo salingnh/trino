@@ -664,16 +664,32 @@ Release evidence:
 BASE SHA:            44d719ac2977c98532234f3002376551997f00ac
 IMPLEMENTATION SHA:  0b54aad215712f25eeb239901bd1356963b59e48
 REVIEW BASELINE SHA: 125548b22070f2bd4dfadeb57f9e78a0ad45287f
-FINAL CODE SHA:      8713b1cdcad0e67ede9c0eb2d2730baa160d7503
+PREVIOUS FINAL CODE SHA: 8713b1cdcad0e67ede9c0eb2d2730baa160d7503
 PR:                  https://github.com/salingnh/trino/pull/25
-CI RUN:              34684378551 (green on FINAL CODE SHA)
-CHECK SUITE:         93953453750 (91/91 checks successful)
+PREVIOUS CI RUN:     34684378551 (green on PREVIOUS FINAL CODE SHA)
+PREVIOUS CHECK SUITE: 93953453750 (91/91 checks successful)
 ```
 
 The final validation record, including review-fix resource ownership, ES7/ES8 results, serial
 aggregate counts, PIT 404 baseline comparison, exact-SHA CI, and independent review, is in
 `UNSAFE-ARRAY-PUSHDOWN-PLAN.md`. The final branch head after this documentation-only closure is
 validated separately by the exact-SHA CI recorded in PR #25 and the completion report.
+
+Corrective resource-admission closure:
+
+```text
+FINAL CODE SHA:      7850ed4acd62ad2eb1ff454aff4a1793a93da0b5
+CI RUN:              34705217944 (success on CORRECTIVE CODE SHA)
+CHECK SUITE:         94006115070 (94/94 GitHub Actions checks successful)
+```
+
+The corrective hardening adds one authoritative tree-wide resource calculation to the permanent
+predicate composer: total rendered query leaves, independent `Terms` value counting, rendered
+boolean depth, and rendered request bytes. Over-budget static, full-text, and final metadata
+compositions remain local; dynamic-filter rejection remains exact-only, fail-open, and diagnostic
+`REJECTED`. No new SQL pushdown capability or P1.5 semantic boundary was introduced. The exact
+documentation-bearing PR head and its CI result are recorded in the final completion report and
+PR #25 after this evidence update is pushed.
 
 # P3 — Optional SPI Extensions
 
