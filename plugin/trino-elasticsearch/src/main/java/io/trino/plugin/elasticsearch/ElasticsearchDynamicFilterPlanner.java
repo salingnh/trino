@@ -179,6 +179,9 @@ final class ElasticsearchDynamicFilterPlanner
         }
 
         Optional<ElasticsearchRemotePredicate> valuesPredicate = disjunction(batches);
+        if (valuesPredicate.isEmpty()) {
+            return Optional.empty();
+        }
         if (!domain.isNullAllowed()) {
             return valuesPredicate;
         }

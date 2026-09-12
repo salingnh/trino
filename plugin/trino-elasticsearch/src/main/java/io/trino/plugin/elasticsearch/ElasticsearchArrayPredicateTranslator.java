@@ -71,19 +71,30 @@ final class ElasticsearchArrayPredicateTranslator
             Map<String, ColumnHandle> assignments,
             FullTextPushdownMode fullTextMode)
     {
+        return translate(session, expression, assignments, fullTextMode, ElasticsearchPredicateCompositionPolicy.DEFAULT);
+    }
+
+    public static Optional<ElasticsearchPredicateTranslation<ConnectorExpression>> translate(
+            ConnectorSession session,
+            ConnectorExpression expression,
+            Map<String, ColumnHandle> assignments,
+            FullTextPushdownMode fullTextMode,
+            ElasticsearchPredicateCompositionPolicy policy)
+    {
         requireNonNull(session, "session is null");
         requireNonNull(expression, "expression is null");
         requireNonNull(assignments, "assignments is null");
         requireNonNull(fullTextMode, "fullTextMode is null");
+        requireNonNull(policy, "policy is null");
 
         if (!(expression instanceof Call call)) {
             return Optional.empty();
         }
 
         return switch (call.getFunctionName().getName()) {
-            case "contains" -> Optional.of(translateContains(call, assignments, fullTextMode));
-            case "arrays_overlap" -> Optional.of(translateArraysOverlap(call, assignments, fullTextMode));
-            case "any_match" -> Optional.of(translateAnyMatch(session, call, assignments, fullTextMode));
+            case "contains" -> Optional.of(translateContains(call, assignments, fullTextMode, policy));
+            case "arrays_overlap" -> Optional.of(translateArraysOverlap(call, assignments, fullTextMode, policy));
+            case "any_match" -> Optional.of(translateAnyMatch(session, call, assignments, fullTextMode, policy));
             default -> Optional.empty();
         };
     }
@@ -103,7 +114,8 @@ final class ElasticsearchArrayPredicateTranslator
     private static ElasticsearchPredicateTranslation<ConnectorExpression> translateContains(
             Call call,
             Map<String, ColumnHandle> assignments,
-            FullTextPushdownMode fullTextMode)
+            FullTextPushdownMode fullTextMode,
+            ElasticsearchPredicateCompositionPolicy policy)
     {
         if (call.getArguments().size() != 2
                 || !(call.getArguments().get(0) instanceof Variable variable)
@@ -125,13 +137,15 @@ final class ElasticsearchArrayPredicateTranslator
                 List.of(ElasticsearchRemotePredicateTranslator.getValue(elementType.orElseThrow(), constant.getValue())),
                 fullTextMode,
                 EXACT_ARRAY,
-                APPROXIMATE_ARRAY);
+                APPROXIMATE_ARRAY,
+                policy);
     }
 
     private static ElasticsearchPredicateTranslation<ConnectorExpression> translateArraysOverlap(
             Call call,
             Map<String, ColumnHandle> assignments,
-            FullTextPushdownMode fullTextMode)
+            FullTextPushdownMode fullTextMode,
+            ElasticsearchPredicateCompositionPolicy policy)
     {
         if (call.getArguments().size() != 2
                 || !(call.getArguments().get(0) instanceof Variable variable)) {
@@ -152,7 +166,8 @@ final class ElasticsearchArrayPredicateTranslator
                         values,
                         fullTextMode,
                         EXACT_ARRAY,
-                        APPROXIMATE_ARRAY))
+                        APPROXIMATE_ARRAY,
+                        policy))
                 .orElseGet(() -> ElasticsearchPredicateTranslation.unsupported(call, UNSUPPORTED_EXPRESSION));
     }
 
@@ -160,7 +175,8 @@ final class ElasticsearchArrayPredicateTranslator
             ConnectorSession session,
             Call call,
             Map<String, ColumnHandle> assignments,
-            FullTextPushdownMode fullTextMode)
+            FullTextPushdownMode fullTextMode,
+            ElasticsearchPredicateCompositionPolicy policy)
     {
         if (call.getArguments().size() != 2
                 || !(call.getArguments().get(0) instanceof Variable arrayVariable)
@@ -191,7 +207,8 @@ final class ElasticsearchArrayPredicateTranslator
                     lambdaVariable,
                     column,
                     elementType.orElseThrow(),
-                    fullTextMode);
+                    fullTextMode,
+                    policy);
         }
 
         return exactOrUnsupported(
@@ -207,7 +224,8 @@ final class ElasticsearchArrayPredicateTranslator
             Variable lambdaVariable,
             ElasticsearchColumnHandle column,
             Type elementType,
-            FullTextPushdownMode fullTextMode)
+            FullTextPushdownMode fullTextMode,
+            ElasticsearchPredicateCompositionPolicy policy)
     {
         if (!(body instanceof Call call)) {
             return ElasticsearchPredicateTranslation.unsupported(source, UNSUPPORTED_EXPRESSION);
@@ -225,9 +243,10 @@ final class ElasticsearchArrayPredicateTranslator
                             lambdaVariable,
                             column,
                             elementType,
-                            fullTextMode))
+                            fullTextMode,
+                            policy))
                     .toList();
-            return ElasticsearchPredicateComposer.or(source, branches);
+            return ElasticsearchPredicateComposer.or(source, branches, policy);
         }
 
         Optional<ElasticsearchPredicateTranslation<ConnectorExpression>> like = ElasticsearchFullTextPredicateTranslator.translateLikeElement(
@@ -237,7 +256,8 @@ final class ElasticsearchArrayPredicateTranslator
                 lambdaVariable,
                 column,
                 fullTextMode,
-                APPROXIMATE_ANY_MATCH);
+                APPROXIMATE_ANY_MATCH,
+                policy);
         if (like.isPresent()) {
             return like.orElseThrow();
         }
@@ -248,7 +268,8 @@ final class ElasticsearchArrayPredicateTranslator
                 lambdaVariable,
                 column,
                 fullTextMode,
-                APPROXIMATE_ANY_MATCH);
+                APPROXIMATE_ANY_MATCH,
+                policy);
         if (startsWith.isPresent()) {
             return startsWith.orElseThrow();
         }
@@ -259,7 +280,8 @@ final class ElasticsearchArrayPredicateTranslator
                 lambdaVariable,
                 column,
                 fullTextMode,
-                APPROXIMATE_ANY_MATCH);
+                APPROXIMATE_ANY_MATCH,
+                policy);
         if (regexp.isPresent()) {
             return regexp.orElseThrow();
         }
@@ -280,7 +302,8 @@ final class ElasticsearchArrayPredicateTranslator
                             List.of(ElasticsearchRemotePredicateTranslator.getValue(elementType, constant.getValue())),
                             fullTextMode,
                             EXACT_ANY_MATCH,
-                            APPROXIMATE_ANY_MATCH);
+                            APPROXIMATE_ANY_MATCH,
+                            policy);
                 }
             }
         }
@@ -296,7 +319,8 @@ final class ElasticsearchArrayPredicateTranslator
                             values,
                             fullTextMode,
                             EXACT_ANY_MATCH,
-                            APPROXIMATE_ANY_MATCH))
+                            APPROXIMATE_ANY_MATCH,
+                            policy))
                     .orElseGet(() -> ElasticsearchPredicateTranslation.unsupported(source, UNSUPPORTED_EXPRESSION));
         }
 
@@ -310,7 +334,8 @@ final class ElasticsearchArrayPredicateTranslator
             List<Object> values,
             FullTextPushdownMode fullTextMode,
             ElasticsearchPredicateTranslation.Reason exactReason,
-            ElasticsearchPredicateTranslation.Reason approximateReason)
+            ElasticsearchPredicateTranslation.Reason approximateReason,
+            ElasticsearchPredicateCompositionPolicy policy)
     {
         if (values.isEmpty()) {
             return ElasticsearchPredicateTranslation.unsupported(source, UNSUPPORTED_EXPRESSION);
@@ -320,27 +345,27 @@ final class ElasticsearchArrayPredicateTranslator
             ElasticsearchRemotePredicate predicate = values.size() == 1
                     ? new ElasticsearchRemotePredicate.Term(column.predicateName(), values.getFirst())
                     : new ElasticsearchRemotePredicate.Terms(column.predicateName(), values);
+            if (values.size() > policy.maxTermsValues() || !ElasticsearchPredicateComposer.isWithinRequestBudget(predicate, policy)) {
+                return ElasticsearchPredicateTranslation.residual(source, UNSUPPORTED_EXPRESSION);
+            }
             return ElasticsearchPredicateTranslation.exact(predicate, exactReason);
         }
 
         if (fullTextMode == FullTextPushdownMode.UNSAFE && isAnalyzedTextArray(column) && elementType instanceof VarcharType) {
-            ElasticsearchPredicateCompositionPolicy policy = ElasticsearchPredicateCompositionPolicy.DEFAULT;
             if (values.size() > policy.maxBooleanClauses()) {
-                return ElasticsearchPredicateTranslation.unsupported(source, UNSUPPORTED_EXPRESSION);
+                return ElasticsearchPredicateTranslation.residual(source, UNSUPPORTED_EXPRESSION);
             }
             List<ElasticsearchPredicateTranslation<ConnectorExpression>> predicates = values.stream()
-                    .map(value -> ElasticsearchPredicateTranslation.<ConnectorExpression>approximate(
+                    .map(value -> ElasticsearchFullTextPredicateTranslator.approximateWithinBudget(
+                            source,
                             new ElasticsearchRemotePredicate.MatchPhrase(column.predicateName(), (String) value),
-                            approximateReason))
+                            approximateReason,
+                            policy))
                     .toList();
             if (predicates.size() == 1) {
-                ElasticsearchRemotePredicate predicate = predicates.getFirst().remotePredicate().orElseThrow();
-                if (!ElasticsearchPredicateComposer.isWithinRequestBudget(predicate, policy)) {
-                    return ElasticsearchPredicateTranslation.unsupported(source, UNSUPPORTED_EXPRESSION);
-                }
                 return predicates.getFirst();
             }
-            return ElasticsearchPredicateComposer.or(source, predicates);
+            return ElasticsearchPredicateComposer.or(source, predicates, policy);
         }
 
         return ElasticsearchPredicateTranslation.unsupported(source, UNSUPPORTED_EXPRESSION);

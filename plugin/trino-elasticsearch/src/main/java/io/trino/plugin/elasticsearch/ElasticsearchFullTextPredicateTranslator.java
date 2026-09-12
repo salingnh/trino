@@ -64,6 +64,17 @@ final class ElasticsearchFullTextPredicateTranslator
             Map<String, ColumnHandle> assignments,
             FullTextPushdownMode fullTextMode)
     {
+        return translateLike(session, expression, assignments, fullTextMode, ElasticsearchPredicateCompositionPolicy.DEFAULT);
+    }
+
+    static Optional<ElasticsearchPredicateTranslation<ConnectorExpression>> translateLike(
+            ConnectorSession session,
+            ConnectorExpression expression,
+            Map<String, ColumnHandle> assignments,
+            FullTextPushdownMode fullTextMode,
+            ElasticsearchPredicateCompositionPolicy policy)
+    {
+        requireNonNull(policy, "policy is null");
         if (!(expression instanceof Call call) || !ElasticsearchMetadata.isSupportedLikeCall(call)) {
             return Optional.empty();
         }
@@ -83,7 +94,8 @@ final class ElasticsearchFullTextPredicateTranslator
                 call,
                 column,
                 fullTextMode,
-                FULL_TEXT_UNSAFE_APPROXIMATE));
+                FULL_TEXT_UNSAFE_APPROXIMATE,
+                policy));
     }
 
     static Optional<ElasticsearchPredicateTranslation<ConnectorExpression>> translateLikeElement(
@@ -95,6 +107,27 @@ final class ElasticsearchFullTextPredicateTranslator
             FullTextPushdownMode fullTextMode,
             Reason approximateReason)
     {
+        return translateLikeElement(
+                session,
+                source,
+                call,
+                element,
+                column,
+                fullTextMode,
+                approximateReason,
+                ElasticsearchPredicateCompositionPolicy.DEFAULT);
+    }
+
+    static Optional<ElasticsearchPredicateTranslation<ConnectorExpression>> translateLikeElement(
+            ConnectorSession session,
+            ConnectorExpression source,
+            Call call,
+            Variable element,
+            ElasticsearchColumnHandle column,
+            FullTextPushdownMode fullTextMode,
+            Reason approximateReason,
+            ElasticsearchPredicateCompositionPolicy policy)
+    {
         requireNonNull(session, "session is null");
         requireNonNull(source, "source is null");
         requireNonNull(call, "call is null");
@@ -102,6 +135,7 @@ final class ElasticsearchFullTextPredicateTranslator
         requireNonNull(column, "column is null");
         requireNonNull(fullTextMode, "fullTextMode is null");
         requireNonNull(approximateReason, "approximateReason is null");
+        requireNonNull(policy, "policy is null");
 
         if (!LIKE_FUNCTION_NAME.equals(call.getFunctionName())) {
             return Optional.empty();
@@ -111,7 +145,7 @@ final class ElasticsearchFullTextPredicateTranslator
                 || !isAnalyzedTextOnly(column)) {
             return Optional.of(ElasticsearchPredicateTranslation.unsupported(source, UNSUPPORTED_EXPRESSION));
         }
-        return Optional.of(translateLikeCall(session, source, call, column, fullTextMode, approximateReason));
+        return Optional.of(translateLikeCall(session, source, call, column, fullTextMode, approximateReason, policy));
     }
 
     static Optional<ElasticsearchPredicateTranslation<ConnectorExpression>> translateRegexp(
@@ -119,6 +153,16 @@ final class ElasticsearchFullTextPredicateTranslator
             Map<String, ColumnHandle> assignments,
             FullTextPushdownMode fullTextMode)
     {
+        return translateRegexp(expression, assignments, fullTextMode, ElasticsearchPredicateCompositionPolicy.DEFAULT);
+    }
+
+    static Optional<ElasticsearchPredicateTranslation<ConnectorExpression>> translateRegexp(
+            ConnectorExpression expression,
+            Map<String, ColumnHandle> assignments,
+            FullTextPushdownMode fullTextMode,
+            ElasticsearchPredicateCompositionPolicy policy)
+    {
+        requireNonNull(policy, "policy is null");
         if (!(expression instanceof Call call) || !call.getFunctionName().getName().equals("regexp_like")) {
             return Optional.empty();
         }
@@ -132,7 +176,7 @@ final class ElasticsearchFullTextPredicateTranslator
         if (!(assigned instanceof ElasticsearchColumnHandle column) || !(column.type() instanceof VarcharType)) {
             return Optional.of(ElasticsearchPredicateTranslation.residual(expression, UNSUPPORTED_EXPRESSION));
         }
-        return Optional.of(translateRegexpCall(expression, call, column, fullTextMode, FULL_TEXT_UNSAFE_APPROXIMATE));
+        return Optional.of(translateRegexpCall(expression, call, column, fullTextMode, FULL_TEXT_UNSAFE_APPROXIMATE, policy));
     }
 
     static Optional<ElasticsearchPredicateTranslation<ConnectorExpression>> translateRegexpElement(
@@ -143,12 +187,32 @@ final class ElasticsearchFullTextPredicateTranslator
             FullTextPushdownMode fullTextMode,
             Reason approximateReason)
     {
+        return translateRegexpElement(
+                source,
+                call,
+                element,
+                column,
+                fullTextMode,
+                approximateReason,
+                ElasticsearchPredicateCompositionPolicy.DEFAULT);
+    }
+
+    static Optional<ElasticsearchPredicateTranslation<ConnectorExpression>> translateRegexpElement(
+            ConnectorExpression source,
+            Call call,
+            Variable element,
+            ElasticsearchColumnHandle column,
+            FullTextPushdownMode fullTextMode,
+            Reason approximateReason,
+            ElasticsearchPredicateCompositionPolicy policy)
+    {
         requireNonNull(source, "source is null");
         requireNonNull(call, "call is null");
         requireNonNull(element, "element is null");
         requireNonNull(column, "column is null");
         requireNonNull(fullTextMode, "fullTextMode is null");
         requireNonNull(approximateReason, "approximateReason is null");
+        requireNonNull(policy, "policy is null");
 
         if (!call.getFunctionName().getName().equals("regexp_like")) {
             return Optional.empty();
@@ -156,7 +220,7 @@ final class ElasticsearchFullTextPredicateTranslator
         if (!isLambdaElement(call, element) || !isAnalyzedTextOnly(column)) {
             return Optional.of(ElasticsearchPredicateTranslation.unsupported(source, UNSUPPORTED_EXPRESSION));
         }
-        return Optional.of(translateRegexpCall(source, call, column, fullTextMode, approximateReason));
+        return Optional.of(translateRegexpCall(source, call, column, fullTextMode, approximateReason, policy));
     }
 
     static Optional<ElasticsearchPredicateTranslation<ConnectorExpression>> translatePrefix(
@@ -164,6 +228,16 @@ final class ElasticsearchFullTextPredicateTranslator
             Map<String, ColumnHandle> assignments,
             FullTextPushdownMode fullTextMode)
     {
+        return translatePrefix(expression, assignments, fullTextMode, ElasticsearchPredicateCompositionPolicy.DEFAULT);
+    }
+
+    static Optional<ElasticsearchPredicateTranslation<ConnectorExpression>> translatePrefix(
+            ConnectorExpression expression,
+            Map<String, ColumnHandle> assignments,
+            FullTextPushdownMode fullTextMode,
+            ElasticsearchPredicateCompositionPolicy policy)
+    {
+        requireNonNull(policy, "policy is null");
         if (!(expression instanceof Call call)) {
             return Optional.empty();
         }
@@ -185,7 +259,8 @@ final class ElasticsearchFullTextPredicateTranslator
                     column,
                     prefix,
                     fullTextMode,
-                    FULL_TEXT_UNSAFE_APPROXIMATE));
+                    FULL_TEXT_UNSAFE_APPROXIMATE,
+                    policy));
         }
 
         if (!EQUAL_OPERATOR_FUNCTION_NAME.equals(call.getFunctionName()) || arguments.size() != 2) {
@@ -225,12 +300,32 @@ final class ElasticsearchFullTextPredicateTranslator
             FullTextPushdownMode fullTextMode,
             Reason approximateReason)
     {
+        return translateStartsWithElement(
+                source,
+                call,
+                element,
+                column,
+                fullTextMode,
+                approximateReason,
+                ElasticsearchPredicateCompositionPolicy.DEFAULT);
+    }
+
+    static Optional<ElasticsearchPredicateTranslation<ConnectorExpression>> translateStartsWithElement(
+            ConnectorExpression source,
+            Call call,
+            Variable element,
+            ElasticsearchColumnHandle column,
+            FullTextPushdownMode fullTextMode,
+            Reason approximateReason,
+            ElasticsearchPredicateCompositionPolicy policy)
+    {
         requireNonNull(source, "source is null");
         requireNonNull(call, "call is null");
         requireNonNull(element, "element is null");
         requireNonNull(column, "column is null");
         requireNonNull(fullTextMode, "fullTextMode is null");
         requireNonNull(approximateReason, "approximateReason is null");
+        requireNonNull(policy, "policy is null");
 
         if (!call.getFunctionName().getName().equals("starts_with")) {
             return Optional.empty();
@@ -243,7 +338,7 @@ final class ElasticsearchFullTextPredicateTranslator
                 || !isAnalyzedTextOnly(column)) {
             return Optional.of(ElasticsearchPredicateTranslation.unsupported(source, UNSUPPORTED_EXPRESSION));
         }
-        return Optional.of(translateStartsWith(source, column, prefix, fullTextMode, approximateReason));
+        return Optional.of(translateStartsWith(source, column, prefix, fullTextMode, approximateReason, policy));
     }
 
     static boolean isAnalyzedTextOnly(ElasticsearchColumnHandle column)
@@ -268,7 +363,8 @@ final class ElasticsearchFullTextPredicateTranslator
             Call call,
             ElasticsearchColumnHandle column,
             FullTextPushdownMode fullTextMode,
-            Reason approximateReason)
+            Reason approximateReason,
+            ElasticsearchPredicateCompositionPolicy policy)
     {
         List<ConnectorExpression> arguments = call.getArguments();
         if (arguments.size() < 2
@@ -307,26 +403,32 @@ final class ElasticsearchFullTextPredicateTranslator
         if (rewrite.isPresent()) {
             ElasticsearchExpressionRewrite translated = rewrite.orElseThrow();
             return switch (translated.queryType()) {
-                case MATCH_PHRASE -> ElasticsearchPredicateTranslation.approximate(
+                case MATCH_PHRASE -> approximateWithinBudget(
+                        source,
                         new ElasticsearchRemotePredicate.MatchPhrase(translated.column().remoteName(), translated.value()),
-                        approximateReason);
+                        approximateReason,
+                        policy);
             };
         }
 
         Optional<String> prefix = ElasticsearchMetadata.likePrefix(pattern, escape);
         if (prefix.isPresent()) {
-            return ElasticsearchPredicateTranslation.approximate(
+            return approximateWithinBudget(
+                    source,
                     new ElasticsearchRemotePredicate.MatchPhrasePrefix(column.remoteName(), prefix.orElseThrow()),
-                    approximateReason);
+                    approximateReason,
+                    policy);
         }
 
         if (patternSpansTokens(pattern)) {
             return ElasticsearchPredicateTranslation.unsupported(source, UNSUPPORTED_EXPRESSION);
         }
 
-        return ElasticsearchPredicateTranslation.approximate(
+        return approximateWithinBudget(
+                source,
                 new ElasticsearchRemotePredicate.Regexp(column.remoteName(), ElasticsearchMetadata.likeToRegexp(pattern, escape)),
-                approximateReason);
+                approximateReason,
+                policy);
     }
 
     private static ElasticsearchPredicateTranslation<ConnectorExpression> translateRegexpCall(
@@ -334,7 +436,8 @@ final class ElasticsearchFullTextPredicateTranslator
             Call call,
             ElasticsearchColumnHandle column,
             FullTextPushdownMode fullTextMode,
-            Reason approximateReason)
+            Reason approximateReason,
+            ElasticsearchPredicateCompositionPolicy policy)
     {
         if (fullTextMode == DISABLED) {
             return ElasticsearchPredicateTranslation.residual(source, FULL_TEXT_DISABLED);
@@ -359,6 +462,9 @@ final class ElasticsearchFullTextPredicateTranslator
         }
 
         ElasticsearchRemotePredicate predicate = new ElasticsearchRemotePredicate.Regexp(column.predicateName(), translation.pattern());
+        if (!ElasticsearchPredicateComposer.isWithinRequestBudget(predicate, policy)) {
+            return ElasticsearchPredicateTranslation.residual(source, UNSUPPORTED_EXPRESSION);
+        }
         if (fullTextMode == SAFE) {
             return ElasticsearchPredicateTranslation.prefilter(predicate, source, FULL_TEXT_SAFE_PREFILTER);
         }
@@ -370,7 +476,8 @@ final class ElasticsearchFullTextPredicateTranslator
             ElasticsearchColumnHandle column,
             Slice prefix,
             FullTextPushdownMode fullTextMode,
-            Reason approximateReason)
+            Reason approximateReason,
+            ElasticsearchPredicateCompositionPolicy policy)
     {
         if (supportsExactLikePushdown(column)) {
             return ElasticsearchPredicateTranslation.exact(
@@ -386,9 +493,23 @@ final class ElasticsearchFullTextPredicateTranslator
         if (fullTextMode == SAFE) {
             return ElasticsearchPredicateTranslation.residual(source, FULL_TEXT_SAFE_UNPROVEN);
         }
-        return ElasticsearchPredicateTranslation.approximate(
+        return approximateWithinBudget(
+                source,
                 new ElasticsearchRemotePredicate.MatchPhrasePrefix(column.remoteName(), prefix.toStringUtf8()),
-                approximateReason);
+                approximateReason,
+                policy);
+    }
+
+    static <R> ElasticsearchPredicateTranslation<R> approximateWithinBudget(
+            R source,
+            ElasticsearchRemotePredicate predicate,
+            Reason reason,
+            ElasticsearchPredicateCompositionPolicy policy)
+    {
+        if (!ElasticsearchPredicateComposer.isWithinRequestBudget(predicate, policy)) {
+            return ElasticsearchPredicateTranslation.residual(source, UNSUPPORTED_EXPRESSION);
+        }
+        return ElasticsearchPredicateTranslation.approximate(predicate, reason);
     }
 
     private static boolean supportsExactLikePushdown(ElasticsearchColumnHandle column)

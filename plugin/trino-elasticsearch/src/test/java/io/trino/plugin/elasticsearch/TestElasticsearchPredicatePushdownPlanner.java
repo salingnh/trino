@@ -303,6 +303,55 @@ public class TestElasticsearchPredicatePushdownPlanner
                 APPROXIMATE));
     }
 
+    @Test
+    public void testOversizedUnsafeAnalyzedFullTextLeavesRemainLocal()
+    {
+        ElasticsearchColumnHandle column = analyzedTextColumn();
+        ElasticsearchPredicateCompositionPolicy policy = new ElasticsearchPredicateCompositionPolicy(10, 10, 10, 128);
+
+        List<Call> expressions = List.of(
+                like("value", "x".repeat(100)),
+                new Call(
+                        BOOLEAN,
+                        new FunctionName("starts_with"),
+                        List.of(new Variable("value", VARCHAR), new Constant(utf8Slice("x".repeat(100)), VARCHAR))),
+                new Call(
+                        BOOLEAN,
+                        new FunctionName("regexp_like"),
+                        List.of(new Variable("value", VARCHAR), new Constant(utf8Slice("x".repeat(100)), VARCHAR))));
+
+        for (Call expression : expressions) {
+            ElasticsearchPredicatePushdownPlanner.Result result = ElasticsearchPredicatePushdownPlanner.plan(
+                    TestingConnectorSession.builder().build(),
+                    expressionConstraint(column, expression),
+                    UNSAFE,
+                    policy);
+
+            assertThat(result.remotePredicate()).isEmpty();
+            assertThat(result.remainingConstraint().getExpression()).isEqualTo(TRUE);
+            assertThat(result.residualExpressions()).containsExactly(expression);
+        }
+    }
+
+    @Test
+    public void testUnderBudgetUnsafeAnalyzedFullTextLeafStillPushes()
+    {
+        ElasticsearchColumnHandle column = analyzedTextColumn();
+        Call expression = like("value", "Alpha%");
+
+        ElasticsearchPredicatePushdownPlanner.Result result = ElasticsearchPredicatePushdownPlanner.plan(
+                TestingConnectorSession.builder().build(),
+                expressionConstraint(column, expression),
+                UNSAFE,
+                new ElasticsearchPredicateCompositionPolicy(10, 10, 10, 4_096));
+
+        assertThat(result.remotePredicate()).contains(new ElasticsearchRemotePredicate.Enforced(
+                new ElasticsearchRemotePredicate.MatchPhrasePrefix("value", "Alpha"),
+                APPROXIMATE));
+        assertThat(result.remainingConstraint().getExpression()).isEqualTo(TRUE);
+        assertThat(result.residualExpressions()).isEmpty();
+    }
+
     private static Constraint expressionConstraint(ElasticsearchColumnHandle column, Call expression)
     {
         return new Constraint(

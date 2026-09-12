@@ -187,6 +187,17 @@ public class TestElasticsearchDynamicFilterPlanner
     }
 
     @Test
+    public void testNullableQueryByteBudgetFallsBackWithoutThrowing()
+    {
+        ElasticsearchPushdownDiagnostics diagnostics = new ElasticsearchPushdownDiagnostics();
+        ElasticsearchDynamicFilterPlanner planner = new ElasticsearchDynamicFilterPlanner(100, 100, 16, diagnostics);
+        Domain domain = Domain.create(ValueSet.copyOf(INTEGER, values(10)), true);
+
+        assertThat(planner.plan(TupleDomain.withColumnDomains(Map.of(ID, domain)))).isEmpty();
+        assertThat(diagnostics.getDynamicFilterOutcomes()).containsEntry("REJECTED", 1L);
+    }
+
+    @Test
     public void testAnalyzedTextAlwaysFallsBack()
     {
         ElasticsearchDynamicFilterPlanner planner = new ElasticsearchDynamicFilterPlanner();

@@ -204,10 +204,7 @@ final class ElasticsearchRemotePredicateTranslator
 
     public static Optional<ElasticsearchRemotePredicate> disjunction(List<ElasticsearchRemotePredicate> predicates)
     {
-        return ElasticsearchRemotePredicateNormalizer.or(predicates)
-                .filter(predicate -> ElasticsearchPredicateComposer.isWithinRequestBudget(
-                        predicate,
-                        ElasticsearchPredicateCompositionPolicy.DEFAULT));
+        return ElasticsearchRemotePredicateNormalizer.or(predicates);
     }
 
     public static ElasticsearchTableHandle withRemotePredicate(ElasticsearchTableHandle table, Optional<ElasticsearchRemotePredicate> predicate)
