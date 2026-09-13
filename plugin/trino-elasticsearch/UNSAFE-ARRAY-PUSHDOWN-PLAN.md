@@ -686,7 +686,7 @@ accepted P1.5 semantic surface.
 The corrective source commit is:
 
 ```text
-FINAL CODE SHA:      7850ed4acd62ad2eb1ff454aff4a1793a93da0b5
+RESOURCE CORRECTION CODE SHA: 7850ed4acd62ad2eb1ff454aff4a1793a93da0b5
 COMMIT:              Fix(elasticsearch): Bound predicate query complexity
 REVIEW BASELINE:     a7d0372482c8ff1156afef0a18bddc9a90160b39
 PR:                  https://github.com/salingnh/trino/pull/25
@@ -732,6 +732,67 @@ CHECK SUITE:   94006115070 (94/94 GitHub Actions checks successful)
 The documentation commit that records this evidence changes the PR head but not the corrective
 code SHA. Its exact PR-head SHA and corresponding CI run are recorded in the final completion
 report and PR #25 after that documentation commit is pushed.
+
+### Domain review corrections — 2026-09-13
+
+```text
+REVIEW BASE SHA:     f0899ab7a95ebd419d2d7fdb206d875ab460a009
+FINAL CODE SHA:      e6cd6732f5724e06feb98fe8719a00893d210dbf
+COMMIT:             Fix(elasticsearch): Preserve array and prefix domains
+PR:                 https://github.com/salingnh/trino/pull/25
+```
+
+The scalar analyzed-domain path now requires `VarcharType`. A discrete domain for an entire
+`ARRAY(VARCHAR)` remains local in all three full-text modes; it is never translated as element
+membership. The existing synthetic-prefix-domain normalization now recognizes scalar
+`starts_with` as well as LIKE. It removes only the matching prefix range, with the existing
+single-conjunct-on-column guard. Independent ranges and SAFE/DISABLED behavior remain unchanged.
+If resource admission rejects the translation, the original expression remains a Trino residual.
+
+RED evidence on the review baseline: the two planner regression tests failed, and the concrete
+ES7 SQL regressions reproduced both `Unhandled remote predicate type: array(varchar)` and the
+missing analyzer-matched row for `starts_with(name, 'ngô văn')` against `NGÔ VĂN`.
+
+GREEN regression command (inside the existing source-mounted Compose Maven service):
+
+```bash
+docker compose exec -T maven ./mvnw -nsu -Dmaven.gitcommitid.skip=true \
+  -Djunit.jupiter.execution.parallel.enabled=false -pl :trino-elasticsearch \
+  airstyle:format test \
+  '-Dtest=TestElasticsearchPredicatePushdownPlanner,TestElasticsearch7ConnectorTest#testUnsafeLikePushdownUsesTextAnalyzer+testUnsafeAnalyzedArraySemanticBoundaries,TestElasticsearch8ConnectorTest#testUnsafeLikePushdownUsesTextAnalyzer+testUnsafeAnalyzedArraySemanticBoundaries'
+```
+
+Result: **22 tests, 0 failures, 0 errors, 0 skipped**. This includes SQL result and plan assertions
+on both ES7 and ES8, whole-array equality with duplicate values in every mode, explicit
+APPROXIMATE enforcement, synthetic-range removal, independent-range preservation, and
+over-budget residual fallback. The complete focused predicate/resource suite also passed:
+**152 tests, 0 failures, 0 errors, 0 skipped**.
+
+Final clean verification command:
+
+```bash
+docker compose exec -T maven ./mvnw -nsu -Dmaven.gitcommitid.skip=true \
+  -Djunit.jupiter.execution.parallel.enabled=false \
+  -Djunit.jupiter.execution.parallel.mode.default=same_thread \
+  -Djunit.jupiter.execution.parallel.mode.classes.default=same_thread \
+  -pl :trino-elasticsearch -Perrorprone-compiler clean verify
+```
+
+Final clean verification result: **BUILD SUCCESS; 1,587 tests, 0 failures, 0 errors, 682 skipped**.
+This includes all four ES7/ES8 connector/PIT classes, each with 328 tests, 0 failures, 0 errors,
+and 170 skipped. AirStyle passed for all 144 files; checkstyle reported 0 violations.
+`git diff --check` passed. The new production diff is limited to the predicate planner, and
+independent review found no remaining issue in either reported domain path. No PIT workaround,
+test retry, or new SQL pushdown capability was introduced.
+
+The exact documentation-bearing PR head and its CI run are recorded in PR #25 and the completion
+report after this evidence update is pushed; the resource-correction CI above is historical
+evidence and does not certify the new domain-correction code.
+
+The first domain-correction CI run (`34753545826`) rejected the two new commit subjects because
+they exceeded 60 characters. Both subjects were shortened without changing the tested source
+tree; the code tree above is identical to tested commit `9bd5c89a9d35c926b8a87278116b5c8b233a5518`.
+Final CI must validate the updated PR head after that message-only rewrite.
 
 This document is an implementation handoff for extending `full_text_pushdown_mode=UNSAFE` to primitive Elasticsearch arrays, especially `ARRAY(VARCHAR)` backed by analyzed `text` fields.
 
