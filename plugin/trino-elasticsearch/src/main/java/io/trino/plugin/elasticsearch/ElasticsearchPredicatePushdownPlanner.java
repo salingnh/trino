@@ -145,7 +145,10 @@ final class ElasticsearchPredicatePushdownPlanner
             return ElasticsearchPredicateTranslation.exact(translated.orElseThrow(), Reason.EXACT_DOMAIN);
         }
 
-        boolean analyzedDiscrete = ElasticsearchFullTextPredicateTranslator.isAnalyzedTextOnly(column) && domain.getValues().isDiscreteSet();
+        // A discrete ARRAY domain describes whole-array equality, not an element full-text predicate.
+        boolean analyzedDiscrete = column.type() instanceof VarcharType
+                && ElasticsearchFullTextPredicateTranslator.isAnalyzedTextOnly(column)
+                && domain.getValues().isDiscreteSet();
         if (!analyzedDiscrete) {
             return ElasticsearchPredicateTranslation.unsupported(domain, Reason.UNSUPPORTED_DOMAIN);
         }
@@ -251,9 +254,9 @@ final class ElasticsearchPredicatePushdownPlanner
     }
 
     /**
-     * DomainTranslator represents LIKE 'prefix%' as [prefix, nextPrefix). For analyzed text this range is not an exact
-     * Elasticsearch predicate. In UNSAFE mode the LIKE expression itself is authoritative after translation to
-     * match_phrase_prefix, so the synthetic range must not survive as a Trino residual.
+     * DomainTranslator represents LIKE 'prefix%' and starts_with(column, 'prefix') as [prefix, nextPrefix).
+     * For analyzed text this range is not an exact Elasticsearch predicate. In UNSAFE mode the expression itself is
+     * authoritative after translation to match_phrase_prefix, so the synthetic range must not survive as a Trino residual.
      */
     private static Constraint removeUnsafeAnalyzedPrefixSyntheticDomains(Constraint constraint)
     {
@@ -265,14 +268,19 @@ final class ElasticsearchPredicatePushdownPlanner
         List<ConnectorExpression> conjuncts = ConnectorExpressions.extractConjuncts(constraint.getExpression());
         boolean changed = false;
         for (ConnectorExpression expression : conjuncts) {
-            if (!(expression instanceof Call call) || !ElasticsearchMetadata.isSupportedLikeCall(call)) {
+            if (!(expression instanceof Call call)) {
                 continue;
             }
 
             List<ConnectorExpression> arguments = call.getArguments();
-            Variable variable = (Variable) arguments.get(0);
+            boolean startsWith = call.getFunctionName().getName().equals("starts_with") && arguments.size() == 2;
+            if ((!startsWith && !ElasticsearchMetadata.isSupportedLikeCall(call))
+                    || !(arguments.getFirst() instanceof Variable variable)) {
+                continue;
+            }
             ColumnHandle assigned = constraint.getAssignments().get(variable.getName());
             if (!(assigned instanceof ElasticsearchColumnHandle column)
+                    || !(column.type() instanceof VarcharType varcharType)
                     || !ElasticsearchFullTextPredicateTranslator.isAnalyzedTextOnly(column)
                     || !(arguments.get(1) instanceof Constant constant)
                     || !(constant.getValue() instanceof Slice pattern)) {
@@ -288,7 +296,9 @@ final class ElasticsearchPredicatePushdownPlanner
                 escape = Optional.of(escapeSlice);
             }
 
-            Optional<String> prefix = ElasticsearchMetadata.likePrefix(pattern, escape);
+            Optional<String> prefix = startsWith
+                    ? Optional.of(pattern.toStringUtf8())
+                    : ElasticsearchMetadata.likePrefix(pattern, escape);
             if (prefix.isEmpty()) {
                 continue;
             }
@@ -306,7 +316,7 @@ final class ElasticsearchPredicatePushdownPlanner
             }
 
             Optional<Domain> expectedDomain = createLikePrefixDomain(
-                    (VarcharType) column.type(),
+                    varcharType,
                     Slices.utf8Slice(prefix.orElseThrow()));
             if (expectedDomain.isPresent() && actualDomain.equals(expectedDomain.orElseThrow())) {
                 domains.remove(column);
