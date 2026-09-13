@@ -25,6 +25,7 @@ import org.junit.jupiter.api.Test;
 
 import java.io.IOException;
 import java.util.Arrays;
+import java.util.List;
 import java.util.Map;
 
 import static io.trino.testing.TestingNames.randomNameSuffix;
@@ -413,6 +414,16 @@ public abstract class BaseElasticsearchUnsafeArrayPushdownTest
                     "exact_names", ImmutableList.of("unrelated")));
 
             Session unsafe = sessionWithFullTextMode("UNSAFE");
+
+            // Whole-array equality retains order, cardinality, and exact source-value semantics in every mode.
+            for (String mode : List.of("DISABLED", "SAFE", "UNSAFE")) {
+                assertThat(query(sessionWithFullTextMode(mode), "SELECT id FROM " + indexName + " WHERE names = ARRAY['social network']"))
+                        .matches("VALUES VARCHAR '7'")
+                        .isNotFullyPushedDown(FilterNode.class);
+                assertThat(query(sessionWithFullTextMode(mode), "SELECT id FROM " + indexName + " WHERE names = ARRAY['Nguyen Van', 'Nguyen Van']"))
+                        .matches("VALUES VARCHAR '6'")
+                        .isNotFullyPushedDown(FilterNode.class);
+            }
 
             // Different elements satisfy the two sides. The generic analyzed-text AND must remain local.
             assertThat(query(unsafe, "SELECT id FROM " + indexName + " WHERE any_match(names, x -> x LIKE 'Nguyen%' AND x LIKE '%Van%')"))

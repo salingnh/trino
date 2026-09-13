@@ -326,6 +326,12 @@ public abstract class BaseElasticsearchFullTextPushdownTest
                     .matches("VALUES VARCHAR '1'")
                     .skipResultsCorrectnessCheckForPushdown()
                     .isFullyPushedDown();
+
+            // DomainTranslator also adds a lexical range for starts_with. It must not filter out the analyzed match.
+            assertThat(query(unsafe, "SELECT id FROM " + indexName + " WHERE starts_with(name, 'ngô văn')"))
+                    .matches("VALUES VARCHAR '1'")
+                    .skipResultsCorrectnessCheckForPushdown()
+                    .isFullyPushedDown();
         }
         finally {
             deleteIndex(indexName);

@@ -16,9 +16,11 @@ package io.trino.plugin.elasticsearch;
 import com.google.common.collect.ImmutableList;
 import io.trino.plugin.elasticsearch.ElasticsearchPredicateTranslation.Reason;
 import io.trino.plugin.elasticsearch.client.IndexMetadata.PrimitiveType;
+import io.trino.plugin.elasticsearch.decoders.ArrayDecoder;
 import io.trino.plugin.elasticsearch.decoders.IntegerDecoder;
 import io.trino.plugin.elasticsearch.decoders.VarcharDecoder;
 import io.trino.plugin.elasticsearch.expression.ElasticsearchRemotePredicate;
+import io.trino.spi.block.BlockBuilder;
 import io.trino.spi.connector.ColumnHandle;
 import io.trino.spi.connector.Constraint;
 import io.trino.spi.expression.Call;
@@ -348,6 +350,107 @@ public class TestElasticsearchPredicatePushdownPlanner
                     assertThat(decision.enforcement()).contains(PREFILTER);
                     assertThat(decision.residualPresent()).isTrue();
                 });
+    }
+
+    @Test
+    public void testWholeAnalyzedArrayDomainRemainsLocal()
+    {
+        ArrayType arrayType = new ArrayType(VARCHAR);
+        ElasticsearchColumnHandle column = new ElasticsearchColumnHandle(
+                List.of("names"),
+                arrayType,
+                new PrimitiveType("text"),
+                new ArrayDecoder.Descriptor(new VarcharDecoder.Descriptor("names")),
+                false);
+        BlockBuilder values = VARCHAR.createBlockBuilder(null, 1);
+        VARCHAR.writeSlice(values, utf8Slice("Nguyen Van"));
+        Constraint constraint = new Constraint(TupleDomain.withColumnDomains(
+                Map.<ColumnHandle, Domain>of(column, Domain.singleValue(arrayType, values.build()))));
+
+        for (FullTextPushdownMode mode : FullTextPushdownMode.values()) {
+            ElasticsearchPredicatePushdownPlanner.Result result = ElasticsearchPredicatePushdownPlanner.plan(
+                    TestingConnectorSession.builder().build(), constraint, mode);
+
+            assertThat(result.remotePredicate()).isEmpty();
+            assertThat(result.remainingConstraint().getSummary()).isEqualTo(constraint.getSummary());
+            assertThat(result.residualFilter().isAll()).isTrue();
+        }
+    }
+
+    @Test
+    public void testUnsafeAnalyzedStartsWithRemovesSyntheticRange()
+    {
+        ElasticsearchColumnHandle column = analyzedTextColumn();
+        Call expression = new Call(
+                BOOLEAN,
+                new FunctionName("starts_with"),
+                List.of(new Variable("value", VARCHAR), new Constant(utf8Slice("nguyen"), VARCHAR)));
+        Constraint constraint = new Constraint(
+                TupleDomain.withColumnDomains(Map.<ColumnHandle, Domain>of(
+                        column, ElasticsearchPredicatePushdownPlanner.createLikePrefixDomain(VARCHAR, utf8Slice("nguyen")).orElseThrow())),
+                expression,
+                Map.of("value", column));
+
+        ElasticsearchPredicatePushdownPlanner.Result result = ElasticsearchPredicatePushdownPlanner.plan(
+                TestingConnectorSession.builder().build(), constraint, UNSAFE);
+
+        assertThat(result.remainingConstraint().getSummary().isAll()).isTrue();
+        assertThat(result.remainingConstraint().getExpression()).isEqualTo(TRUE);
+        assertThat(result.residualFilter().isAll()).isTrue();
+        assertThat(result.residualExpressions()).isEmpty();
+        assertThat(result.remotePredicate()).contains(new ElasticsearchRemotePredicate.Enforced(
+                new ElasticsearchRemotePredicate.MatchPhrasePrefix("value", "nguyen"), APPROXIMATE));
+
+        ElasticsearchPredicatePushdownPlanner.Result rejected = ElasticsearchPredicatePushdownPlanner.plan(
+                TestingConnectorSession.builder().build(),
+                constraint,
+                UNSAFE,
+                new ElasticsearchPredicateCompositionPolicy(10, 10, 10, 1));
+        assertThat(rejected.remotePredicate()).isEmpty();
+        assertThat(rejected.residualExpressions()).containsExactly(expression);
+    }
+
+    @Test
+    public void testAnalyzedStartsWithPreservesIndependentRangesAndSafeModes()
+    {
+        ElasticsearchColumnHandle column = analyzedTextColumn();
+        Call expression = new Call(
+                BOOLEAN,
+                new FunctionName("starts_with"),
+                List.of(new Variable("value", VARCHAR), new Constant(utf8Slice("nguyen"), VARCHAR)));
+        Domain syntheticDomain = ElasticsearchPredicatePushdownPlanner.createLikePrefixDomain(VARCHAR, utf8Slice("nguyen")).orElseThrow();
+        Domain narrowerDomain = Domain.create(ValueSet.ofRanges(
+                Range.range(VARCHAR, utf8Slice("nguyen a"), true, utf8Slice("nguyen z"), false)), false);
+
+        for (FullTextPushdownMode mode : FullTextPushdownMode.values()) {
+            for (Domain domain : List.of(syntheticDomain, narrowerDomain)) {
+                if (mode == UNSAFE && domain.equals(syntheticDomain)) {
+                    continue;
+                }
+                Constraint constraint = new Constraint(
+                        TupleDomain.withColumnDomains(Map.<ColumnHandle, Domain>of(column, domain)),
+                        expression,
+                        Map.of("value", column));
+
+                ElasticsearchPredicatePushdownPlanner.Result result = ElasticsearchPredicatePushdownPlanner.plan(
+                        TestingConnectorSession.builder().build(), constraint, mode);
+
+                assertThat(result.remainingConstraint().getSummary()).isEqualTo(constraint.getSummary());
+                if (mode != UNSAFE) {
+                    assertThat(result.remotePredicate()).isEmpty();
+                    assertThat(result.residualExpressions()).containsExactly(expression);
+                }
+            }
+        }
+
+        Call conjunction = new Call(BOOLEAN, AND_FUNCTION_NAME, List.of(expression, like("value", "%van%")));
+        Constraint constraint = new Constraint(
+                TupleDomain.withColumnDomains(Map.<ColumnHandle, Domain>of(column, syntheticDomain)),
+                conjunction,
+                Map.of("value", column));
+        ElasticsearchPredicatePushdownPlanner.Result result = ElasticsearchPredicatePushdownPlanner.plan(
+                TestingConnectorSession.builder().build(), constraint, UNSAFE);
+        assertThat(result.remainingConstraint().getSummary()).isEqualTo(constraint.getSummary());
     }
 
     @Test
