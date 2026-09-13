@@ -678,7 +678,7 @@ validated separately by the exact-SHA CI recorded in PR #25 and the completion r
 Corrective resource-admission closure:
 
 ```text
-FINAL CODE SHA:      7850ed4acd62ad2eb1ff454aff4a1793a93da0b5
+RESOURCE CORRECTION CODE SHA: 7850ed4acd62ad2eb1ff454aff4a1793a93da0b5
 CI RUN:              34705217944 (success on CORRECTIVE CODE SHA)
 CHECK SUITE:         94006115070 (94/94 GitHub Actions checks successful)
 ```
@@ -690,6 +690,21 @@ compositions remain local; dynamic-filter rejection remains exact-only, fail-ope
 `REJECTED`. No new SQL pushdown capability or P1.5 semantic boundary was introduced. The exact
 documentation-bearing PR head and its CI result are recorded in the final completion report and
 PR #25 after this evidence update is pushed.
+
+Domain-review correction (2026-09-13):
+
+```text
+REVIEW BASE SHA:     f0899ab7a95ebd419d2d7fdb206d875ab460a009
+FINAL CODE SHA:      e6cd6732f5724e06feb98fe8719a00893d210dbf
+```
+
+Whole-array discrete domains remain local; only scalar VARCHAR domains can enter the analyzed
+scalar translator. Scalar UNSAFE `starts_with` now consumes its matching synthetic prefix range,
+so a local lexical range cannot discard an admitted analyzer match. Independent ranges,
+SAFE/DISABLED behavior, resource fallback, and ARRAY same-element scope remain unchanged.
+RED/GREEN SQL-planner evidence for ES7/ES8 and final validation are recorded in
+`UNSAFE-ARRAY-PUSHDOWN-PLAN.md` under "Domain review corrections". Earlier CI entries above refer
+to earlier source SHAs; the exact updated PR head and CI result are recorded in PR #25.
 
 # P3 — Optional SPI Extensions
 
