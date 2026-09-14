@@ -585,7 +585,15 @@ public class ElasticsearchClient
                                 .map(keywordName -> value.path("fields").path(keywordName))
                                 .map(ElasticsearchClient::hasDocValues)
                                 .orElse(false);
-                        primitiveType = new IndexMetadata.PrimitiveType(type, keyword, keywordAggregatable && sourceValueSemanticsExact, sourceValueSemanticsExact);
+                        boolean arrayPhraseScopeSafe = !isArray
+                                || !value.has("position_increment_gap")
+                                || value.get("position_increment_gap").asInt() > 0;
+                        boolean predicateSemanticsExact = sourceValueSemanticsExact && (keyword.isPresent() || arrayPhraseScopeSafe);
+                        primitiveType = new IndexMetadata.PrimitiveType(
+                                type,
+                                keyword,
+                                keywordAggregatable && predicateSemanticsExact,
+                                predicateSemanticsExact);
                     }
                     else if (type.equals("keyword") && !sourceValueSemanticsExact) {
                         // A normalizer or null_value rewrites the indexed value while _source remains unchanged. Treat the
