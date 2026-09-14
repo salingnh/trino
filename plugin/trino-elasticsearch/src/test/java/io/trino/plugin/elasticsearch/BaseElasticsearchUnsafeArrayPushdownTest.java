@@ -457,6 +457,69 @@ public abstract class BaseElasticsearchUnsafeArrayPushdownTest
         }
     }
 
+    @Test
+    public void testZeroPositionIncrementGapPreservesArrayElementScope()
+            throws IOException
+    {
+        String indexName = "unsafe_array_zero_gap_" + randomNameSuffix();
+        @Language("JSON")
+        String body =
+                """
+                {
+                  "mappings": {
+                    "_meta": {
+                      "trino": {
+                        "names": { "isArray": true },
+                        "exact_names": { "isArray": true }
+                      }
+                    },
+                    "properties": {
+                      "id": { "type": "keyword" },
+                      "names": {
+                        "type": "text",
+                        "position_increment_gap": 0
+                      },
+                      "exact_names": {
+                        "type": "text",
+                        "position_increment_gap": 0,
+                        "fields": { "keyword": { "type": "keyword" } }
+                      }
+                    }
+                  }
+                }
+                """;
+        createIndex(indexName, body);
+        try {
+            index(indexName, ImmutableMap.of(
+                    "id", "1",
+                    "names", ImmutableList.of("Nguyen", "Van"),
+                    "exact_names", ImmutableList.of("Nguyen", "Van")));
+            index(indexName, ImmutableMap.of(
+                    "id", "2",
+                    "names", ImmutableList.of("Nguyen Van"),
+                    "exact_names", ImmutableList.of("Nguyen Van")));
+
+            Session unsafe = sessionWithFullTextMode("UNSAFE");
+
+            // A zero position gap allows Elasticsearch phrase queries to span two array values. Keep the analyzed
+            // array predicate local so any_match/contains retain source-array element scope even in UNSAFE mode.
+            assertThat(query(unsafe, "SELECT id FROM " + indexName + " WHERE any_match(names, x -> x = 'Nguyen Van')"))
+                    .matches("VALUES VARCHAR '2'")
+                    .isNotFullyPushedDown(FilterNode.class);
+            assertThat(query(unsafe, "SELECT id FROM " + indexName + " WHERE contains(names, 'Nguyen Van')"))
+                    .matches("VALUES VARCHAR '2'")
+                    .isNotFullyPushedDown(FilterNode.class);
+
+            // The exact keyword subfield does not depend on text positions and remains safe for exact membership.
+            assertThat(query(unsafe, "SELECT id FROM " + indexName + " WHERE contains(exact_names, 'Nguyen Van')"))
+                    .matches("VALUES VARCHAR '2'")
+                    .isFullyPushedDown();
+        }
+        finally {
+            deleteIndex(indexName);
+        }
+    }
+
     private Session sessionWithFullTextMode(String mode)
     {
         String catalogName = getSession().getCatalog().orElseThrow();
