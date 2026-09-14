@@ -18,6 +18,7 @@ import io.trino.plugin.elasticsearch.client.IndexMetadata.PrimitiveType;
 import io.trino.plugin.elasticsearch.expression.ElasticsearchRemotePredicate;
 import io.trino.spi.block.Block;
 import io.trino.spi.connector.ColumnHandle;
+import io.trino.spi.connector.ConnectorSession;
 import io.trino.spi.expression.Call;
 import io.trino.spi.expression.ConnectorExpression;
 import io.trino.spi.expression.Constant;
@@ -32,6 +33,11 @@ import java.util.List;
 import java.util.Map;
 import java.util.Optional;
 
+import static io.trino.plugin.elasticsearch.ElasticsearchPredicateTranslation.Reason.APPROXIMATE_ANY_MATCH;
+import static io.trino.plugin.elasticsearch.ElasticsearchPredicateTranslation.Reason.APPROXIMATE_ARRAY;
+import static io.trino.plugin.elasticsearch.ElasticsearchPredicateTranslation.Reason.EXACT_ANY_MATCH;
+import static io.trino.plugin.elasticsearch.ElasticsearchPredicateTranslation.Reason.EXACT_ARRAY;
+import static io.trino.plugin.elasticsearch.ElasticsearchPredicateTranslation.Reason.UNSUPPORTED_EXPRESSION;
 import static io.trino.spi.expression.StandardFunctions.AND_FUNCTION_NAME;
 import static io.trino.spi.expression.StandardFunctions.ARRAY_CONSTRUCTOR_FUNCTION_NAME;
 import static io.trino.spi.expression.StandardFunctions.EQUAL_OPERATOR_FUNCTION_NAME;
@@ -50,90 +56,324 @@ import static io.trino.spi.type.SmallintType.SMALLINT;
 import static io.trino.spi.type.TimestampType.TIMESTAMP_MILLIS;
 import static io.trino.spi.type.TinyintType.TINYINT;
 import static io.trino.spi.type.TypeUtils.readNativeValue;
+import static java.util.Objects.requireNonNull;
 
 /**
- * Exact Elasticsearch membership pushdown for primitive arrays.
+ * Elasticsearch predicate translation for primitive arrays.
  */
 final class ElasticsearchArrayPredicateTranslator
 {
     private ElasticsearchArrayPredicateTranslator() {}
 
-    public static Optional<ElasticsearchRemotePredicate> translate(
+    public static Optional<ElasticsearchPredicateTranslation<ConnectorExpression>> translate(
+            ConnectorSession session,
             ConnectorExpression expression,
-            Map<String, ColumnHandle> assignments)
+            Map<String, ColumnHandle> assignments,
+            FullTextPushdownMode fullTextMode)
     {
+        return translate(session, expression, assignments, fullTextMode, ElasticsearchPredicateCompositionPolicy.DEFAULT);
+    }
+
+    public static Optional<ElasticsearchPredicateTranslation<ConnectorExpression>> translate(
+            ConnectorSession session,
+            ConnectorExpression expression,
+            Map<String, ColumnHandle> assignments,
+            FullTextPushdownMode fullTextMode,
+            ElasticsearchPredicateCompositionPolicy policy)
+    {
+        requireNonNull(session, "session is null");
+        requireNonNull(expression, "expression is null");
+        requireNonNull(assignments, "assignments is null");
+        requireNonNull(fullTextMode, "fullTextMode is null");
+        requireNonNull(policy, "policy is null");
+
         if (!(expression instanceof Call call)) {
             return Optional.empty();
         }
 
         return switch (call.getFunctionName().getName()) {
-            case "contains" -> translateContains(call, assignments);
-            case "arrays_overlap" -> translateArraysOverlap(call, assignments);
-            case "any_match" -> translateAnyMatch(call, assignments);
+            case "contains" -> Optional.of(translateContains(call, assignments, fullTextMode, policy));
+            case "arrays_overlap" -> Optional.of(translateArraysOverlap(call, assignments, fullTextMode, policy));
+            case "any_match" -> Optional.of(translateAnyMatch(session, call, assignments, fullTextMode, policy));
             default -> Optional.empty();
         };
     }
 
-    private static Optional<ElasticsearchRemotePredicate> translateContains(Call call, Map<String, ColumnHandle> assignments)
+    private static ElasticsearchPredicateTranslation<ConnectorExpression> exactOrUnsupported(
+            ConnectorExpression expression,
+            Optional<ElasticsearchRemotePredicate> predicate,
+            ElasticsearchPredicateTranslation.Reason exactReason,
+            ElasticsearchPredicateCompositionPolicy policy)
+    {
+        if (predicate.isPresent() && !ElasticsearchPredicateComposer.isWithinRequestBudget(predicate.orElseThrow(), policy)) {
+            return ElasticsearchPredicateTranslation.residual(expression, UNSUPPORTED_EXPRESSION);
+        }
+        return predicate
+                .<ElasticsearchPredicateTranslation<ConnectorExpression>>map(value -> ElasticsearchPredicateTranslation.exact(value, exactReason))
+                .orElseGet(() -> ElasticsearchPredicateTranslation.unsupported(
+                        expression,
+                        UNSUPPORTED_EXPRESSION));
+    }
+
+    private static ElasticsearchPredicateTranslation<ConnectorExpression> translateContains(
+            Call call,
+            Map<String, ColumnHandle> assignments,
+            FullTextPushdownMode fullTextMode,
+            ElasticsearchPredicateCompositionPolicy policy)
     {
         if (call.getArguments().size() != 2
                 || !(call.getArguments().get(0) instanceof Variable variable)
                 || !(call.getArguments().get(1) instanceof Constant constant)
                 || constant.getValue() == null) {
-            return Optional.empty();
+            return ElasticsearchPredicateTranslation.unsupported(call, UNSUPPORTED_EXPRESSION);
         }
 
         ElasticsearchColumnHandle column = column(assignments, variable);
-        Optional<Type> elementType = exactArrayElementType(column);
+        Optional<Type> elementType = arrayElementType(column);
         if (elementType.isEmpty() || !constant.getType().equals(elementType.orElseThrow())) {
-            return Optional.empty();
+            return ElasticsearchPredicateTranslation.unsupported(call, UNSUPPORTED_EXPRESSION);
         }
 
-        return Optional.of(new ElasticsearchRemotePredicate.Term(
-                column.predicateName(),
-                ElasticsearchRemotePredicateTranslator.getValue(elementType.orElseThrow(), constant.getValue())));
+        return translateElementMembership(
+                call,
+                column,
+                elementType.orElseThrow(),
+                List.of(ElasticsearchRemotePredicateTranslator.getValue(elementType.orElseThrow(), constant.getValue())),
+                fullTextMode,
+                EXACT_ARRAY,
+                APPROXIMATE_ARRAY,
+                policy);
     }
 
-    private static Optional<ElasticsearchRemotePredicate> translateArraysOverlap(Call call, Map<String, ColumnHandle> assignments)
+    private static ElasticsearchPredicateTranslation<ConnectorExpression> translateArraysOverlap(
+            Call call,
+            Map<String, ColumnHandle> assignments,
+            FullTextPushdownMode fullTextMode,
+            ElasticsearchPredicateCompositionPolicy policy)
     {
         if (call.getArguments().size() != 2
                 || !(call.getArguments().get(0) instanceof Variable variable)) {
-            return Optional.empty();
+            return ElasticsearchPredicateTranslation.unsupported(call, UNSUPPORTED_EXPRESSION);
         }
 
         ElasticsearchColumnHandle column = column(assignments, variable);
-        Optional<Type> elementType = exactArrayElementType(column);
+        Optional<Type> elementType = arrayElementType(column);
         if (elementType.isEmpty()) {
-            return Optional.empty();
+            return ElasticsearchPredicateTranslation.unsupported(call, UNSUPPORTED_EXPRESSION);
         }
 
         return translateConstantArray(call.getArguments().get(1), elementType.orElseThrow())
-                .map(values -> values.size() == 1
-                        ? new ElasticsearchRemotePredicate.Term(column.predicateName(), values.getFirst())
-                        : new ElasticsearchRemotePredicate.Terms(column.predicateName(), values));
+                .map(values -> translateElementMembership(
+                        call,
+                        column,
+                        elementType.orElseThrow(),
+                        values,
+                        fullTextMode,
+                        EXACT_ARRAY,
+                        APPROXIMATE_ARRAY,
+                        policy))
+                .orElseGet(() -> ElasticsearchPredicateTranslation.unsupported(call, UNSUPPORTED_EXPRESSION));
     }
 
-    private static Optional<ElasticsearchRemotePredicate> translateAnyMatch(Call call, Map<String, ColumnHandle> assignments)
+    private static ElasticsearchPredicateTranslation<ConnectorExpression> translateAnyMatch(
+            ConnectorSession session,
+            Call call,
+            Map<String, ColumnHandle> assignments,
+            FullTextPushdownMode fullTextMode,
+            ElasticsearchPredicateCompositionPolicy policy)
     {
         if (call.getArguments().size() != 2
                 || !(call.getArguments().get(0) instanceof Variable arrayVariable)
                 || !(call.getArguments().get(1) instanceof Lambda lambda)
                 || lambda.getArguments().size() != 1) {
-            return Optional.empty();
+            return ElasticsearchPredicateTranslation.unsupported(call, UNSUPPORTED_EXPRESSION);
         }
 
         ElasticsearchColumnHandle column = column(assignments, arrayVariable);
-        Optional<Type> elementType = exactArrayElementType(column);
+        Optional<Type> elementType = arrayElementType(column);
         if (elementType.isEmpty()) {
-            return Optional.empty();
+            return ElasticsearchPredicateTranslation.unsupported(call, UNSUPPORTED_EXPRESSION);
         }
 
         Variable lambdaVariable = lambda.getArguments().getFirst();
         if (!lambdaVariable.getType().equals(elementType.orElseThrow())) {
-            return Optional.empty();
+            return ElasticsearchPredicateTranslation.unsupported(call, UNSUPPORTED_EXPRESSION);
         }
 
-        return translateAnyMatchBody(lambda.getBody(), lambdaVariable, column, elementType.orElseThrow());
+        if (isAnalyzedTextArray(column)) {
+            if (fullTextMode != FullTextPushdownMode.UNSAFE) {
+                return ElasticsearchPredicateTranslation.unsupported(call, UNSUPPORTED_EXPRESSION);
+            }
+            return translateAnalyzedAnyMatch(
+                    session,
+                    call,
+                    lambda.getBody(),
+                    lambdaVariable,
+                    column,
+                    elementType.orElseThrow(),
+                    fullTextMode,
+                    policy);
+        }
+
+        return exactOrUnsupported(
+                call,
+                translateAnyMatchBody(lambda.getBody(), lambdaVariable, column, elementType.orElseThrow()),
+                EXACT_ANY_MATCH,
+                policy);
+    }
+
+    private static ElasticsearchPredicateTranslation<ConnectorExpression> translateAnalyzedAnyMatch(
+            ConnectorSession session,
+            Call source,
+            ConnectorExpression body,
+            Variable lambdaVariable,
+            ElasticsearchColumnHandle column,
+            Type elementType,
+            FullTextPushdownMode fullTextMode,
+            ElasticsearchPredicateCompositionPolicy policy)
+    {
+        if (!(body instanceof Call call)) {
+            return ElasticsearchPredicateTranslation.unsupported(source, UNSUPPORTED_EXPRESSION);
+        }
+
+        if (OR_FUNCTION_NAME.equals(call.getFunctionName())) {
+            if (call.getArguments().isEmpty()) {
+                return ElasticsearchPredicateTranslation.unsupported(source, UNSUPPORTED_EXPRESSION);
+            }
+            List<ElasticsearchPredicateTranslation<ConnectorExpression>> branches = call.getArguments().stream()
+                    .map(argument -> translateAnalyzedAnyMatch(
+                            session,
+                            source,
+                            argument,
+                            lambdaVariable,
+                            column,
+                            elementType,
+                            fullTextMode,
+                            policy))
+                    .toList();
+            return ElasticsearchPredicateComposer.or(source, branches, policy);
+        }
+
+        Optional<ElasticsearchPredicateTranslation<ConnectorExpression>> like = ElasticsearchFullTextPredicateTranslator.translateLikeElement(
+                session,
+                source,
+                call,
+                lambdaVariable,
+                column,
+                fullTextMode,
+                APPROXIMATE_ANY_MATCH,
+                policy);
+        if (like.isPresent()) {
+            return like.orElseThrow();
+        }
+
+        Optional<ElasticsearchPredicateTranslation<ConnectorExpression>> startsWith = ElasticsearchFullTextPredicateTranslator.translateStartsWithElement(
+                source,
+                call,
+                lambdaVariable,
+                column,
+                fullTextMode,
+                APPROXIMATE_ANY_MATCH,
+                policy);
+        if (startsWith.isPresent()) {
+            return startsWith.orElseThrow();
+        }
+
+        Optional<ElasticsearchPredicateTranslation<ConnectorExpression>> regexp = ElasticsearchFullTextPredicateTranslator.translateRegexpElement(
+                source,
+                call,
+                lambdaVariable,
+                column,
+                fullTextMode,
+                APPROXIMATE_ANY_MATCH,
+                policy);
+        if (regexp.isPresent()) {
+            return regexp.orElseThrow();
+        }
+
+        if (EQUAL_OPERATOR_FUNCTION_NAME.equals(call.getFunctionName())) {
+            if (call.getArguments().size() != 2) {
+                return ElasticsearchPredicateTranslation.unsupported(source, UNSUPPORTED_EXPRESSION);
+            }
+            for (int variableIndex = 0; variableIndex < 2; variableIndex++) {
+                if (isLambdaVariable(call.getArguments().get(variableIndex), lambdaVariable)
+                        && call.getArguments().get(1 - variableIndex) instanceof Constant constant
+                        && constant.getValue() != null
+                        && constant.getType().equals(elementType)) {
+                    return translateElementMembership(
+                            source,
+                            column,
+                            elementType,
+                            List.of(ElasticsearchRemotePredicateTranslator.getValue(elementType, constant.getValue())),
+                            fullTextMode,
+                            EXACT_ANY_MATCH,
+                            APPROXIMATE_ANY_MATCH,
+                            policy);
+                }
+            }
+        }
+
+        if (IN_PREDICATE_FUNCTION_NAME.equals(call.getFunctionName())
+                && call.getArguments().size() == 2
+                && isLambdaVariable(call.getArguments().get(0), lambdaVariable)) {
+            return translateConstantArray(call.getArguments().get(1), elementType)
+                    .map(values -> translateElementMembership(
+                            source,
+                            column,
+                            elementType,
+                            values,
+                            fullTextMode,
+                            EXACT_ANY_MATCH,
+                            APPROXIMATE_ANY_MATCH,
+                            policy))
+                    .orElseGet(() -> ElasticsearchPredicateTranslation.unsupported(source, UNSUPPORTED_EXPRESSION));
+        }
+
+        return ElasticsearchPredicateTranslation.unsupported(source, UNSUPPORTED_EXPRESSION);
+    }
+
+    private static ElasticsearchPredicateTranslation<ConnectorExpression> translateElementMembership(
+            ConnectorExpression source,
+            ElasticsearchColumnHandle column,
+            Type elementType,
+            List<Object> values,
+            FullTextPushdownMode fullTextMode,
+            ElasticsearchPredicateTranslation.Reason exactReason,
+            ElasticsearchPredicateTranslation.Reason approximateReason,
+            ElasticsearchPredicateCompositionPolicy policy)
+    {
+        if (values.isEmpty()) {
+            return ElasticsearchPredicateTranslation.unsupported(source, UNSUPPORTED_EXPRESSION);
+        }
+
+        if (exactArrayElementType(column).filter(elementType::equals).isPresent()) {
+            ElasticsearchRemotePredicate predicate = values.size() == 1
+                    ? new ElasticsearchRemotePredicate.Term(column.predicateName(), values.getFirst())
+                    : new ElasticsearchRemotePredicate.Terms(column.predicateName(), values);
+            if (values.size() > policy.maxTermsValues() || !ElasticsearchPredicateComposer.isWithinRequestBudget(predicate, policy)) {
+                return ElasticsearchPredicateTranslation.residual(source, UNSUPPORTED_EXPRESSION);
+            }
+            return ElasticsearchPredicateTranslation.exact(predicate, exactReason);
+        }
+
+        if (fullTextMode == FullTextPushdownMode.UNSAFE && isAnalyzedTextArray(column) && elementType instanceof VarcharType) {
+            if (values.size() > policy.maxBooleanClauses()) {
+                return ElasticsearchPredicateTranslation.residual(source, UNSUPPORTED_EXPRESSION);
+            }
+            List<ElasticsearchPredicateTranslation<ConnectorExpression>> predicates = values.stream()
+                    .map(value -> ElasticsearchPredicateComposer.approximateWithinBudget(
+                            source,
+                            new ElasticsearchRemotePredicate.MatchPhrase(column.predicateName(), (String) value),
+                            approximateReason,
+                            policy))
+                    .toList();
+            if (predicates.size() == 1) {
+                return predicates.getFirst();
+            }
+            return ElasticsearchPredicateComposer.or(source, predicates, policy);
+        }
+
+        return ElasticsearchPredicateTranslation.unsupported(source, UNSUPPORTED_EXPRESSION);
     }
 
     private static Optional<ElasticsearchRemotePredicate> translateAnyMatchBody(
@@ -365,6 +605,21 @@ final class ElasticsearchArrayPredicateTranslator
 
     private static Optional<Type> exactArrayElementType(ElasticsearchColumnHandle column)
     {
+        Optional<Type> elementType = arrayElementType(column);
+        if (elementType.isEmpty()) {
+            return Optional.empty();
+        }
+
+        if (column.elasticsearchType() instanceof PrimitiveType primitiveType
+                && primitiveType.name().equalsIgnoreCase("text")
+                && primitiveType.keyword().isEmpty()) {
+            return Optional.empty();
+        }
+        return elementType;
+    }
+
+    private static Optional<Type> arrayElementType(ElasticsearchColumnHandle column)
+    {
         if (column == null || !column.sourceValueSemanticsExact() || !(column.type() instanceof ArrayType arrayType)) {
             return Optional.empty();
         }
@@ -373,7 +628,7 @@ final class ElasticsearchArrayPredicateTranslator
         if (elementType.equals(TIMESTAMP_MILLIS)) {
             return column.elasticsearchType() instanceof DateTimeType ? Optional.of(elementType) : Optional.empty();
         }
-        if (!(column.elasticsearchType() instanceof PrimitiveType primitiveType)) {
+        if (!(column.elasticsearchType() instanceof PrimitiveType)) {
             return Optional.empty();
         }
 
@@ -386,13 +641,17 @@ final class ElasticsearchArrayPredicateTranslator
                 || elementType.equals(BOOLEAN)
                 || elementType instanceof VarcharType
                 || elementType.getBaseName().equalsIgnoreCase("ipaddress");
-        if (!supportedElementType) {
-            return Optional.empty();
-        }
+        return supportedElementType ? Optional.of(elementType) : Optional.empty();
+    }
 
-        if (primitiveType.name().equalsIgnoreCase("text") && primitiveType.keyword().isEmpty()) {
-            return Optional.empty();
-        }
-        return Optional.of(elementType);
+    private static boolean isAnalyzedTextArray(ElasticsearchColumnHandle column)
+    {
+        return column != null
+                && !column.supportsPredicates()
+                && column.type() instanceof ArrayType arrayType
+                && arrayType.getElementType() instanceof VarcharType
+                && column.elasticsearchType() instanceof PrimitiveType primitiveType
+                && primitiveType.name().equalsIgnoreCase("text")
+                && primitiveType.keyword().isEmpty();
     }
 }

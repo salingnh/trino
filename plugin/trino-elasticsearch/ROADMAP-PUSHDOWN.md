@@ -645,6 +645,67 @@ explicitly not justified, rather than unimplemented mandatory features.
 
 ---
 
+# P1.5 — Primitive Array UNSAFE Full-Text Pushdown
+
+**Status:** COMPLETE — CI GREEN
+
+Primitive `ARRAY(VARCHAR)` fields backed by analyzed Elasticsearch `text` mappings now reuse the
+permanent Remote Predicate IR, `ElasticsearchPredicateTranslation`, composer, diagnostics, and
+statistics contracts. Under `full_text_pushdown_mode=UNSAFE`, supported positive existential
+element predicates are classified `APPROXIMATE` with no Trino residual when their Elasticsearch
+translation is authoritative under the explicit UNSAFE contract. Exact keyword/numeric/timestamp
+array behavior, SAFE/DISABLED behavior, same-element boundaries, and exact-only dynamic filtering
+remain unchanged. Unsupported branches remain local, including partial OR and generic analyzed
+lambda AND that cannot preserve same-element semantics.
+
+Release evidence:
+
+```text
+BASE SHA:            44d719ac2977c98532234f3002376551997f00ac
+IMPLEMENTATION SHA:  0b54aad215712f25eeb239901bd1356963b59e48
+REVIEW BASELINE SHA: 125548b22070f2bd4dfadeb57f9e78a0ad45287f
+PREVIOUS FINAL CODE SHA: 8713b1cdcad0e67ede9c0eb2d2730baa160d7503
+PR:                  https://github.com/salingnh/trino/pull/25
+PREVIOUS CI RUN:     34684378551 (green on PREVIOUS FINAL CODE SHA)
+PREVIOUS CHECK SUITE: 93953453750 (91/91 checks successful)
+```
+
+The final validation record, including review-fix resource ownership, ES7/ES8 results, serial
+aggregate counts, PIT 404 baseline comparison, exact-SHA CI, and independent review, is in
+`UNSAFE-ARRAY-PUSHDOWN-PLAN.md`. The final branch head after this documentation-only closure is
+validated separately by the exact-SHA CI recorded in PR #25 and the completion report.
+
+Corrective resource-admission closure:
+
+```text
+RESOURCE CORRECTION CODE SHA: 7850ed4acd62ad2eb1ff454aff4a1793a93da0b5
+CI RUN:              34705217944 (success on CORRECTIVE CODE SHA)
+CHECK SUITE:         94006115070 (94/94 GitHub Actions checks successful)
+```
+
+The corrective hardening adds one authoritative tree-wide resource calculation to the permanent
+predicate composer: total rendered query leaves, independent `Terms` value counting, rendered
+boolean depth, and rendered request bytes. Over-budget static, full-text, and final metadata
+compositions remain local; dynamic-filter rejection remains exact-only, fail-open, and diagnostic
+`REJECTED`. No new SQL pushdown capability or P1.5 semantic boundary was introduced. The exact
+documentation-bearing PR head and its CI result are recorded in the final completion report and
+PR #25 after this evidence update is pushed.
+
+Domain-review correction (2026-09-13):
+
+```text
+REVIEW BASE SHA:     f0899ab7a95ebd419d2d7fdb206d875ab460a009
+FINAL CODE SHA:      e6cd6732f5724e06feb98fe8719a00893d210dbf
+```
+
+Whole-array discrete domains remain local; only scalar VARCHAR domains can enter the analyzed
+scalar translator. Scalar UNSAFE `starts_with` now consumes its matching synthetic prefix range,
+so a local lexical range cannot discard an admitted analyzer match. Independent ranges,
+SAFE/DISABLED behavior, resource fallback, and ARRAY same-element scope remain unchanged.
+RED/GREEN SQL-planner evidence for ES7/ES8 and final validation are recorded in
+`UNSAFE-ARRAY-PUSHDOWN-PLAN.md` under "Domain review corrections". Earlier CI entries above refer
+to earlier source SHAs; the exact updated PR head and CI result are recorded in PR #25.
+
 # P3 — Optional SPI Extensions
 
 **Status:** RESEARCH DISPOSITION RECORDED — NO PRODUCTION PUSHDOWN

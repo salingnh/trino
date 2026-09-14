@@ -305,6 +305,15 @@ public class TestElasticsearchPredicateComposer
         assertThat(result.residual()).contains(A);
     }
 
+    @Test
+    public void testDirectTermsPredicateUsesTermValueBudget()
+    {
+        ElasticsearchPredicateCompositionPolicy policy = new ElasticsearchPredicateCompositionPolicy(2, 10, 10, 1_048_576);
+        ElasticsearchRemotePredicate predicate = new ElasticsearchRemotePredicate.Terms("status", List.of("one", "two", "three"));
+
+        assertThat(ElasticsearchPredicateComposer.isWithinRequestBudget(predicate, policy)).isFalse();
+    }
+
     private static ElasticsearchPredicateTranslation<ConnectorExpression> exact(String field, Object value)
     {
         return ElasticsearchPredicateTranslation.exact(
