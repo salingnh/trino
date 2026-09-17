@@ -61,15 +61,19 @@ public class IcebergRestCatalogConfig
     private SessionType sessionType = SessionType.NONE;
     private Duration connectionTimeout;
     private Duration socketTimeout;
+    private int maxRetries = 5;
     private Duration sessionTimeout = new Duration(CatalogProperties.AUTH_SESSION_TIMEOUT_MS_DEFAULT, MILLISECONDS);
     private boolean vendedCredentialsEnabled;
     private boolean viewEndpointsEnabled = true;
     private boolean serverAssignedTableLocationEnabled;
+    private boolean metricsReportingEnabled = true;
     private boolean caseInsensitiveNameMatching;
     private Map<String, String> httpHeaders = ImmutableMap.of();
     private Duration caseInsensitiveNameMatchingCacheTtl = new Duration(1, MINUTES);
     // Lightweight identifier mappings; short TTL keeps retained cardinality modest.
     private long caseInsensitiveNameMatchingCacheMaximumSize = 10_000;
+    private boolean caseInsensitiveNameMatchingNamespaceCacheEnabled = true;
+    private long caseInsensitiveNameMatchingNamespaceCacheMaxSize = 10_000;
 
     @NotNull
     public URI getBaseUri()
@@ -180,6 +184,20 @@ public class IcebergRestCatalogConfig
         return this;
     }
 
+    @Min(1)
+    public int getMaxRetries()
+    {
+        return maxRetries;
+    }
+
+    @Config("iceberg.rest-catalog.max-retries")
+    @ConfigDescription("Maximum number of retry attempts for failed REST catalog HTTP requests")
+    public IcebergRestCatalogConfig setMaxRetries(int maxRetries)
+    {
+        this.maxRetries = maxRetries;
+        return this;
+    }
+
     @NotNull
     @MinDuration("0ms")
     public Duration getSessionTimeout()
@@ -231,6 +249,19 @@ public class IcebergRestCatalogConfig
     public IcebergRestCatalogConfig setServerAssignedTableLocationEnabled(boolean serverAssignedTableLocationEnabled)
     {
         this.serverAssignedTableLocationEnabled = serverAssignedTableLocationEnabled;
+        return this;
+    }
+
+    public boolean isMetricsReportingEnabled()
+    {
+        return metricsReportingEnabled;
+    }
+
+    @Config("iceberg.rest-catalog.metrics-reporting-enabled")
+    @ConfigDescription("Report table scan and commit metrics to the REST catalog server")
+    public IcebergRestCatalogConfig setMetricsReportingEnabled(boolean metricsReportingEnabled)
+    {
+        this.metricsReportingEnabled = metricsReportingEnabled;
         return this;
     }
 
@@ -294,6 +325,33 @@ public class IcebergRestCatalogConfig
     public IcebergRestCatalogConfig setCaseInsensitiveNameMatchingCacheMaximumSize(long caseInsensitiveNameMatchingCacheMaximumSize)
     {
         this.caseInsensitiveNameMatchingCacheMaximumSize = caseInsensitiveNameMatchingCacheMaximumSize;
+        return this;
+    }
+
+    public boolean isCaseInsensitiveNameMatchingNamespaceCacheEnabled()
+    {
+        return caseInsensitiveNameMatchingNamespaceCacheEnabled;
+    }
+
+    @Config("iceberg.rest-catalog.case-insensitive-name-matching.namespace-cache.enabled")
+    @ConfigDescription("Cache the full list of tables/views per namespace to avoid repeated listings during case insensitive resolution")
+    public IcebergRestCatalogConfig setCaseInsensitiveNameMatchingNamespaceCacheEnabled(boolean caseInsensitiveNameMatchingNamespaceCacheEnabled)
+    {
+        this.caseInsensitiveNameMatchingNamespaceCacheEnabled = caseInsensitiveNameMatchingNamespaceCacheEnabled;
+        return this;
+    }
+
+    @Min(1)
+    public long getCaseInsensitiveNameMatchingNamespaceCacheMaxSize()
+    {
+        return caseInsensitiveNameMatchingNamespaceCacheMaxSize;
+    }
+
+    @Config("iceberg.rest-catalog.case-insensitive-name-matching.namespace-cache.max-size")
+    @ConfigDescription("Maximum total number of table or view identifiers retained across namespaces in the case insensitive listing cache")
+    public IcebergRestCatalogConfig setCaseInsensitiveNameMatchingNamespaceCacheMaxSize(long caseInsensitiveNameMatchingNamespaceCacheMaxSize)
+    {
+        this.caseInsensitiveNameMatchingNamespaceCacheMaxSize = caseInsensitiveNameMatchingNamespaceCacheMaxSize;
         return this;
     }
 }

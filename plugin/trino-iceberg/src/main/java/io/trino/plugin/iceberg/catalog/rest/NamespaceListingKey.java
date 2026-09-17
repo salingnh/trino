@@ -11,16 +11,20 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  */
-package io.trino.tests.product.deltalake;
+package io.trino.plugin.iceberg.catalog.rest;
 
-import static io.trino.testing.SystemEnvironmentUtils.requireEnv;
+import org.apache.iceberg.catalog.Namespace;
 
-public class DeltaLakeDatabricks133Environment
-        extends DeltaLakeDatabricksEnvironment
+import java.util.Optional;
+
+import static java.util.Objects.requireNonNull;
+
+record NamespaceListingKey(Namespace namespace, Optional<String> user, Optional<String> credentialsDigest)
 {
-    @Override
-    protected String databricksJdbcUrl()
+    NamespaceListingKey
     {
-        return appendJdbcOption(requireEnv("DATABRICKS_133_JDBC_URL"), "EnableArrow=0");
+        requireNonNull(namespace, "namespace is null");
+        requireNonNull(user, "user is null");
+        requireNonNull(credentialsDigest, "credentialsDigest is null");
     }
 }

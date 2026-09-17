@@ -501,6 +501,10 @@ following properties:
 * - `iceberg.rest-catalog.socket-timeout`
   - Maximum time [Duration](prop-type-duration) allowed socket read/write operations
     before timing out.
+* - `iceberg.rest-catalog.max-retries`
+  - Maximum number of retry attempts for failed REST catalog HTTP requests
+    (default: `5`). Only idempotent requests, such as `GET`, are retried on
+    server errors; retries use exponential backoff.
 * - `iceberg.rest-catalog.session-timeout`
   - [Duration](prop-type-duration) to keep authentication session in cache. Defaults to `1h`.
 * - `iceberg.rest-catalog.oauth2.token`
@@ -529,6 +533,9 @@ following properties:
     Defaults to `false`.
 * - `iceberg.rest-catalog.view-endpoints-enabled`
   - Enable view endpoints. Defaults to `true`.
+* - `iceberg.rest-catalog.metrics-reporting-enabled`
+  - Report table scan and commit metrics to the REST catalog server. Defaults
+    to `true`.
 * - `iceberg.rest-catalog.server-assigned-table-location-enabled`
   - Let the REST catalog server assign locations for created tables instead of
     computing a default location from the namespace location. Must be enabled
@@ -548,6 +555,16 @@ following properties:
   - Maximum number of entries per case-insensitive name mapping cache. Applies
     independently to the namespace cache and the table/view cache. Defaults to
     `10000`.
+* - `iceberg.rest-catalog.case-insensitive-name-matching.namespace-cache.enabled`
+  - Cache the full list of tables and views per namespace, so that resolving
+    multiple case-insensitive names in the same namespace requires a single
+    listing request. Only used when
+    `iceberg.rest-catalog.case-insensitive-name-matching` is `true`. Defaults to
+    `true`.
+* - `iceberg.rest-catalog.case-insensitive-name-matching.namespace-cache.max-size`
+  - Maximum number of table or view identifiers retained across all namespaces
+    in the case-insensitive listing cache. Applies independently to the table
+    listing cache and the view listing cache. Defaults to `10000`.
 * - `iceberg.rest-catalog.http-headers`
   - Additional *non-sensitive* HTTP headers to include with requests to the REST catalog.
     Example: `Header-1: value 1, Header-2: value 2`.

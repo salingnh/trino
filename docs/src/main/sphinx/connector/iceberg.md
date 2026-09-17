@@ -718,7 +718,8 @@ Use the procedure `add_files_from_table` to add existing files from a Hive table
 in the current catalog, or `add_files` to add existing files from a specified
 location, to an existing Iceberg table. The `add_files_from_table` procedure is
 always available; `add_files` procedure additionally requires
-`iceberg.add-files-procedure.enabled` to be set to `true`.
+`iceberg.add-files-procedure.enabled` to be set to `true`. Neither procedure is
+supported for tables using Iceberg format version `3`.
  
 The data files must be the Parquet, ORC, or Avro file format.
 
@@ -1164,9 +1165,10 @@ connector using a {doc}`WITH </sql/create-table-as>` clause.
 * - `format_version`
   - Optionally specifies the format version of the Iceberg specification to use
     for new tables; `1`, `2`, or `3`. Defaults to `2`. Version `2` is required
-    for row level deletes. Version `3` support is experimental; row-level
-    updates, deletes, and OPTIMIZE are not supported. Tables with v3 features
-    such as column default values and encryption are not supported.
+    for row level deletes. Version `3` support is experimental. Row-level
+    updates and deletes on version `3` tables use deletion vectors. The
+    `add_files` and `add_files_from_table` procedures are not supported on
+    version `3` tables, and writing to encrypted tables is not supported.
     Version `3` is required for tables containing `VARIANT` columns.
 * - `max_commit_retry`
   - Number of times to retry a commit before failing. Defaults to the value of 
@@ -1302,6 +1304,13 @@ write.format.default   | PARQUET  |
 
 The `$history` table provides a log of the metadata changes performed on the
 Iceberg table.
+
+The table is derived from the snapshot log, which records each change to the
+current snapshot. Snapshots which never became current, such as intermediate
+snapshots of a multi-snapshot commit or snapshots on a branch, do not appear.
+A snapshot which became current more than once, for example after
+`rollback_to_snapshot`, appears once for each time it became current. The 
+`$snapshots` table lists all snapshots.
 
 You can retrieve the changelog of the Iceberg table `test_table` by using the
 following query:
@@ -2236,6 +2245,21 @@ use the data from the storage tables, even after the grace period expired.
 The Iceberg connector supports the {ref}`WHEN STALE <mv-when-stale>` clause in
 {doc}`/sql/create-materialized-view` to control the behavior when a materialized
 view is stale. 
+
+You can perform physical maintenance of the storage table with {ref}`ALTER
+MATERIALIZED VIEW EXECUTE <alter-materialized-view-execute>`. The `optimize`,
+`optimize_manifests`, `expire_snapshots`, `remove_orphan_files`, and
+`drop_extended_stats` procedures are supported. The `rollback_to_snapshot`,
+`add_files`, and `add_files_from_table` procedures are rejected, because they
+would desynchronize the storage table from the materialized view. Running a
+procedure requires the privilege to execute that procedure against the
+materialized view. The procedure preserves the metadata used to determine
+freshness, so a subsequent `REFRESH MATERIALIZED VIEW` can still be
+incremental:
+
+```
+ALTER MATERIALIZED VIEW mv_name EXECUTE optimize
+```
 
 Dropping a materialized view with {doc}`/sql/drop-materialized-view` removes
 the definition and the storage table.
