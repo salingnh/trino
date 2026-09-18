@@ -66,7 +66,10 @@ public final class ElasticsearchQueryBuilder
                 Domain domain = entry.getValue();
 
                 checkArgument(!domain.isNone(), "Unexpected NONE domain for %s", column.name());
-                if (!domain.isAll()) {
+                if (ElasticsearchKeywordPredicate.isSupported(column, domain)) {
+                    filterClauses.add(ElasticsearchKeywordPredicate.buildQuery(column, domain));
+                }
+                else if (!domain.isAll()) {
                     addPredicateToClauses(filterClauses, mustNotClauses, column.name(), domain, column.type());
                 }
             }

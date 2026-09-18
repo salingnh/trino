@@ -447,9 +447,8 @@ public class ElasticsearchClient
 
         return doRequest(path, body -> {
             try {
-                JsonNode mappings = JSON_MAPPER.readTree(body)
-                        .elements().next()
-                        .get("mappings");
+                JsonNode root = JSON_MAPPER.readTree(body);
+                JsonNode mappings = root.elements().next().get("mappings");
 
                 if (!mappings.elements().hasNext()) {
                     return new IndexMetadata(new IndexMetadata.ObjectType(ImmutableList.of()));
@@ -474,7 +473,8 @@ public class ElasticsearchClient
                     metaProperties = nullSafeNode(metaNode, "presto");
                 }
 
-                return new IndexMetadata(parseType(mappings.get("properties"), metaProperties));
+                // A subfield from one index is not sufficient evidence for the other indices behind an alias.
+                return new IndexMetadata(parseType(mappings.get("properties"), metaProperties, root.size() == 1));
             }
             catch (IOException e) {
                 throw new TrinoException(ELASTICSEARCH_INVALID_RESPONSE, e);
@@ -482,7 +482,7 @@ public class ElasticsearchClient
         });
     }
 
-    private IndexMetadata.ObjectType parseType(JsonNode properties, JsonNode metaProperties)
+    private IndexMetadata.ObjectType parseType(JsonNode properties, JsonNode metaProperties, boolean allowKeywordSubfields)
     {
         ImmutableList.Builder<IndexMetadata.Field> result = ImmutableList.builder();
         for (Entry<String, JsonNode> field : properties.properties()) {
@@ -518,17 +518,42 @@ public class ElasticsearchClient
                 case "scaled_float" -> result.add(new IndexMetadata.Field(asRawJson, isArray, name, new IndexMetadata.ScaledFloatType(value.get("scaling_factor").asDouble())));
                 case "nested", "object" -> {
                     if (value.has("properties")) {
-                        result.add(new IndexMetadata.Field(asRawJson, isArray, name, parseType(value.get("properties"), metaNode)));
+                        result.add(new IndexMetadata.Field(asRawJson, isArray, name, parseType(value.get("properties"), metaNode, false)));
                     }
                     else {
                         LOG.debug("Ignoring empty object field: %s", name);
                     }
                 }
-                default -> result.add(new IndexMetadata.Field(asRawJson, isArray, name, new IndexMetadata.PrimitiveType(type)));
+                default -> {
+                    Optional<String> keyword = Optional.empty();
+                    if (allowKeywordSubfields && type.equals("text") && !isArray && !asRawJson) {
+                        keyword = keywordSubfield(value);
+                    }
+                    result.add(new IndexMetadata.Field(asRawJson, isArray, name, new IndexMetadata.PrimitiveType(type, keyword)));
+                }
             }
         }
 
         return new IndexMetadata.ObjectType(result.build());
+    }
+
+    @VisibleForTesting
+    static Optional<String> keywordSubfield(JsonNode field)
+    {
+        // Mapping options which rewrite or omit values are outside the initial pushdown scope.
+        return field.path("fields").properties().stream()
+                .filter(entry -> {
+                    JsonNode subfield = entry.getValue();
+                    return subfield.path("type").asText().equals("keyword")
+                            && subfield.path("index").asBoolean(true)
+                            && !subfield.has("normalizer")
+                            && !subfield.has("ignore_above")
+                            && !subfield.has("null_value")
+                            && !subfield.has("script");
+                })
+                .map(Entry::getKey)
+                .sorted()
+                .findFirst();
     }
 
     private JsonNode nullSafeNode(JsonNode jsonNode, String name)
