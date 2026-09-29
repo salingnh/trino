@@ -486,7 +486,8 @@ public class ElasticsearchMetadata
         ElasticsearchTableHandle handle = (ElasticsearchTableHandle) table;
 
         return new ConnectorTableProperties(
-                handle.constraint(),
+                // Keyword candidates also include documents missing the subfield, so they are not enforced domains.
+                handle.constraint().filter((column, domain) -> !ElasticsearchKeywordPredicate.isSupported((ElasticsearchColumnHandle) column, domain)),
                 Optional.empty(),
                 Optional.empty(),
                 ImmutableList.of());
@@ -499,6 +500,11 @@ public class ElasticsearchMetadata
 
         if (isPassthroughQuery(handle)) {
             // limit pushdown currently not supported passthrough query
+            return Optional.empty();
+        }
+
+        if (!handle.constraint().filter((column, domain) -> ElasticsearchKeywordPredicate.isSupported((ElasticsearchColumnHandle) column, domain)).isAll()) {
+            // The SQL residual may discard keyword candidates. Do not truncate the candidate stream before it runs.
             return Optional.empty();
         }
 
@@ -540,6 +546,10 @@ public class ElasticsearchMetadata
             }
             else {
                 unsupported.put(column, entry.getValue());
+                if (handle.limit().isEmpty() && ElasticsearchKeywordPredicate.isSupported(column, entry.getValue())) {
+                    // Use the subfield to prune candidates, but keep the original SQL domain as a residual.
+                    supported.put(column, entry.getValue());
+                }
             }
         }
 
