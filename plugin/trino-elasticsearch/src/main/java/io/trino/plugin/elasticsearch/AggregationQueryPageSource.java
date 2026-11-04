@@ -167,7 +167,7 @@ class AggregationQueryPageSource
             appendMetric(builders[i], outputs.get(i), metrics, totalHits);
         }
         finished = true;
-        return page(builders);
+        return page(builders, 1);
     }
 
     private SourcePage groupedPage()
@@ -205,7 +205,7 @@ class AggregationQueryPageSource
             }
             afterKey = Optional.of(nextKey);
         }
-        return page(builders);
+        return page(builders, buckets.size());
     }
 
     private JsonNode request(JsonNode body)
@@ -309,13 +309,13 @@ class AggregationQueryPageSource
         return builders;
     }
 
-    private static SourcePage page(BlockBuilder[] builders)
+    private static SourcePage page(BlockBuilder[] builders, int positionCount)
     {
         Block[] blocks = new Block[builders.length];
         for (int i = 0; i < builders.length; i++) {
             blocks[i] = builders[i].build();
         }
-        return SourcePage.create(new Page(blocks));
+        return SourcePage.create(new Page(positionCount, blocks));
     }
 
     @Override

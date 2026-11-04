@@ -330,6 +330,25 @@ public class TestElasticsearchPageSourceDiagnostics
     }
 
     @Test
+    public void testAggregationWithoutProjectedColumnsPreservesRowCount()
+            throws Exception
+    {
+        for (boolean grouped : List.of(false, true)) {
+            try (SearchServer server = new SearchServer("42", false, false);
+                    var source = server.aggregation(grouped, 2, List.of())) {
+                if (grouped) {
+                    server.aggregationResponse = "{\"timed_out\":false,\"_shards\":{\"failed\":0},\"aggregations\":{\"groups\":{\"buckets\":[{\"key\":{\"g0\":1},\"doc_count\":3}]}}}";
+                }
+                var page = source.getNextSourcePage();
+                assertThat(page.getPositionCount()).isEqualTo(1);
+                assertThat(page.getChannelCount()).isZero();
+                assertThat(source.isFinished()).isTrue();
+                assertThat(source.getNextSourcePage()).isNull();
+            }
+        }
+    }
+
+    @Test
     public void testAggregationAccountingAndClose()
             throws Exception
     {
@@ -634,6 +653,11 @@ public class TestElasticsearchPageSourceDiagnostics
 
         public AggregationQueryPageSource aggregation(boolean grouped, int size)
         {
+            return aggregation(grouped, size, List.of(ID));
+        }
+
+        public AggregationQueryPageSource aggregation(boolean grouped, int size, List<ElasticsearchColumnHandle> outputs)
+        {
             ElasticsearchTableHandle table = new ElasticsearchTableHandle(
                     SCAN,
                     "default",
@@ -647,7 +671,7 @@ public class TestElasticsearchPageSourceDiagnostics
                     List.of(),
                     Set.of(ID),
                     Optional.of(new ElasticsearchAggregation(grouped ? List.of(ID) : List.of(), List.of(new ElasticsearchAggregate("id", ElasticsearchAggregate.Function.COUNT_ALL, Optional.empty(), INTEGER)))));
-            return new AggregationQueryPageSource(client, table, List.of(ID), diagnostics, size);
+            return new AggregationQueryPageSource(client, table, outputs, diagnostics, size);
         }
 
         @Override
