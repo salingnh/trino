@@ -17,6 +17,8 @@ import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.node.BooleanNode;
 import com.fasterxml.jackson.databind.node.DoubleNode;
 import com.fasterxml.jackson.databind.node.IntNode;
+import com.fasterxml.jackson.databind.node.LongNode;
+import com.fasterxml.jackson.databind.node.NullNode;
 import com.fasterxml.jackson.databind.node.TextNode;
 import io.trino.spi.TrinoException;
 import io.trino.spi.block.BlockBuilder;
@@ -25,6 +27,7 @@ import org.junit.jupiter.api.Test;
 import static io.trino.plugin.elasticsearch.AggregationQueryPageSource.appendValue;
 import static io.trino.spi.StandardErrorCode.TYPE_MISMATCH;
 import static io.trino.spi.type.BooleanType.BOOLEAN;
+import static io.trino.spi.type.TimestampType.TIMESTAMP_MILLIS;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
@@ -53,6 +56,23 @@ public class TestAggregationQueryPageSource
         assertThat(decodeBoolean(new TextNode(""))).isFalse();
 
         assertInvalidBoolean(new TextNode("invalid"));
+    }
+
+    @Test
+    public void testTimestampDecoding()
+    {
+        for (long millis : new long[] {-1_234_567_890L, 0, 1_234_567_890L}) {
+            var type = TIMESTAMP_MILLIS;
+            BlockBuilder builder = type.createBlockBuilder(null, 1);
+            appendValue(builder, type, new LongNode(millis));
+            assertThat(type.getLong(builder.build(), 0)).isEqualTo(millis * 1000);
+        }
+        var type = TIMESTAMP_MILLIS;
+        BlockBuilder builder = type.createBlockBuilder(null, 1);
+        appendValue(builder, type, NullNode.instance);
+        assertThat(builder.build().isNull(0)).isTrue();
+        assertThatThrownBy(() -> appendValue(type.createBlockBuilder(null, 1), type, new TextNode("2020-01-01")))
+                .isInstanceOf(TrinoException.class);
     }
 
     private static void assertInvalidBoolean(JsonNode jsonNode)

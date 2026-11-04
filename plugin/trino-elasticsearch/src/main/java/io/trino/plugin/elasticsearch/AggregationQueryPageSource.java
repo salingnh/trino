@@ -43,8 +43,10 @@ import static io.trino.spi.type.DoubleType.DOUBLE;
 import static io.trino.spi.type.IntegerType.INTEGER;
 import static io.trino.spi.type.RealType.REAL;
 import static io.trino.spi.type.SmallintType.SMALLINT;
+import static io.trino.spi.type.TimestampType.TIMESTAMP_MILLIS;
 import static io.trino.spi.type.TinyintType.TINYINT;
 import static java.lang.Float.floatToRawIntBits;
+import static java.lang.Math.multiplyExact;
 import static java.lang.String.format;
 import static java.util.Objects.requireNonNull;
 
@@ -235,7 +237,13 @@ class AggregationQueryPageSource
             builder.appendNull();
             return;
         }
-        if (type.equals(BIGINT) || type.equals(INTEGER) || type.equals(SMALLINT) || type.equals(TINYINT)) {
+        if (type.equals(TIMESTAMP_MILLIS)) {
+            if (!value.isIntegralNumber() || !value.canConvertToLong()) {
+                throw new TrinoException(ELASTICSEARCH_INVALID_RESPONSE, "Invalid timestamp aggregation key: " + value);
+            }
+            type.writeLong(builder, multiplyExact(value.longValue(), 1000));
+        }
+        else if (type.equals(BIGINT) || type.equals(INTEGER) || type.equals(SMALLINT) || type.equals(TINYINT)) {
             type.writeLong(builder, value.asLong());
         }
         else if (type.equals(DOUBLE)) {

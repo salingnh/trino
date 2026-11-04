@@ -183,6 +183,55 @@ public abstract class BaseElasticsearchConnectorTest
     }
 
     @Test
+    public void testIntegralAverageAndTimestampGrouping()
+            throws IOException
+    {
+        String name = "avg_query_shapes_" + randomNameSuffix();
+        Request create = new Request("PUT", "/" + name);
+        create.setJsonEntity(
+                """
+                {"settings":{"number_of_shards":3},"mappings":{"properties":{
+                  "b":{"type":"byte"},"s":{"type":"short"},"i":{"type":"integer"},"l":{"type":"long"},
+                  "ts":{"type":"date"},"flag":{"type":"boolean"},"agg_0":{"type":"long"}}}}
+                """);
+        client.performRequest(create);
+        try {
+            index(name, Map.of(
+                    "b", -128,
+                    "s", -32768,
+                    "i", Integer.MIN_VALUE,
+                    "l", -9007199254740993L,
+                    "ts", "2020-01-01T00:00:00.001Z",
+                    "flag", true,
+                    "agg_0", 9007199254740993L));
+            index(name, Map.of(
+                    "b", 127,
+                    "s", 32767,
+                    "i", Integer.MAX_VALUE,
+                    "l", 9007199254740993L,
+                    "ts", "2020-01-01T00:00:00.001Z",
+                    "flag", true,
+                    "agg_0", 9007199254740993L));
+            index(name, Map.of());
+            Session disabled = Session.builder(getSession())
+                    .setCatalogSessionProperty("elasticsearch", "aggregation_pushdown_enabled", "false").build();
+            for (String column : List.of("b", "s", "i", "l")) {
+                String sql = "SELECT avg(" + column + ") FROM " + name;
+                assertThat(query(sql)).matches(disabled, sql).isFullyPushedDown();
+                String grouped = "SELECT ts, flag, agg_0, avg(" + column + ") FROM " + name + " GROUP BY ts, flag, agg_0";
+                assertThat(query(grouped)).matches(disabled, grouped).isFullyPushedDown();
+                String empty = "SELECT avg(" + column + ") FROM " + name + " WHERE agg_0 < 0";
+                assertThat(query(empty)).matches("VALUES CAST(NULL AS double)").isFullyPushedDown();
+            }
+            assertThat(query("SELECT agg_0, count(*) FROM " + name + " GROUP BY agg_0"))
+                    .matches(disabled, "SELECT agg_0, count(*) FROM " + name + " GROUP BY agg_0").isFullyPushedDown();
+        }
+        finally {
+            deleteIndex(name);
+        }
+    }
+
+    @Test
     public void testAverageFiftyThousandDocuments()
             throws IOException
     {

@@ -814,7 +814,7 @@ public class ElasticsearchMetadata
             if (BuiltinColumns.isBuiltinColumn(column.name()) || (!column.supportsQueryShapes() || !isAggregatable(column.elasticsearchType()))
                     || column.elasticsearchType() instanceof ScaledFloatType
                     || column.type().equals(REAL) || column.type().equals(DOUBLE)
-                    || !isSupportedGroupingType(column.type())) {
+                    || !(isSupportedGroupingType(column.type()) || column.type().equals(TIMESTAMP_MILLIS))) {
                 return Optional.empty();
             }
             // Grouping columns pass through unchanged: they belong only in the grouping-column mapping,
