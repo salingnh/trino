@@ -137,6 +137,7 @@ import static io.trino.plugin.elasticsearch.ElasticsearchTableHandle.Type.QUERY;
 import static io.trino.plugin.elasticsearch.ElasticsearchTableHandle.Type.SCAN;
 import static io.trino.spi.StandardErrorCode.INVALID_FUNCTION_ARGUMENT;
 import static io.trino.spi.StandardErrorCode.NOT_SUPPORTED;
+import static io.trino.spi.expression.StandardFunctions.CAST_FUNCTION_NAME;
 import static io.trino.spi.expression.StandardFunctions.EQUAL_OPERATOR_FUNCTION_NAME;
 import static io.trino.spi.expression.StandardFunctions.LIKE_FUNCTION_NAME;
 import static io.trino.spi.type.BigintType.BIGINT;
@@ -1285,16 +1286,19 @@ public class ElasticsearchMetadata
         // Create projected column representations for supported sub expressions. Simple column references and chain of
         // dereferences on a variable are supported right now.
         Set<ConnectorExpression> projectedExpressions = projections.stream()
-                .flatMap(expression -> extractSupportedProjectedColumns(expression, ElasticsearchMetadata::isSupportedForPushdown).stream())
+                .flatMap(expression -> isSupportedIntegerWidening(expression)
+                        ? Stream.of(expression)
+                        : extractSupportedProjectedColumns(expression, ElasticsearchMetadata::isSupportedForPushdown).stream())
                 .collect(toImmutableSet());
 
         Map<ConnectorExpression, ProjectedColumnRepresentation> columnProjections = projectedExpressions.stream()
-                .collect(toImmutableMap(identity(), ApplyProjectionUtil::createProjectedColumnRepresentation));
+                .collect(toImmutableMap(identity(), expression -> ApplyProjectionUtil.createProjectedColumnRepresentation(projectionInput(expression))));
 
         ElasticsearchTableHandle elasticsearchTableHandle = (ElasticsearchTableHandle) handle;
 
         // all references are simple variables
-        if (columnProjections.values().stream().allMatch(ProjectedColumnRepresentation::isVariable)) {
+        if (projectedExpressions.stream().noneMatch(ElasticsearchMetadata::isSupportedIntegerWidening)
+                && columnProjections.values().stream().allMatch(ProjectedColumnRepresentation::isVariable)) {
             Set<ElasticsearchColumnHandle> projectedColumns = assignments.values().stream()
                     .map(ElasticsearchColumnHandle.class::cast)
                     .collect(toImmutableSet());
@@ -1324,8 +1328,24 @@ public class ElasticsearchMetadata
             ProjectedColumnRepresentation projectedColumn = entry.getValue();
 
             ElasticsearchColumnHandle baseColumnHandle = (ElasticsearchColumnHandle) assignments.get(projectedColumn.getVariable().getName());
-            ElasticsearchColumnHandle projectedColumnHandle = projectColumn(baseColumnHandle, projectedColumn.getDereferenceIndices(), expression.getType());
+            ElasticsearchColumnHandle projectedColumnHandle = projectColumn(baseColumnHandle, projectedColumn.getDereferenceIndices(), projectionInput(expression).getType());
             String projectedColumnName = projectedColumnHandle.name();
+            if (isSupportedIntegerWidening(expression)) {
+                // AVG over narrow integers is resolved by the engine as AVG(CAST(column AS BIGINT)).
+                // This cast is lossless and can be decoded directly while preserving the mapping proof.
+                projectedColumnHandle = new ElasticsearchColumnHandle(
+                        projectedColumnHandle.path(),
+                        BIGINT,
+                        projectedColumnHandle.elasticsearchType(),
+                        new BigintDecoder.Descriptor(projectedColumnHandle.name()),
+                        projectedColumnHandle.supportsPredicates(),
+                        projectedColumnHandle.supportsQueryShapes());
+                projectedColumnName += "$bigint";
+            }
+            while (newAssignments.containsKey(projectedColumnName)
+                    && !newAssignments.get(projectedColumnName).getColumn().equals(projectedColumnHandle)) {
+                projectedColumnName = "_" + projectedColumnName;
+            }
 
             Variable projectedColumnVariable = new Variable(projectedColumnName, expression.getType());
             Assignment newAssignment = new Assignment(projectedColumnName, projectedColumnHandle, expression.getType());
@@ -1347,6 +1367,23 @@ public class ElasticsearchMetadata
                 newProjections,
                 outputAssignments,
                 false));
+    }
+
+    private static ConnectorExpression projectionInput(ConnectorExpression expression)
+    {
+        return isSupportedIntegerWidening(expression) ? ((Call) expression).getArguments().getFirst() : expression;
+    }
+
+    private static boolean isSupportedIntegerWidening(ConnectorExpression expression)
+    {
+        if (!(expression instanceof Call call) || !call.getFunctionName().equals(CAST_FUNCTION_NAME)
+                || !call.getType().equals(BIGINT) || call.getArguments().size() != 1) {
+            return false;
+        }
+        ConnectorExpression input = call.getArguments().getFirst();
+        Type type = input.getType();
+        return (type.equals(TINYINT) || type.equals(SMALLINT) || type.equals(INTEGER))
+                && extractSupportedProjectedColumns(input, ElasticsearchMetadata::isSupportedForPushdown).equals(List.of(input));
     }
 
     private static boolean isSupportedForPushdown(ConnectorExpression connectorExpression)

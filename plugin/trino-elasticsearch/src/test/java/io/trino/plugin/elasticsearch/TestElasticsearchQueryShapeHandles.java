@@ -18,9 +18,11 @@ import io.airlift.json.JsonCodecFactory;
 import io.airlift.json.JsonMapperProvider;
 import io.trino.plugin.elasticsearch.client.ElasticsearchClient;
 import io.trino.plugin.elasticsearch.client.IndexMetadata;
+import io.trino.plugin.elasticsearch.decoders.BigintDecoder;
 import io.trino.plugin.elasticsearch.decoders.IntegerDecoder;
 import io.trino.plugin.elasticsearch.decoders.RowDecoder;
 import io.trino.plugin.elasticsearch.expression.ElasticsearchRemotePredicate.Term;
+import io.trino.spi.expression.Call;
 import io.trino.spi.expression.FieldDereference;
 import io.trino.spi.expression.Variable;
 import io.trino.spi.type.RowType;
@@ -35,6 +37,8 @@ import java.util.Optional;
 
 import static io.trino.plugin.elasticsearch.ElasticsearchRemotePredicateTranslator.withRemotePredicate;
 import static io.trino.plugin.elasticsearch.ElasticsearchTableHandle.Type.SCAN;
+import static io.trino.spi.expression.StandardFunctions.CAST_FUNCTION_NAME;
+import static io.trino.spi.type.BigintType.BIGINT;
 import static io.trino.spi.type.IntegerType.INTEGER;
 import static io.trino.type.InternalTypeManager.TESTING_TYPE_MANAGER;
 import static org.assertj.core.api.Assertions.assertThat;
@@ -53,6 +57,36 @@ class TestElasticsearchQueryShapeHandles
             assertThat(codec.fromJson(codec.toJson(column))).isEqualTo(column);
             var fieldCodec = new JsonCodecFactory(mapper).jsonCodec(IndexMetadata.Field.class);
             assertThat(fieldCodec.fromJson(fieldCodec.toJson(field))).isEqualTo(field);
+        }
+    }
+
+    @Test
+    void testLosslessIntegerCastProjectionPreservesSafetyAndDistinctOutputs()
+            throws Exception
+    {
+        ElasticsearchConfig config = new ElasticsearchConfig().setHosts(List.of("localhost"));
+        var client = new ElasticsearchClient(config, Optional.empty(), Optional.empty());
+        try {
+            var metadata = new RuleBasedElasticsearchMetadata(TESTING_TYPE_MANAGER, client, config);
+            for (boolean safe : List.of(false, true)) {
+                var column = new ElasticsearchColumnHandle(List.of("value"), INTEGER, new IndexMetadata.PrimitiveType("integer"), new IntegerDecoder.Descriptor("value"), true, safe);
+                var variable = new Variable("v", INTEGER);
+                var cast = new Call(BIGINT, CAST_FUNCTION_NAME, List.of(variable));
+                var input = withRemotePredicate(new ElasticsearchTableHandle(SCAN, "default", "events", Optional.empty()), Optional.of(new Term("id", 1L)));
+                var result = metadata.applyProjection(TestingConnectorSession.SESSION, input, List.of(variable, cast), Map.of("v", column)).orElseThrow();
+                assertThat(result.getProjections()).allMatch(Variable.class::isInstance);
+                assertThat(result.getAssignments()).hasSize(2);
+                assertThat(result.getAssignments().stream().map(assignment -> assignment.getVariable()).distinct().count()).isEqualTo(2);
+                var widened = result.getAssignments().stream().map(assignment -> (ElasticsearchColumnHandle) assignment.getColumn())
+                        .filter(handle -> handle.type().equals(BIGINT)).findFirst().orElseThrow();
+                assertThat(widened.path()).isEqualTo(column.path());
+                assertThat(widened.supportsQueryShapes()).isEqualTo(safe);
+                assertThat(widened.decoderDescriptor()).isInstanceOf(BigintDecoder.Descriptor.class);
+                assertThat(((ElasticsearchTableHandle) result.getHandle()).remotePredicate()).isEqualTo(input.remotePredicate());
+            }
+        }
+        finally {
+            client.close();
         }
     }
 
