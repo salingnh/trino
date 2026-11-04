@@ -86,3 +86,23 @@ digits, treating signed zero as equal; exact integral keys remain exact.
 
 Detailed output is in `results/verification.json` and the console log. Preserve
 failed runs separately when correcting implementation or harness issues.
+
+## CLI and manual SQL
+
+A source-built CLI is available locally at
+`client/trino-cli/target/trino-cli-484-SNAPSHOT-executable.jar` and on the deployed
+lab at `/runtime/trino-cli.jar` inside the Trino container. Use JDK 25.
+
+On the lab host:
+
+```bash
+cd /opt/trino-query-shape-lab
+docker compose -f compose.yaml exec trino java --enable-native-access=ALL-UNNAMED -jar /runtime/trino-cli.jar --server http://localhost:8080 --user lab --catalog es8_scroll --schema default
+```
+
+From a workstation with Java 25, run the local executable JAR with
+`--server http://<lab-host>:18081 --user lab --catalog es8_scroll --schema default`.
+Add `--file testing/elasticsearch-query-shape-lab/manual-tests.sql` to run the
+manual query collection in batch. Change catalogs to exercise ES7 and PIT.
+The SQL collection resets the session switches after comparing enabled/disabled
+pushdown; it does not recreate fixtures or inject failures.

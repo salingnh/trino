@@ -82,3 +82,14 @@ The live SQL suite does not replace the entire Maven connector/Testcontainers
 suite or Sphinx build. Those and final-SHA GitHub Actions remain separate gates.
 The user explicitly authorized direct SSH deployment for this isolated test;
 no production merge, direct production push or GitHub deployment was performed.
+
+## CLI follow-up
+
+The manual CLI collection exposed an empty-projection page bug in
+`SELECT count(*) FROM (SELECT id FROM lab_qs_volume GROUP BY id)`.
+Commit `fe97945eb9c` preserves explicit page row counts even with zero output
+columns. The source-built connector was redeployed to the lab with that revision.
+The connector package passed 269 local unit/HTTP tests (one skipped benchmark)
+with Error Prone. The full 202 live checks passed again, and the manual SQL file
+completed successfully from the Windows CLI. The original measurements above
+remain the recorded measurements at revision `cc55f51f821`.
