@@ -124,6 +124,10 @@ The following table details all general configuration properties:
     `ignore_above` limit. Can be overridden per query with the
     `keyword_subfield_pushdown_with_ignore_above` session property.
   - `false`
+* - `elasticsearch.aggregation-page-size`
+  - Maximum composite aggregation buckets per response. Must be at least 1.
+    Larger pages reduce requests but can increase memory per response.
+  - `10000`
 * - `elasticsearch.aggregation-pushdown.enabled`
   - Enable pushing down aggregations to Elasticsearch. Can be overridden per
     query with the `aggregation_pushdown_enabled` session property.
@@ -619,13 +623,27 @@ so Trino does not read the underlying documents.
 The following aggregate functions are pushed down:
 
 - `count(*)` and `count(column)`
-- `sum`, `min`, `max`, and `avg` over numeric columns
+- `avg` over `tinyint`, `smallint`, `integer`, `bigint`, `real`, and `double`
+- `sum` over `real` and `double`
+- `min` and `max` over numeric columns except `bigint`
 - `approx_distinct`
 
-An aggregation is only pushed down when Elasticsearch computes it exactly.
-`count(DISTINCT ...)` is not pushed down, because Elasticsearch computes distinct
-counts approximately. Grouping keys must be `boolean`, numeric, or `keyword`
-columns.
+Integer `avg` returns `double`. Both Trino and Elasticsearch accumulate integer
+averages using floating-point arithmetic; shard reduction and summation order can
+produce small differences. Pushdown avoids transferring and decoding source
+documents for the aggregate. Integral `sum` and `bigint` `min`/`max` remain in Trino.
+
+`count(DISTINCT ...)`, filtered aggregates, and ordered aggregates are not pushed
+down. Grouping keys can be `boolean`, integral, `keyword`, or `timestamp(3)` from
+the default Elasticsearch `date` mapping. Floating-point TopN and grouping stay
+in Trino because Elasticsearch distinguishes positive and negative zero.
+
+Pushdown requires compatible, source-equivalent mappings in every backing index.
+Fields affected by source filters, arrays, runtime definitions, scripts,
+normalization, ignored values, or unsafe ancestors remain in Trino. Text keyword
+multi-fields are conservatively excluded because existing documents might not
+have been backfilled. Timeouts, partial shard results, and inexact global hit
+counts fail the aggregation rather than returning incomplete results.
 
 Aggregation pushdown is enabled by default. Disable it with the
 `elasticsearch.aggregation-pushdown.enabled` catalog configuration property or
