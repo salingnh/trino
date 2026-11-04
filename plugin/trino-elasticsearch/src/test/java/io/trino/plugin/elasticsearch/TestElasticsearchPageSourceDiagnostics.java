@@ -294,6 +294,19 @@ public class TestElasticsearchPageSourceDiagnostics
     }
 
     @Test
+    public void testAggregationRejectsMissingCompletionMetadata()
+            throws Exception
+    {
+        try (SearchServer server = new SearchServer("42", false, false);
+                AggregationQueryPageSource source = server.aggregation()) {
+            server.aggregationResponse = "{\"hits\":{\"total\":{\"relation\":\"eq\",\"value\":1}}}";
+            assertThatThrownBy(source::getNextSourcePage).isInstanceOf(TrinoException.class);
+            assertThat(source.isFinished()).isTrue();
+            assertThat(source.getNextSourcePage()).isNull();
+        }
+    }
+
+    @Test
     public void testAggregationCloseBeforeReading()
             throws Exception
     {
@@ -328,12 +341,31 @@ public class TestElasticsearchPageSourceDiagnostics
         try (SearchServer server = new SearchServer("42", false, false);
                 AggregationQueryPageSource source = server.aggregation(true)) {
             String buckets = String.join(",", Collections.nCopies(1000, "{\"key\":{\"g0\":1},\"doc_count\":1}"));
-            server.aggregationResponse = "{\"aggregations\":{\"groups\":{\"buckets\":[" + buckets + "],\"after_key\":{\"g0\":1}}}}";
+            server.aggregationResponse = "{\"timed_out\":false,\"_shards\":{\"failed\":0},\"aggregations\":{\"groups\":{\"buckets\":[" + buckets + "],\"after_key\":{\"g0\":1}}}}";
             assertThat(source.getNextSourcePage().getPositionCount()).isEqualTo(1000);
             assertThatThrownBy(source::getNextSourcePage).isInstanceOf(TrinoException.class).hasMessageContaining("non-progressing");
             assertThat(source.isFinished()).isTrue();
             assertThat(server.diagnostics.getAggregationRows()).isEqualTo(1000);
             assertThat(server.diagnostics.getAggregationOutputBytes()).isPositive();
+        }
+    }
+
+    @Test
+    public void testAggregationRejectsInvalidCompletion()
+            throws Exception
+    {
+        for (String metadata : List.of(
+                "\"timed_out\":true,\"_shards\":{\"failed\":0}",
+                "\"timed_out\":false,\"_shards\":{\"failed\":1}",
+                "\"timed_out\":false,\"_shards\":{\"failed\":4294967296}",
+                "\"timed_out\":\"false\",\"_shards\":{\"failed\":0}")) {
+            try (SearchServer server = new SearchServer("42", false, false);
+                    AggregationQueryPageSource source = server.aggregation()) {
+                server.aggregationResponse = "{" + metadata + ",\"hits\":{\"total\":{\"value\":1,\"relation\":\"eq\"}},\"aggregations\":{}}";
+                assertThatThrownBy(source::getNextSourcePage).isInstanceOf(TrinoException.class);
+                assertThat(source.getNextSourcePage()).isNull();
+                assertThat(server.searchBodies).hasSize(1);
+            }
         }
     }
 
@@ -372,7 +404,7 @@ public class TestElasticsearchPageSourceDiagnostics
         private final List<String> requests = new CopyOnWriteArrayList<>();
         private final List<String> clearBodies = new CopyOnWriteArrayList<>();
         private final List<String> searchBodies = new CopyOnWriteArrayList<>();
-        private volatile String aggregationResponse = "{\"hits\":{\"total\":{\"value\":3,\"relation\":\"eq\"}},\"aggregations\":{}}";
+        private volatile String aggregationResponse = "{\"timed_out\":false,\"_shards\":{\"failed\":0},\"hits\":{\"total\":{\"value\":3,\"relation\":\"eq\"}},\"aggregations\":{}}";
         private volatile String initialSearchResponse;
 
         public SearchServer(String value, boolean failNextPage, boolean failClear)

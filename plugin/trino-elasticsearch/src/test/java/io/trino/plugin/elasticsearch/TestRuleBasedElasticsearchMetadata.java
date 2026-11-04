@@ -19,6 +19,7 @@ import io.trino.plugin.elasticsearch.decoders.DoubleDecoder;
 import io.trino.plugin.elasticsearch.decoders.IntegerDecoder;
 import io.trino.plugin.elasticsearch.decoders.VarcharDecoder;
 import io.trino.plugin.elasticsearch.expression.ElasticsearchRemotePredicate;
+import io.trino.spi.connector.AggregateFunction;
 import io.trino.spi.connector.ColumnHandle;
 import io.trino.spi.connector.ConnectorSession;
 import io.trino.spi.connector.ConnectorTableHandle;
@@ -46,6 +47,7 @@ import static io.trino.plugin.elasticsearch.ElasticsearchRemotePredicateTranslat
 import static io.trino.plugin.elasticsearch.ElasticsearchTableHandle.Type.SCAN;
 import static io.trino.plugin.elasticsearch.FullTextPushdownMode.SAFE;
 import static io.trino.spi.expression.Constant.TRUE;
+import static io.trino.spi.type.BigintType.BIGINT;
 import static io.trino.spi.type.DoubleType.DOUBLE;
 import static io.trino.spi.type.IntegerType.INTEGER;
 import static io.trino.spi.type.VarcharType.VARCHAR;
@@ -119,6 +121,17 @@ public class TestRuleBasedElasticsearchMetadata
             assertThat(metadata.applyTopN(session, emptyTable(), 1, List.of(new SortItem("amount", order)), Map.of("amount", floating))).isEmpty();
         }
         assertThat(metadata.applyAggregation(session, emptyTable(), List.of(), Map.of("amount", floating), List.of(List.of(floating)))).isEmpty();
+    }
+
+    @Test
+    public void testAggregateNameDoesNotCollideWithGroupingColumn()
+    {
+        ElasticsearchColumnHandle key = new ElasticsearchColumnHandle(
+                List.of("agg_0"), INTEGER, new IndexMetadata.PrimitiveType("integer"), new IntegerDecoder.Descriptor("agg_0"), true);
+        AggregateFunction count = new AggregateFunction("count", BIGINT, List.of(), List.of(), false, Optional.empty());
+        ElasticsearchTableHandle result = (ElasticsearchTableHandle) metadata.applyAggregation(
+                session, emptyTable(), List.of(count), Map.of("key", key), List.of(List.of(key))).orElseThrow().getHandle();
+        assertThat(result.aggregation().orElseThrow().aggregates().getFirst().outputName()).isNotEqualTo(key.name());
     }
 
     @Test

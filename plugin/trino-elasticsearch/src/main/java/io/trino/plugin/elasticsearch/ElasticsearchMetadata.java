@@ -104,6 +104,7 @@ import org.elasticsearch.client.ResponseException;
 
 import java.util.ArrayList;
 import java.util.HashMap;
+import java.util.HashSet;
 import java.util.Iterator;
 import java.util.List;
 import java.util.Map;
@@ -824,9 +825,18 @@ public class ElasticsearchMetadata
         }
 
         ImmutableList.Builder<ElasticsearchAggregate> metrics = ImmutableList.builder();
+        Set<String> outputNames = new HashSet<>(assignments.keySet());
+        assignments.values().stream().map(ElasticsearchColumnHandle.class::cast).map(ElasticsearchColumnHandle::name).forEach(outputNames::add);
+        groupingSets.get(0).stream().map(ElasticsearchColumnHandle.class::cast).map(ElasticsearchColumnHandle::name).forEach(outputNames::add);
         int counter = 0;
         for (AggregateFunction aggregate : aggregates) {
-            Optional<ElasticsearchAggregate> converted = toElasticsearchAggregate(aggregate, assignments, "agg_" + counter);
+            String outputName = "agg_" + counter;
+            while (outputNames.contains(outputName) || outputNames.contains(outputName + "_count")) {
+                outputName = "_" + outputName;
+            }
+            outputNames.add(outputName);
+            outputNames.add(outputName + "_count");
+            Optional<ElasticsearchAggregate> converted = toElasticsearchAggregate(aggregate, assignments, outputName);
             if (converted.isEmpty()) {
                 return Optional.empty();
             }

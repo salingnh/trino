@@ -832,7 +832,7 @@ public class ElasticsearchClient
         try {
             return parseSearchResponse(client.performRequest(
                     "POST",
-                    "/_search",
+                    "/_search?allow_partial_search_results=false",
                     ImmutableMap.of(),
                     new StringEntity(body.toString(), UTF_8),
                     new BasicHeader("Content-Type", "application/json")), _ -> {}, context);
@@ -1029,7 +1029,7 @@ public class ElasticsearchClient
         try {
             response = client.performRequest(
                     "POST",
-                    format("/%s/_search", index),
+                    format("/%s/_search?allow_partial_search_results=false", index),
                     ImmutableMap.of(),
                     new StringEntity(body.toString(), UTF_8),
                     new BasicHeader("Content-Type", "application/json"));

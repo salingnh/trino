@@ -144,7 +144,11 @@ class AggregationQueryPageSource
         if (!response.path("hits").path("total").path("relation").asText().equals("eq")) {
             throw new TrinoException(ELASTICSEARCH_INVALID_RESPONSE, "Aggregation returned an inexact document count");
         }
-        long totalHits = response.path("hits").path("total").path("value").asLong();
+        JsonNode count = response.path("hits").path("total").path("value");
+        if (!count.isIntegralNumber() || !count.canConvertToLong() || count.longValue() < 0) {
+            throw new TrinoException(ELASTICSEARCH_INVALID_RESPONSE, "Aggregation returned an invalid document count");
+        }
+        long totalHits = count.longValue();
         JsonNode metrics = response.path("aggregations");
 
         BlockBuilder[] builders = createBuilders(1);
@@ -198,7 +202,8 @@ class AggregationQueryPageSource
     {
         diagnostics.recordRemoteRequest(AGGREGATION);
         JsonNode response = client.aggregate(index, body);
-        if (response.path("timed_out").asBoolean() || response.path("_shards").path("failed").asInt() > 0
+        if (!response.path("timed_out").isBoolean() || !response.path("_shards").path("failed").isIntegralNumber()
+                || response.path("timed_out").asBoolean() || response.path("_shards").path("failed").bigIntegerValue().signum() != 0
                 || (body.has("aggs") && !response.path("aggregations").isObject())) {
             throw new TrinoException(ELASTICSEARCH_INVALID_RESPONSE, "Aggregation returned incomplete results");
         }
