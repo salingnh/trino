@@ -111,6 +111,17 @@ public class TestRuleBasedElasticsearchMetadata
     }
 
     @Test
+    public void testFloatingPointQueryShapesRemainLocal()
+    {
+        ElasticsearchColumnHandle floating = new ElasticsearchColumnHandle(
+                List.of("amount"), DOUBLE, new IndexMetadata.PrimitiveType("double"), new DoubleDecoder.Descriptor("amount"), true);
+        for (SortOrder order : SortOrder.values()) {
+            assertThat(metadata.applyTopN(session, emptyTable(), 1, List.of(new SortItem("amount", order)), Map.of("amount", floating))).isEmpty();
+        }
+        assertThat(metadata.applyAggregation(session, emptyTable(), List.of(), Map.of("amount", floating), List.of(List.of(floating)))).isEmpty();
+    }
+
+    @Test
     public void testTopNRejectsRoundedDocValues()
     {
         ElasticsearchColumnHandle rounded = new ElasticsearchColumnHandle(

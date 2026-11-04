@@ -154,6 +154,34 @@ public abstract class BaseElasticsearchConnectorTest
     }
 
     @Test
+    public void testSignedZeroQueryShapesRemainLocal()
+            throws IOException
+    {
+        String name = "signed_zero_" + randomNameSuffix();
+        createIndex(name, "{\"properties\":{\"d\":{\"type\":\"double\"},\"f\":{\"type\":\"float\"},\"id\":{\"type\":\"integer\"}}}");
+        try {
+            index(name, Map.of("id", 1, "d", 0.0, "f", 0.0));
+            index(name, Map.of("id", 2, "d", -0.0, "f", -0.0));
+            index(name, Map.of("id", 3));
+            Session disabled = Session.builder(getSession())
+                    .setCatalogSessionProperty("elasticsearch", "aggregation_pushdown_enabled", "false").build();
+            for (String column : List.of("d", "f")) {
+                assertThat(query("SELECT " + column + ", count(*) FROM " + name + " GROUP BY " + column))
+                        .matches(disabled, "SELECT " + column + ", count(*) FROM " + name + " GROUP BY " + column)
+                        .isNotFullyPushedDown(AggregationNode.class);
+                for (String order : List.of("ASC NULLS FIRST", "ASC NULLS LAST", "DESC NULLS FIRST", "DESC NULLS LAST")) {
+                    assertThat(query("SELECT id FROM " + name + " ORDER BY " + column + " " + order + ", id LIMIT 2"))
+                            .matches("SELECT id FROM (VALUES (0.0, 1), (-0.0, 2), (NULL, 3)) t(v, id) ORDER BY v " + order + ", id LIMIT 2")
+                            .isNotFullyPushedDown(TopNNode.class);
+                }
+            }
+        }
+        finally {
+            deleteIndex(name);
+        }
+    }
+
+    @Test
     public void testAggregationPushdownEdgeCases()
             throws IOException
     {

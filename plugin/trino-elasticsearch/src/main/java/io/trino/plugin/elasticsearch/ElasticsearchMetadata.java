@@ -308,7 +308,8 @@ public class ElasticsearchMetadata
                     converted.type(),
                     field.type(),
                     converted.decoderDescriptor(),
-                    supportsPredicates(field.type(), converted.type)));
+                    supportsPredicates(field.type(), converted.type),
+                    field.supportsQueryShapes()));
         }
 
         return result.buildOrThrow();
@@ -753,7 +754,8 @@ public class ElasticsearchMetadata
         ImmutableList.Builder<ElasticsearchColumnSort> sortOrder = ImmutableList.builder();
         for (SortItem sortItem : sortItems) {
             ElasticsearchColumnHandle column = (ElasticsearchColumnHandle) assignments.get(sortItem.getName());
-            if (column == null || BuiltinColumns.isBuiltinColumn(column.name()) || !isAggregatable(column.elasticsearchType())
+            if (column == null || BuiltinColumns.isBuiltinColumn(column.name()) || (!column.supportsQueryShapes() || !isAggregatable(column.elasticsearchType()))
+                    || column.type().equals(REAL) || column.type().equals(DOUBLE)
                     || column.elasticsearchType() instanceof ScaledFloatType
                     || !(isSupportedGroupingType(column.type()) || column.type().equals(TIMESTAMP_MILLIS))) {
                 return Optional.empty();
@@ -808,8 +810,10 @@ public class ElasticsearchMetadata
         for (ColumnHandle columnHandle : groupingSets.get(0)) {
             ElasticsearchColumnHandle column = (ElasticsearchColumnHandle) columnHandle;
             // Grouping keys become composite terms sources: the field must be aggregatable (doc_values), exact, and a type we can decode
-            if (BuiltinColumns.isBuiltinColumn(column.name()) || !isAggregatable(column.elasticsearchType())
-                    || column.elasticsearchType() instanceof ScaledFloatType || !isSupportedGroupingType(column.type())) {
+            if (BuiltinColumns.isBuiltinColumn(column.name()) || (!column.supportsQueryShapes() || !isAggregatable(column.elasticsearchType()))
+                    || column.elasticsearchType() instanceof ScaledFloatType
+                    || column.type().equals(REAL) || column.type().equals(DOUBLE)
+                    || !isSupportedGroupingType(column.type())) {
                 return Optional.empty();
             }
             // Grouping columns pass through unchanged: they belong only in the grouping-column mapping,
@@ -890,7 +894,7 @@ public class ElasticsearchMetadata
         Optional<ElasticsearchColumnHandle> column = aggregateColumn(arguments, assignments);
         // Reject array columns: value_count/cardinality aggregate individual array elements, not rows (the same
         // exclusion statisticsColumns applies)
-        if (column.isEmpty() || column.get().type() instanceof ArrayType || !isAggregatable(column.get().elasticsearchType())) {
+        if (column.isEmpty() || column.get().type() instanceof ArrayType || (!column.get().supportsQueryShapes() || !isAggregatable(column.get().elasticsearchType()))) {
             return Optional.empty();
         }
         return Optional.of(new ElasticsearchAggregate(outputName, function, Optional.of(column.get().predicateName()), outputType));
@@ -900,7 +904,7 @@ public class ElasticsearchMetadata
     {
         Optional<ElasticsearchColumnHandle> column = aggregateColumn(arguments, assignments);
         // scaled_float doc values are rounded, while the scan decoder returns the original _source value.
-        if (column.isEmpty() || !isAggregatable(column.get().elasticsearchType())
+        if (column.isEmpty() || (!column.get().supportsQueryShapes() || !isAggregatable(column.get().elasticsearchType()))
                 || column.get().elasticsearchType() instanceof ScaledFloatType || !supportsNumericAggregate(function, column.get().type())) {
             return Optional.empty();
         }
@@ -927,8 +931,8 @@ public class ElasticsearchMetadata
     private static boolean supportsNumericAggregate(Function function, Type type)
     {
         // Elasticsearch computes metric aggregations in double precision, so pushdown is only exact within a double's
-        // 2^53 integer range. sum/avg accumulate and must stay on floating-point columns; min/max return an actual
-        // value, so only a 64-bit bigint can exceed the exact range.
+        // 2^53 integer range. Integral SUM must remain in Trino; AVG returns DOUBLE, including for integral inputs.
+        // MIN/MAX return an actual value, so only a 64-bit bigint can exceed the exact range.
         return switch (function) {
             case SUM, AVG -> type.equals(DOUBLE) || type.equals(REAL);
             case MIN, MAX -> isNumericType(type) && !type.equals(BIGINT);
@@ -1358,6 +1362,7 @@ public class ElasticsearchMetadata
         DecoderDescriptor decoderDescriptor = baseColumn.decoderDescriptor();
         IndexMetadata.Type elasticsearchType = baseColumn.elasticsearchType();
         Type type = baseColumn.type();
+        boolean supportsQueryShapes = baseColumn.supportsQueryShapes();
 
         for (int index : indices) {
             verify(type instanceof RowType, "type should be Row type");
@@ -1369,7 +1374,11 @@ public class ElasticsearchMetadata
 
             verify(decoderDescriptor instanceof RowDecoder.Descriptor, "decoderDescriptor should be RowDecoder.Descriptor type");
             decoderDescriptor = ((RowDecoder.Descriptor) decoderDescriptor).getFields().get(index).getDescriptor();
-            elasticsearchType = ((IndexMetadata.ObjectType) elasticsearchType).fields().get(index).type();
+            IndexMetadata.Field mappingField = ((IndexMetadata.ObjectType) elasticsearchType).fields().stream()
+                    .filter(candidate -> candidate.name().equals(field.getName().orElseThrow()))
+                    .findFirst().orElseThrow();
+            supportsQueryShapes &= mappingField.supportsQueryShapes();
+            elasticsearchType = mappingField.type();
         }
 
         return new ElasticsearchColumnHandle(
@@ -1377,7 +1386,8 @@ public class ElasticsearchMetadata
                 projectedColumnType,
                 elasticsearchType,
                 decoderDescriptor,
-                supportsPredicates(elasticsearchType, projectedColumnType));
+                supportsPredicates(elasticsearchType, projectedColumnType),
+                supportsQueryShapes);
     }
 
     @Override
