@@ -16,6 +16,7 @@ package io.trino.plugin.elasticsearch;
 import com.google.common.collect.ImmutableMap;
 import io.airlift.units.Duration;
 import io.airlift.units.MinDuration;
+import jakarta.validation.constraints.Min;
 import org.junit.jupiter.api.Test;
 
 import java.io.IOException;
@@ -74,6 +75,7 @@ public class TestElasticsearchConfig
                 .setDynamicFilteringMaxQueryBytes(1_048_576)
                 .setKeywordSubfieldPushdownWithIgnoreAbove(false)
                 .setAggregationPushdownEnabled(true)
+                .setAggregationPageSize(10_000)
                 .setFullTextPushdownMode(FullTextPushdownMode.DISABLED));
     }
 
@@ -118,6 +120,7 @@ public class TestElasticsearchConfig
                 .put("elasticsearch.dynamic-filtering.max-query-bytes", "262144")
                 .put("elasticsearch.keyword-subfield-pushdown-with-ignore-above", "true")
                 .put("elasticsearch.aggregation-pushdown.enabled", "false")
+                .put("elasticsearch.aggregation-page-size", "2")
                 .put("elasticsearch.full-text-pushdown", "SAFE")
                 .buildOrThrow();
 
@@ -155,9 +158,20 @@ public class TestElasticsearchConfig
                 .setDynamicFilteringMaxQueryBytes(262_144)
                 .setKeywordSubfieldPushdownWithIgnoreAbove(true)
                 .setAggregationPushdownEnabled(false)
+                .setAggregationPageSize(2)
                 .setFullTextPushdownMode(FullTextPushdownMode.SAFE);
 
         assertFullMapping(properties, expected);
+    }
+
+    @Test
+    public void testAggregationPageSizeValidation()
+    {
+        assertFailsValidation(new ElasticsearchConfig().setHosts(List.of("localhost")).setAggregationPageSize(0),
+                "aggregationPageSize",
+                "must be greater than or equal to 1",
+                Min.class);
+        assertValidates(new ElasticsearchConfig().setHosts(List.of("localhost")).setAggregationPageSize(1));
     }
 
     @Test

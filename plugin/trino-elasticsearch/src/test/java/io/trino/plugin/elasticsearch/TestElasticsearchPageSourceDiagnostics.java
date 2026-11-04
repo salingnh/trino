@@ -305,7 +305,7 @@ public class TestElasticsearchPageSourceDiagnostics
                             List.of(),
                             List.of(new ElasticsearchAggregate("avg_result", ElasticsearchAggregate.Function.AVG, Optional.of("id"), avg.type())))));
             server.aggregationResponse = "{\"timed_out\":false,\"_shards\":{\"failed\":0},\"hits\":{\"total\":{\"value\":50000,\"relation\":\"eq\"}},\"aggregations\":{\"avg_result\":{\"value\":-0.5}}}";
-            try (var source = new AggregationQueryPageSource(server.client, table, List.of(avg), server.diagnostics)) {
+            try (var source = new AggregationQueryPageSource(server.client, table, List.of(avg), server.diagnostics, 10_000)) {
                 var page = source.getNextSourcePage();
                 assertThat(page.getPositionCount()).isEqualTo(1);
                 assertThat(avg.type().getDouble(page.getBlock(0), 0)).isEqualTo(-0.5);
@@ -393,6 +393,29 @@ public class TestElasticsearchPageSourceDiagnostics
             assertThat(source.isFinished()).isTrue();
             assertThat(server.diagnostics.getAggregationRows()).isEqualTo(1000);
             assertThat(server.diagnostics.getAggregationOutputBytes()).isPositive();
+        }
+    }
+
+    @Test
+    public void testConfiguredCompositePageSize()
+            throws Exception
+    {
+        for (int size : List.of(1, 2, 1000, 10_000)) {
+            try (SearchServer server = new SearchServer("42", false, false);
+                    AggregationQueryPageSource source = server.aggregation(true, size)) {
+                String bucket = "{\"key\":{\"g0\":1},\"doc_count\":1}";
+                server.aggregationResponse = "{\"timed_out\":false,\"_shards\":{\"failed\":0},\"aggregations\":{\"groups\":{\"buckets\":[" +
+                        String.join(",", Collections.nCopies(size, bucket)) + "],\"after_key\":{\"g0\":1}}}}";
+                assertThat(source.getNextSourcePage().getPositionCount()).isEqualTo(size);
+                assertThat(source.isFinished()).isFalse();
+                server.aggregationResponse = "{\"timed_out\":false,\"_shards\":{\"failed\":0},\"aggregations\":{\"groups\":{\"buckets\":[]}}}";
+                assertThat(source.getNextSourcePage().getPositionCount()).isZero();
+                assertThat(source.isFinished()).isTrue();
+                assertThat(server.searchBodies).hasSize(2);
+                var request = JsonMapper.builder().build().readTree(server.searchBodies.getLast());
+                assertThat(request.path("aggs").path("groups").path("composite").path("size").asInt()).isEqualTo(size);
+                assertThat(request.path("aggs").path("groups").path("composite").path("after").path("g0").isIntegralNumber()).isTrue();
+            }
         }
     }
 
@@ -537,6 +560,11 @@ public class TestElasticsearchPageSourceDiagnostics
 
         public AggregationQueryPageSource aggregation(boolean grouped)
         {
+            return aggregation(grouped, 1000);
+        }
+
+        public AggregationQueryPageSource aggregation(boolean grouped, int size)
+        {
             ElasticsearchTableHandle table = new ElasticsearchTableHandle(
                     SCAN,
                     "default",
@@ -550,7 +578,7 @@ public class TestElasticsearchPageSourceDiagnostics
                     List.of(),
                     Set.of(ID),
                     Optional.of(new ElasticsearchAggregation(grouped ? List.of(ID) : List.of(), List.of(new ElasticsearchAggregate("id", ElasticsearchAggregate.Function.COUNT_ALL, Optional.empty(), INTEGER)))));
-            return new AggregationQueryPageSource(client, table, List.of(ID), diagnostics);
+            return new AggregationQueryPageSource(client, table, List.of(ID), diagnostics, size);
         }
 
         @Override

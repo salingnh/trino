@@ -29,6 +29,7 @@ import io.trino.spi.type.VarcharType;
 import java.util.List;
 import java.util.Optional;
 
+import static com.google.common.base.Preconditions.checkArgument;
 import static io.airlift.slice.Slices.utf8Slice;
 import static io.trino.plugin.elasticsearch.ElasticsearchAggregate.Function.COUNT_ALL;
 import static io.trino.plugin.elasticsearch.ElasticsearchAggregate.Function.SUM;
@@ -58,7 +59,7 @@ import static java.util.Objects.requireNonNull;
 class AggregationQueryPageSource
         implements ConnectorPageSource
 {
-    private static final int COMPOSITE_SIZE = 1000;
+    private final int compositeSize;
 
     private final ElasticsearchClient client;
     private final String index;
@@ -79,6 +80,13 @@ class AggregationQueryPageSource
 
     public AggregationQueryPageSource(ElasticsearchClient client, ElasticsearchTableHandle table, List<ElasticsearchColumnHandle> columns, ElasticsearchPushdownDiagnostics diagnostics)
     {
+        this(client, table, columns, diagnostics, 10_000);
+    }
+
+    public AggregationQueryPageSource(ElasticsearchClient client, ElasticsearchTableHandle table, List<ElasticsearchColumnHandle> columns, ElasticsearchPushdownDiagnostics diagnostics, int compositeSize)
+    {
+        checkArgument(compositeSize > 0, "compositeSize must be positive");
+        this.compositeSize = compositeSize;
         this.client = requireNonNull(client, "client is null");
         this.diagnostics = requireNonNull(diagnostics, "diagnostics is null");
         requireNonNull(table, "table is null");
@@ -141,7 +149,7 @@ class AggregationQueryPageSource
 
     private SourcePage globalPage()
     {
-        JsonNode body = buildAggregationQuery(filterQuery, groupingColumns, aggregates, COMPOSITE_SIZE, Optional.empty());
+        JsonNode body = buildAggregationQuery(filterQuery, groupingColumns, aggregates, compositeSize, Optional.empty());
         JsonNode response = request(body);
         if (!response.path("hits").path("total").path("relation").asText().equals("eq")) {
             throw new TrinoException(ELASTICSEARCH_INVALID_RESPONSE, "Aggregation returned an inexact document count");
@@ -164,7 +172,7 @@ class AggregationQueryPageSource
 
     private SourcePage groupedPage()
     {
-        JsonNode body = buildAggregationQuery(filterQuery, groupingColumns, aggregates, COMPOSITE_SIZE, afterKey);
+        JsonNode body = buildAggregationQuery(filterQuery, groupingColumns, aggregates, compositeSize, afterKey);
         JsonNode groups = request(body).path("aggregations").path("groups");
         JsonNode buckets = groups.path("buckets");
         if (!buckets.isArray()) {
@@ -187,7 +195,7 @@ class AggregationQueryPageSource
         }
 
         // A composite page smaller than the requested size is the last page
-        if (buckets.size() < COMPOSITE_SIZE || groups.path("after_key").isMissingNode()) {
+        if (buckets.size() < compositeSize || groups.path("after_key").isMissingNode()) {
             finished = true;
         }
         else {

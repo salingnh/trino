@@ -102,6 +102,7 @@ public class ElasticsearchConfig
     private int dynamicFilteringMaxQueryBytes = 1_048_576;
     private boolean keywordSubfieldPushdownWithIgnoreAbove;
     private boolean aggregationPushdownEnabled = true;
+    private int aggregationPageSize = 10_000;
     private FullTextPushdownMode fullTextPushdownMode = FullTextPushdownMode.DISABLED;
 
     @NotNull
@@ -531,6 +532,20 @@ public class ElasticsearchConfig
     public ElasticsearchConfig setKeywordSubfieldPushdownWithIgnoreAbove(boolean keywordSubfieldPushdownWithIgnoreAbove)
     {
         this.keywordSubfieldPushdownWithIgnoreAbove = keywordSubfieldPushdownWithIgnoreAbove;
+        return this;
+    }
+
+    @Min(1)
+    public int getAggregationPageSize()
+    {
+        return aggregationPageSize;
+    }
+
+    @Config("elasticsearch.aggregation-page-size")
+    @ConfigDescription("Maximum number of buckets returned with each aggregation request")
+    public ElasticsearchConfig setAggregationPageSize(int aggregationPageSize)
+    {
+        this.aggregationPageSize = aggregationPageSize;
         return this;
     }
 
