@@ -155,6 +155,43 @@ public abstract class BaseElasticsearchConnectorTest
     }
 
     @Test
+    public void testTopNThroughFilteredRoutedMultiIndexAlias()
+            throws IOException
+    {
+        String alias = "topn_alias_" + randomNameSuffix();
+        List<String> indices = List.of(alias + "_a", alias + "_b");
+        try {
+            for (int i = 0; i < indices.size(); i++) {
+                Request create = new Request("PUT", "/" + indices.get(i));
+                create.setJsonEntity(
+                        """
+                        {"settings":{"number_of_shards":3},"mappings":{"properties":{"id":{"type":"long"},"active":{"type":"boolean"}}}}
+                        """);
+                client.performRequest(create);
+                for (int row = 0; row < 2; row++) {
+                    Request put = new Request("PUT", indexEndpoint(indices.get(i), Integer.toString(row)));
+                    put.addParameter("routing", "tenant");
+                    put.setJsonEntity("{\"id\":" + (i * 10 + row) + ",\"active\":" + (row == 0) + "}");
+                    client.performRequest(put);
+                }
+                Request add = new Request("PUT", "/" + indices.get(i) + "/_alias/" + alias);
+                add.setJsonEntity("{\"filter\":{\"term\":{\"active\":true}},\"routing\":\"tenant\"}");
+                client.performRequest(add);
+                refreshIndex(indices.get(i));
+            }
+            assertThat(query("SELECT id FROM " + alias + " ORDER BY id DESC NULLS LAST LIMIT 1"))
+                    .matches("VALUES BIGINT '10'");
+            assertThat(query("SELECT id FROM " + alias + " ORDER BY id DESC NULLS LAST LIMIT 10"))
+                    .matches("VALUES BIGINT '10', BIGINT '0'");
+        }
+        finally {
+            for (String index : indices) {
+                deleteIndex(index);
+            }
+        }
+    }
+
+    @Test
     public void testSignedZeroQueryShapesRemainLocal()
             throws IOException
     {
@@ -213,6 +250,8 @@ public abstract class BaseElasticsearchConnectorTest
                     "flag", true,
                     "agg_0", 9007199254740993L));
             index(name, Map.of());
+            index(name, Map.of("l", Long.MIN_VALUE, "agg_0", 1));
+            index(name, Map.of("l", Long.MAX_VALUE, "agg_0", 1));
             Session disabled = Session.builder(getSession())
                     .setCatalogSessionProperty("elasticsearch", "aggregation_pushdown_enabled", "false").build();
             for (String column : List.of("b", "s", "i", "l")) {

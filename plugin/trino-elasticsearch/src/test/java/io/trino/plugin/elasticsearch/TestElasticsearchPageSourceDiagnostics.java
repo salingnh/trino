@@ -16,9 +16,13 @@ package io.trino.plugin.elasticsearch;
 import com.fasterxml.jackson.databind.json.JsonMapper;
 import com.sun.net.httpserver.HttpServer;
 import io.trino.plugin.elasticsearch.client.ElasticsearchClient;
+import io.trino.plugin.elasticsearch.client.IndexMetadata.DateTimeType;
 import io.trino.plugin.elasticsearch.client.IndexMetadata.PrimitiveType;
+import io.trino.plugin.elasticsearch.decoders.BigintDecoder;
+import io.trino.plugin.elasticsearch.decoders.BooleanDecoder;
 import io.trino.plugin.elasticsearch.decoders.DoubleDecoder;
 import io.trino.plugin.elasticsearch.decoders.IntegerDecoder;
+import io.trino.plugin.elasticsearch.decoders.TimestampDecoder;
 import io.trino.plugin.elasticsearch.expression.ElasticsearchRemotePredicate.Term;
 import io.trino.spi.TrinoException;
 import io.trino.spi.connector.ColumnHandle;
@@ -42,8 +46,11 @@ import java.util.concurrent.CopyOnWriteArrayList;
 
 import static io.trino.plugin.elasticsearch.ElasticsearchRemotePredicateTranslator.withRemotePredicate;
 import static io.trino.plugin.elasticsearch.ElasticsearchTableHandle.Type.SCAN;
+import static io.trino.spi.type.BigintType.BIGINT;
+import static io.trino.spi.type.BooleanType.BOOLEAN;
 import static io.trino.spi.type.DoubleType.DOUBLE;
 import static io.trino.spi.type.IntegerType.INTEGER;
+import static io.trino.spi.type.TimestampType.TIMESTAMP_MILLIS;
 import static io.trino.type.InternalTypeManager.TESTING_TYPE_MANAGER;
 import static java.nio.charset.StandardCharsets.UTF_8;
 import static org.assertj.core.api.Assertions.assertThat;
@@ -393,6 +400,68 @@ public class TestElasticsearchPageSourceDiagnostics
             assertThat(source.isFinished()).isTrue();
             assertThat(server.diagnostics.getAggregationRows()).isEqualTo(1000);
             assertThat(server.diagnostics.getAggregationOutputBytes()).isPositive();
+        }
+    }
+
+    @Test
+    public void testTypedCompositeAfterKeyAndNullBucket()
+            throws Exception
+    {
+        var time = new ElasticsearchColumnHandle(List.of("time"), TIMESTAMP_MILLIS, new DateTimeType(List.of()), new TimestampDecoder.Descriptor("time"), true);
+        var flag = new ElasticsearchColumnHandle(List.of("flag"), BOOLEAN, new PrimitiveType("boolean"), new BooleanDecoder.Descriptor("flag"), true);
+        var key = new ElasticsearchColumnHandle(List.of("key"), BIGINT, new PrimitiveType("long"), new BigintDecoder.Descriptor("key"), true);
+        var columns = List.of(time, flag, key);
+        var table = new ElasticsearchTableHandle(
+                SCAN,
+                "default",
+                "events",
+                TABLE.constraint(),
+                Map.of(),
+                Map.of(),
+                Map.of(),
+                Optional.empty(),
+                OptionalLong.empty(),
+                List.of(),
+                Set.copyOf(columns),
+                Optional.of(new ElasticsearchAggregation(columns, List.of())));
+        try (SearchServer server = new SearchServer("42", false, false);
+                var source = new AggregationQueryPageSource(server.client, table, columns, server.diagnostics, 1)) {
+            String after = "{\"g0\":1234,\"g1\":true,\"g2\":9007199254740993}";
+            server.aggregationResponse = "{\"timed_out\":false,\"_shards\":{\"failed\":0},\"aggregations\":{\"groups\":{\"buckets\":[{\"key\":" + after + ",\"doc_count\":1}],\"after_key\":" + after + "}}}";
+            var page = source.getNextSourcePage();
+            assertThat(TIMESTAMP_MILLIS.getLong(page.getBlock(0), 0)).isEqualTo(1_234_000);
+            assertThat(BOOLEAN.getBoolean(page.getBlock(1), 0)).isTrue();
+            assertThat(BIGINT.getLong(page.getBlock(2), 0)).isEqualTo(9007199254740993L);
+            server.aggregationResponse = "{\"timed_out\":false,\"_shards\":{\"failed\":0},\"aggregations\":{\"groups\":{\"buckets\":[{\"key\":{\"g0\":null,\"g1\":null,\"g2\":null},\"doc_count\":1}]}}}";
+            var nullPage = source.getNextSourcePage();
+            for (int channel = 0; channel < columns.size(); channel++) {
+                assertThat(nullPage.getBlock(channel).isNull(0)).isTrue();
+            }
+            var json = JsonMapper.builder().build();
+            var request = json.readTree(server.searchBodies.getLast());
+            assertThat(request.path("aggs").path("groups").path("composite").path("after")).isEqualTo(json.readTree(after));
+            assertThat(source.isFinished()).isTrue();
+        }
+    }
+
+    @Test
+    public void testGlobalAggregationRequiresExactNonnegativeHitCount()
+            throws Exception
+    {
+        for (String total : List.of(
+                "{\"value\":1,\"relation\":\"gte\"}",
+                "{\"value\":-1,\"relation\":\"eq\"}",
+                "{\"value\":1.5,\"relation\":\"eq\"}",
+                "{\"value\":\"1\",\"relation\":\"eq\"}",
+                "{\"value\":9223372036854775808,\"relation\":\"eq\"}",
+                "{}")) {
+            try (SearchServer server = new SearchServer("42", false, false);
+                    var source = server.aggregation()) {
+                server.aggregationResponse = "{\"timed_out\":false,\"_shards\":{\"failed\":0},\"hits\":{\"total\":" + total + "},\"aggregations\":{}}";
+                assertThatThrownBy(source::getNextSourcePage).isInstanceOf(TrinoException.class);
+                assertThat(source.getNextSourcePage()).isNull();
+                assertThat(server.searchBodies).hasSize(1);
+            }
         }
     }
 

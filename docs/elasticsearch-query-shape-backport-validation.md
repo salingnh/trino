@@ -17,7 +17,8 @@ The base was fetched again after implementation; no additional base commits were
 ## Local results
 
 - The initial regression run reproduced three failures: floating-point query-shape eligibility, output-name collision and missing completion metadata. The other 25 tests passed.
-- Final connector unit/HTTP run with Error Prone: **264 tests, 0 failures, 0 errors, 1 skipped opt-in benchmark**. AirStyle, Checkstyle, licenses, dependency analysis, duplicate dependencies/classes and Modernizer passed in the same run.
+- Final connector unit/HTTP run with Error Prone: **267 tests, 0 failures, 0 errors, 1 skipped opt-in benchmark**. AirStyle, Checkstyle, licenses, dependency analysis, duplicate dependencies/classes and Modernizer passed in the same run.
+- Independent commit regression runs passed: mapping/TopN 256 tests, aggregation correctness 259, integer AVG 261, timestamp grouping 262 (each includes one skipped benchmark).
 - Serialization tests cover both capability values. Projection tests cover unsafe ancestors, unsafe children and skipped unsupported mapping fields.
 - HTTP tests cover Scroll/PIT logical endpoints plus concrete-index restrictions, integer AVG policy, timestamp decoding, page sizes 1/2/1,000/10,000, pagination progress and close/failure behavior.
 - The AVG HTTP regression verifies `size:0`, one aggregation request, one result row, zero decoded source rows and zero decoded source bytes for an exact reported total of 50,000. This is a controlled response fixture, **not a measurement against a running Elasticsearch server**.

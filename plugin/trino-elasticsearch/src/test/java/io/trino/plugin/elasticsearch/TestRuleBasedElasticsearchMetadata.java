@@ -160,6 +160,16 @@ public class TestRuleBasedElasticsearchMetadata
     }
 
     @Test
+    public void testAggregationSwitchDisablesIntegerAverage()
+    {
+        var disabled = TestingConnectorSession.builder()
+                .setPropertyMetadata(new ElasticsearchSessionProperties(new ElasticsearchConfig()).getSessionProperties())
+                .setPropertyValues(Map.of("aggregation_pushdown_enabled", false)).build();
+        var avg = new AggregateFunction("avg", DOUBLE, List.of(new Variable("v", INTEGER)), List.of(), false, Optional.empty());
+        assertThat(metadata.applyAggregation(disabled, emptyTable(), List.of(avg), Map.of("v", USER_ID), List.of(List.of()))).isEmpty();
+    }
+
+    @Test
     public void testTopNRejectsRoundedDocValues()
     {
         ElasticsearchColumnHandle rounded = new ElasticsearchColumnHandle(
