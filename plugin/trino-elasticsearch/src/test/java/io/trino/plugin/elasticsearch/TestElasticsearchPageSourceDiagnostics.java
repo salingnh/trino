@@ -17,6 +17,7 @@ import com.fasterxml.jackson.databind.json.JsonMapper;
 import com.sun.net.httpserver.HttpServer;
 import io.trino.plugin.elasticsearch.client.ElasticsearchClient;
 import io.trino.plugin.elasticsearch.client.IndexMetadata.PrimitiveType;
+import io.trino.plugin.elasticsearch.decoders.DoubleDecoder;
 import io.trino.plugin.elasticsearch.decoders.IntegerDecoder;
 import io.trino.plugin.elasticsearch.expression.ElasticsearchRemotePredicate.Term;
 import io.trino.spi.TrinoException;
@@ -41,6 +42,7 @@ import java.util.concurrent.CopyOnWriteArrayList;
 
 import static io.trino.plugin.elasticsearch.ElasticsearchRemotePredicateTranslator.withRemotePredicate;
 import static io.trino.plugin.elasticsearch.ElasticsearchTableHandle.Type.SCAN;
+import static io.trino.spi.type.DoubleType.DOUBLE;
 import static io.trino.spi.type.IntegerType.INTEGER;
 import static io.trino.type.InternalTypeManager.TESTING_TYPE_MANAGER;
 import static java.nio.charset.StandardCharsets.UTF_8;
@@ -273,6 +275,50 @@ public class TestElasticsearchPageSourceDiagnostics
             assertThat(source.getNextSourcePage().getPositionCount()).isEqualTo(1);
             assertThat(server.requests.getFirst()).isEqualTo("POST /events/_search");
             assertThat(server.searchBodies.getFirst()).contains("\"_index\":\"events-0001\"", "\"sort\"");
+        }
+    }
+
+    @Test
+    public void testGlobalAverageDoesNotDecodeSourceDocuments()
+            throws Exception
+    {
+        try (SearchServer server = new SearchServer("42", false, false)) {
+            var avg = new ElasticsearchColumnHandle(
+                    List.of("avg_result"),
+                    DOUBLE,
+                    new PrimitiveType("double"),
+                    new DoubleDecoder.Descriptor("avg_result"),
+                    false);
+            var table = new ElasticsearchTableHandle(
+                    SCAN,
+                    "default",
+                    "events",
+                    TABLE.constraint(),
+                    Map.of(),
+                    Map.of(),
+                    Map.of(),
+                    Optional.empty(),
+                    OptionalLong.empty(),
+                    List.of(),
+                    Set.of(avg),
+                    Optional.of(new ElasticsearchAggregation(
+                            List.of(),
+                            List.of(new ElasticsearchAggregate("avg_result", ElasticsearchAggregate.Function.AVG, Optional.of("id"), avg.type())))));
+            server.aggregationResponse = "{\"timed_out\":false,\"_shards\":{\"failed\":0},\"hits\":{\"total\":{\"value\":50000,\"relation\":\"eq\"}},\"aggregations\":{\"avg_result\":{\"value\":-0.5}}}";
+            try (var source = new AggregationQueryPageSource(server.client, table, List.of(avg), server.diagnostics)) {
+                var page = source.getNextSourcePage();
+                assertThat(page.getPositionCount()).isEqualTo(1);
+                assertThat(avg.type().getDouble(page.getBlock(0), 0)).isEqualTo(-0.5);
+                assertThat(source.getNextSourcePage()).isNull();
+            }
+            var request = JsonMapper.builder().build().readTree(server.searchBodies.getFirst());
+            assertThat(request.path("size").asInt()).isZero();
+            assertThat(request.path("aggs").path("avg_result").path("avg").path("field").asText()).isEqualTo("id");
+            assertThat(server.diagnostics.getAggregationRequests()).isEqualTo(1);
+            assertThat(server.diagnostics.getAggregationRows()).isEqualTo(1);
+            assertThat(server.diagnostics.getAggregationOutputBytes()).isPositive();
+            assertThat(server.diagnostics.getRowsDecoded()).isZero();
+            assertThat(server.diagnostics.getSourceBytesDecoded()).isZero();
         }
     }
 

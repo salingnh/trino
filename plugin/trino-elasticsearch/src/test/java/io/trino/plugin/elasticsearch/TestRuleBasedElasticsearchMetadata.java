@@ -27,6 +27,7 @@ import io.trino.spi.connector.Constraint;
 import io.trino.spi.connector.ConstraintApplicationResult;
 import io.trino.spi.connector.SortItem;
 import io.trino.spi.connector.SortOrder;
+import io.trino.spi.expression.Variable;
 import io.trino.spi.predicate.Domain;
 import io.trino.spi.predicate.Range;
 import io.trino.spi.predicate.TupleDomain;
@@ -50,6 +51,8 @@ import static io.trino.spi.expression.Constant.TRUE;
 import static io.trino.spi.type.BigintType.BIGINT;
 import static io.trino.spi.type.DoubleType.DOUBLE;
 import static io.trino.spi.type.IntegerType.INTEGER;
+import static io.trino.spi.type.SmallintType.SMALLINT;
+import static io.trino.spi.type.TinyintType.TINYINT;
 import static io.trino.spi.type.VarcharType.VARCHAR;
 import static io.trino.type.InternalTypeManager.TESTING_TYPE_MANAGER;
 import static org.assertj.core.api.Assertions.assertThat;
@@ -132,6 +135,28 @@ public class TestRuleBasedElasticsearchMetadata
         ElasticsearchTableHandle result = (ElasticsearchTableHandle) metadata.applyAggregation(
                 session, emptyTable(), List.of(count), Map.of("key", key), List.of(List.of(key))).orElseThrow().getHandle();
         assertThat(result.aggregation().orElseThrow().aggregates().getFirst().outputName()).isNotEqualTo(key.name());
+    }
+
+    @Test
+    public void testIntegralAverageAndFallbackPolicy()
+    {
+        for (var type : List.of(TINYINT, SMALLINT, INTEGER, BIGINT)) {
+            ElasticsearchColumnHandle value = new ElasticsearchColumnHandle(
+                    List.of("value"), type, new IndexMetadata.PrimitiveType("long"), new IntegerDecoder.Descriptor("value"), true);
+            AggregateFunction avg = new AggregateFunction("avg", DOUBLE, List.of(new Variable("v", type)), List.of(), false, Optional.empty());
+            for (List<ColumnHandle> grouping : List.of(List.<ColumnHandle>of(), List.<ColumnHandle>of(USER_ID))) {
+                ElasticsearchTableHandle result = (ElasticsearchTableHandle) metadata.applyAggregation(
+                        session, emptyTable(), List.of(avg), Map.of("v", value), List.of(grouping)).orElseThrow().getHandle();
+                assertThat(result.aggregation().orElseThrow().aggregates().getFirst().function()).isEqualTo(ElasticsearchAggregate.Function.AVG);
+                assertThat(result.aggregation().orElseThrow().aggregates().getFirst().outputType()).isEqualTo(DOUBLE);
+            }
+            AggregateFunction sum = new AggregateFunction("sum", BIGINT, avg.getArguments(), List.of(), false, Optional.empty());
+            assertThat(metadata.applyAggregation(session, emptyTable(), List.of(sum), Map.of("v", value), List.of(List.of()))).isEmpty();
+            AggregateFunction distinct = new AggregateFunction("avg", DOUBLE, avg.getArguments(), List.of(), true, Optional.empty());
+            assertThat(metadata.applyAggregation(session, emptyTable(), List.of(distinct), Map.of("v", value), List.of(List.of()))).isEmpty();
+            ElasticsearchColumnHandle unsafe = new ElasticsearchColumnHandle(value.path(), type, value.elasticsearchType(), value.decoderDescriptor(), true, false);
+            assertThat(metadata.applyAggregation(session, emptyTable(), List.of(avg), Map.of("v", unsafe), List.of(List.of()))).isEmpty();
+        }
     }
 
     @Test

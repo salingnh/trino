@@ -944,7 +944,8 @@ public class ElasticsearchMetadata
         // 2^53 integer range. Integral SUM must remain in Trino; AVG returns DOUBLE, including for integral inputs.
         // MIN/MAX return an actual value, so only a 64-bit bigint can exceed the exact range.
         return switch (function) {
-            case SUM, AVG -> type.equals(DOUBLE) || type.equals(REAL);
+            case SUM -> type.equals(DOUBLE) || type.equals(REAL);
+            case AVG -> isNumericType(type);
             case MIN, MAX -> isNumericType(type) && !type.equals(BIGINT);
             case COUNT_ALL, COUNT, COUNT_DISTINCT -> false;
         };

@@ -144,8 +144,9 @@ public abstract class BaseElasticsearchConnectorTest
         // sum/min/max/avg push down on floating-point columns (Elasticsearch computes metric aggregations in double)
         assertThat(query("SELECT sum(totalprice), min(totalprice), max(totalprice), avg(totalprice) FROM orders")).isFullyPushedDown();
         assertThat(query("SELECT regionkey, count(*) FROM nation WHERE nationkey < 10 GROUP BY regionkey")).isFullyPushedDown();
-        // sum/min/max/avg on a 64-bit bigint column are NOT pushed down: Elasticsearch metric aggregations are computed
-        // in double precision and lose accuracy above 2^53
+        // Integral SUM and BIGINT MIN/MAX remain local; AVG returns DOUBLE and can be pushed separately.
+        assertThat(query("SELECT avg(nationkey) FROM nation")).isFullyPushedDown();
+        assertThat(query("SELECT regionkey, avg(nationkey) FROM nation GROUP BY regionkey")).isFullyPushedDown();
         assertThat(query("SELECT sum(nationkey), min(nationkey), max(nationkey), avg(nationkey) FROM nation"))
                 .isNotFullyPushedDown(AggregationNode.class);
 
@@ -175,6 +176,38 @@ public abstract class BaseElasticsearchConnectorTest
                             .isNotFullyPushedDown(TopNNode.class);
                 }
             }
+        }
+        finally {
+            deleteIndex(name);
+        }
+    }
+
+    @Test
+    public void testAverageFiftyThousandDocuments()
+            throws IOException
+    {
+        String name = "avg_volume_" + randomNameSuffix();
+        Request create = new Request("PUT", "/" + name);
+        create.setJsonEntity(
+                """
+                {"settings":{"number_of_shards":3},"mappings":{"properties":{"value":{"type":"long"}}}}
+                """);
+        client.performRequest(create);
+        try {
+            StringBuilder data = new StringBuilder();
+            for (int i = 0; i < 50_000; i++) {
+                data.append("{\"index\":{}}\n{\"value\":").append(i - 25_000).append("}\n");
+            }
+            Request bulk = new Request("POST", "/" + name + "/_bulk");
+            bulk.addParameter("refresh", "true");
+            bulk.setJsonEntity(data.toString());
+            var response = client.performRequest(bulk);
+            assertThat(new JsonMapper().readTree(response.getEntity().getContent()).path("errors").asBoolean()).isFalse();
+            assertThat(query("SELECT avg(value) FROM " + name)).matches("VALUES DOUBLE '-0.5'").isFullyPushedDown();
+            Session disabled = Session.builder(getSession())
+                    .setCatalogSessionProperty("elasticsearch", "aggregation_pushdown_enabled", "false").build();
+            assertThat(query(disabled, "SELECT avg(value) FROM " + name)).matches("VALUES DOUBLE '-0.5'")
+                    .isNotFullyPushedDown(AggregationNode.class);
         }
         finally {
             deleteIndex(name);
