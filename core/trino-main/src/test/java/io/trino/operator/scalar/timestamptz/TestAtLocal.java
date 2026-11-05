@@ -21,6 +21,7 @@ import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.TestInstance;
 import org.junit.jupiter.api.parallel.Execution;
 
+import static io.trino.server.testing.TestingTrinoServer.SESSION_START_TIME_PROPERTY;
 import static io.trino.spi.type.TimeZoneKey.getTimeZoneKey;
 import static io.trino.testing.TestingSession.testSessionBuilder;
 import static org.assertj.core.api.Assertions.assertThat;
@@ -38,6 +39,7 @@ public class TestAtLocal
     {
         Session session = testSessionBuilder()
                 .setTimeZoneKey(getTimeZoneKey("America/Los_Angeles"))
+                .setSystemProperty(SESSION_START_TIME_PROPERTY, "2020-05-01T12:00:00Z")
                 .build();
         assertions = new QueryAssertions(session);
     }
@@ -83,6 +85,18 @@ public class TestAtLocal
         // Re-anchor TIME from +07:09 to session offset -07:00.
         assertThat(assertions.expression("TIME '12:34:56+07:09' AT LOCAL"))
                 .matches("TIME '22:25:56-07:00'");
+    }
+
+    @Test
+    public void testTimeInWinter()
+    {
+        Session session = assertions.sessionBuilder()
+                .setSystemProperty(SESSION_START_TIME_PROPERTY, "2020-01-01T12:00:00Z")
+                .build();
+        assertThat(assertions.expression("TIME '12:34:56' AT LOCAL", session))
+                .matches("TIME '12:34:56-08:00'");
+        assertThat(assertions.expression("TIME '12:34:56+07:09' AT LOCAL", session))
+                .matches("TIME '21:25:56-08:00'");
     }
 
     @Test
