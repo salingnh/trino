@@ -35,13 +35,17 @@ final class SearchExecutionStrategies
             ElasticsearchPushdownDiagnostics diagnostics)
     {
         JsonNode query = buildSearchQuery(table, diagnostics);
+        if (!table.index().equals(split.index())) {
+            query = ElasticsearchQueryBuilder.addIndexFilter(query, split.index());
+        }
+        JsonNode searchQuery = query;
         List<JsonNode> sort = buildSort(table.sortOrder(), table.query().isPresent());
         if (client.isPointInTimeSearchEnabled()) {
-            return new PointInTimeSearchExecutionStrategy(client, split.index(), split.shard(), query, fields, documentFields, sort, table.limit(), diagnostics);
+            return new PointInTimeSearchExecutionStrategy(client, table.index(), split.shard(), searchQuery, fields, documentFields, sort, table.limit(), diagnostics);
         }
         return new ScrollSearchExecutionStrategy(
                 client,
-                context -> client.beginSearch(split.index(), split.shard(), query, fields, documentFields, sort, table.limit(), context),
+                context -> client.beginSearch(table.index(), split.shard(), searchQuery, fields, documentFields, sort, table.limit(), context),
                 diagnostics);
     }
 }

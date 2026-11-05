@@ -17,8 +17,11 @@ import com.fasterxml.jackson.databind.json.JsonMapper;
 import io.airlift.log.Logger;
 import io.airlift.units.Duration;
 import io.trino.plugin.elasticsearch.client.ElasticsearchClient;
+import io.trino.plugin.elasticsearch.client.IndexMetadata.PrimitiveType;
 import io.trino.plugin.elasticsearch.client.SearchDocument;
 import io.trino.plugin.elasticsearch.client.SearchResult;
+import io.trino.plugin.elasticsearch.decoders.BigintDecoder;
+import io.trino.plugin.elasticsearch.decoders.DoubleDecoder;
 import io.trino.plugin.elasticsearch.expression.ElasticsearchRemotePredicate.Term;
 import io.trino.testing.TestingConnectorSession;
 import org.elasticsearch.client.Request;
@@ -31,6 +34,7 @@ import java.io.File;
 import java.util.Arrays;
 import java.util.HashSet;
 import java.util.List;
+import java.util.Map;
 import java.util.Optional;
 import java.util.OptionalLong;
 import java.util.Set;
@@ -40,6 +44,8 @@ import static io.trino.plugin.elasticsearch.ElasticsearchRemotePredicateTranslat
 import static io.trino.plugin.elasticsearch.ElasticsearchServer.ELASTICSEARCH_7_IMAGE;
 import static io.trino.plugin.elasticsearch.ElasticsearchServer.ELASTICSEARCH_8_IMAGE;
 import static io.trino.plugin.elasticsearch.ElasticsearchTableHandle.Type.SCAN;
+import static io.trino.spi.type.BigintType.BIGINT;
+import static io.trino.spi.type.DoubleType.DOUBLE;
 import static io.trino.type.InternalTypeManager.TESTING_TYPE_MANAGER;
 import static java.util.concurrent.TimeUnit.SECONDS;
 import static org.assertj.core.api.Assertions.assertThat;
@@ -107,6 +113,7 @@ public class TestSearchExecutionBenchmark
                             LOG.info("image=%s strategy=%s round=%s %s", image, strategy, round, full.summary());
                             assertNoContexts(rest);
                             if (round == 2) {
+                                measureAggregation(client, diagnostics, image, strategy, full);
                                 for (List<ElasticsearchColumnSort> sort : List.of(List.<ElasticsearchColumnSort>of(), List.of(new ElasticsearchColumnSort("id", true, false)))) {
                                     Measurement limited = scan(client, diagnostics, TABLE.withTopN(10, sort), false);
                                     assertThat(limited.ids()).hasSize(30);
@@ -275,6 +282,76 @@ public class TestSearchExecutionBenchmark
                     nanos[nanos.length / 2] / 1000,
                     nanos[18] / 1000,
                     memory.summary());
+        }
+    }
+
+    private static void measureAggregation(
+            ElasticsearchClient client,
+            ElasticsearchPushdownDiagnostics diagnostics,
+            String image,
+            ElasticsearchConfig.SearchStrategy strategy,
+            Measurement scan)
+    {
+        var id = new ElasticsearchColumnHandle(List.of("id"), BIGINT, new PrimitiveType("long"), new BigintDecoder.Descriptor("id"), true);
+        var avg = new ElasticsearchColumnHandle(List.of("avg_result"), DOUBLE, new PrimitiveType("double"), new DoubleDecoder.Descriptor("avg_result"), false);
+        var metric = new ElasticsearchAggregate("avg_result", ElasticsearchAggregate.Function.AVG, Optional.of("id"), DOUBLE);
+        for (boolean grouped : List.of(false, true)) {
+            for (int size : grouped ? List.of(1000, 10_000) : List.of(10_000)) {
+                var columns = grouped ? List.of(id, avg) : List.of(avg);
+                var table = new ElasticsearchTableHandle(
+                        SCAN,
+                        "default",
+                        "scan_benchmark",
+                        TABLE.constraint(),
+                        Map.of(),
+                        Map.of(),
+                        Map.of(),
+                        Optional.empty(),
+                        OptionalLong.empty(),
+                        List.of(),
+                        Set.copyOf(columns),
+                        Optional.of(new ElasticsearchAggregation(grouped ? List.of(id) : List.of(), List.of(metric))));
+                long requests = diagnostics.getAggregationRequests();
+                long decoded = diagnostics.getRowsDecoded();
+                long sourceBytes = diagnostics.getSourceBytesDecoded();
+                long rows = 0;
+                long pages = 0;
+                long outputBytes = 0;
+                long largestPage = 0;
+                BenchmarkMemory memory = new BenchmarkMemory();
+                try (var source = new AggregationQueryPageSource(client, table, columns, diagnostics, size)) {
+                    while (!source.isFinished()) {
+                        var page = source.getNextSourcePage();
+                        rows += page.getPositionCount();
+                        pages++;
+                        outputBytes += page.getSizeInBytes();
+                        largestPage = Math.max(largestPage, page.getSizeInBytes());
+                        if (!grouped) {
+                            assertThat(DOUBLE.getDouble(page.getBlock(0), 0)).isEqualTo((DOCUMENTS - 1) / 2.0);
+                        }
+                    }
+                }
+                long aggregateRequests = diagnostics.getAggregationRequests() - requests;
+                assertThat(rows).isEqualTo(grouped ? DOCUMENTS : 1);
+                assertThat(diagnostics.getRowsDecoded() - decoded).isZero();
+                assertThat(diagnostics.getSourceBytesDecoded() - sourceBytes).isZero();
+                if (!grouped) {
+                    assertThat(aggregateRequests).isEqualTo(1);
+                }
+                LOG.info("image=%s strategy=%s aggregationGrouped=%s pageSize=%s rows=%s pages=%s requests=%s outputBytes=%s largestPageBytes=%s sourceRowsDecoded=0 sourceBytesDecoded=0 scanRequests=%s scanSourceBytes=%s %s",
+                        image,
+                        strategy,
+                        grouped,
+                        size,
+                        rows,
+                        pages,
+                        aggregateRequests,
+                        outputBytes,
+                        largestPage,
+                        scan.requests(),
+                        scan.bytes(),
+                        memory.summary());
+            }
         }
     }
 

@@ -139,6 +139,14 @@ public final class ElasticsearchQueryBuilder
         return JSON.objectNode().set("bool", boolNode);
     }
 
+    public static JsonNode addIndexFilter(JsonNode query, String concreteIndex)
+    {
+        ObjectNode bool = JSON.objectNode();
+        bool.set("must", JSON.arrayNode().add(query));
+        bool.set("filter", JSON.arrayNode().add(JSON.objectNode().set("term", JSON.objectNode().put("_index", concreteIndex))));
+        return JSON.objectNode().set("bool", bool);
+    }
+
     public static List<JsonNode> buildSort(List<ElasticsearchColumnSort> sortOrder, boolean hasQuery)
     {
         if (!sortOrder.isEmpty()) {

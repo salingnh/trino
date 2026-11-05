@@ -61,9 +61,12 @@ jobs:
         with:
           fetch-depth: 0
           persist-credentials: false
-      - uses: airlift/github-actions/check-commit-messages@1652e24519f5c7cec59d841070bf9beffadabdf9
-        with:
-          base_ref: ${{ github.event.pull_request.base.ref }}
+      - name: Test commit message validator
+        run: python3 .github/bin/check-commit-messages.py --test
+      - name: Check commit messages
+        env:
+          PR_BASE_REF: ${{ github.event.pull_request.base.ref }}
+        run: python3 .github/bin/check-commit-messages.py "$PR_BASE_REF"
 
   zizmor:
     permissions:

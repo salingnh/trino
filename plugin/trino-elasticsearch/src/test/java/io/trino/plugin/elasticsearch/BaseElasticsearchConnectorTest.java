@@ -144,13 +144,162 @@ public abstract class BaseElasticsearchConnectorTest
         // sum/min/max/avg push down on floating-point columns (Elasticsearch computes metric aggregations in double)
         assertThat(query("SELECT sum(totalprice), min(totalprice), max(totalprice), avg(totalprice) FROM orders")).isFullyPushedDown();
         assertThat(query("SELECT regionkey, count(*) FROM nation WHERE nationkey < 10 GROUP BY regionkey")).isFullyPushedDown();
-        // sum/min/max/avg on a 64-bit bigint column are NOT pushed down: Elasticsearch metric aggregations are computed
-        // in double precision and lose accuracy above 2^53
+        // Integral SUM and BIGINT MIN/MAX remain local; AVG returns DOUBLE and can be pushed separately.
+        assertThat(query("SELECT avg(nationkey) FROM nation")).isFullyPushedDown();
+        assertThat(query("SELECT regionkey, avg(nationkey) FROM nation GROUP BY regionkey")).isFullyPushedDown();
         assertThat(query("SELECT sum(nationkey), min(nationkey), max(nationkey), avg(nationkey) FROM nation"))
                 .isNotFullyPushedDown(AggregationNode.class);
 
         // count(DISTINCT) is exact and must NOT be pushed down as an approximate cardinality
         assertThat(query("SELECT count(DISTINCT regionkey) FROM nation")).isNotFullyPushedDown(AggregationNode.class);
+    }
+
+    @Test
+    public void testTopNThroughFilteredRoutedMultiIndexAlias()
+            throws IOException
+    {
+        String alias = "topn_alias_" + randomNameSuffix();
+        List<String> indices = List.of(alias + "_a", alias + "_b");
+        try {
+            for (int i = 0; i < indices.size(); i++) {
+                Request create = new Request("PUT", "/" + indices.get(i));
+                create.setJsonEntity(
+                        """
+                        {"settings":{"number_of_shards":3},"mappings":{"properties":{"id":{"type":"long"},"active":{"type":"boolean"}}}}
+                        """);
+                client.performRequest(create);
+                for (int row = 0; row < 2; row++) {
+                    Request put = new Request("PUT", indexEndpoint(indices.get(i), Integer.toString(row)));
+                    put.addParameter("routing", "tenant");
+                    put.setJsonEntity("{\"id\":" + (i * 10 + row) + ",\"active\":" + (row == 0) + "}");
+                    client.performRequest(put);
+                }
+                Request add = new Request("PUT", "/" + indices.get(i) + "/_alias/" + alias);
+                add.setJsonEntity("{\"filter\":{\"term\":{\"active\":true}},\"routing\":\"tenant\"}");
+                client.performRequest(add);
+                refreshIndex(indices.get(i));
+            }
+            assertThat(query("SELECT id FROM " + alias + " ORDER BY id DESC NULLS LAST LIMIT 1"))
+                    .matches("VALUES BIGINT '10'");
+            assertThat(query("SELECT id FROM " + alias + " ORDER BY id DESC NULLS LAST LIMIT 10"))
+                    .matches("VALUES BIGINT '10', BIGINT '0'");
+        }
+        finally {
+            for (String index : indices) {
+                deleteIndex(index);
+            }
+        }
+    }
+
+    @Test
+    public void testSignedZeroQueryShapesRemainLocal()
+            throws IOException
+    {
+        String name = "signed_zero_" + randomNameSuffix();
+        createIndex(name, "{\"properties\":{\"d\":{\"type\":\"double\"},\"f\":{\"type\":\"float\"},\"id\":{\"type\":\"integer\"}}}");
+        try {
+            index(name, Map.of("id", 1, "d", 0.0, "f", 0.0));
+            index(name, Map.of("id", 2, "d", -0.0, "f", -0.0));
+            index(name, Map.of("id", 3));
+            Session disabled = Session.builder(getSession())
+                    .setCatalogSessionProperty("elasticsearch", "aggregation_pushdown_enabled", "false").build();
+            for (String column : List.of("d", "f")) {
+                assertThat(query("SELECT " + column + ", count(*) FROM " + name + " GROUP BY " + column))
+                        .matches(disabled, "SELECT " + column + ", count(*) FROM " + name + " GROUP BY " + column)
+                        .isNotFullyPushedDown(AggregationNode.class);
+                for (String order : List.of("ASC NULLS FIRST", "ASC NULLS LAST", "DESC NULLS FIRST", "DESC NULLS LAST")) {
+                    assertThat(query("SELECT id FROM " + name + " ORDER BY " + column + " " + order + ", id LIMIT 2"))
+                            .matches("SELECT id FROM (VALUES (0.0, 1), (-0.0, 2), (NULL, 3)) t(v, id) ORDER BY v " + order + ", id LIMIT 2")
+                            .isNotFullyPushedDown(TopNNode.class);
+                }
+            }
+        }
+        finally {
+            deleteIndex(name);
+        }
+    }
+
+    @Test
+    public void testIntegralAverageAndTimestampGrouping()
+            throws IOException
+    {
+        String name = "avg_query_shapes_" + randomNameSuffix();
+        Request create = new Request("PUT", "/" + name);
+        create.setJsonEntity(
+                """
+                {"settings":{"number_of_shards":3},"mappings":{"properties":{
+                  "b":{"type":"byte"},"s":{"type":"short"},"i":{"type":"integer"},"l":{"type":"long"},
+                  "ts":{"type":"date"},"flag":{"type":"boolean"},"agg_0":{"type":"long"}}}}
+                """);
+        client.performRequest(create);
+        try {
+            index(name, Map.of(
+                    "b", -128,
+                    "s", -32768,
+                    "i", Integer.MIN_VALUE,
+                    "l", -9007199254740993L,
+                    "ts", "2020-01-01T00:00:00.001Z",
+                    "flag", true,
+                    "agg_0", 9007199254740993L));
+            index(name, Map.of(
+                    "b", 127,
+                    "s", 32767,
+                    "i", Integer.MAX_VALUE,
+                    "l", 9007199254740993L,
+                    "ts", "2020-01-01T00:00:00.001Z",
+                    "flag", true,
+                    "agg_0", 9007199254740993L));
+            index(name, Map.of());
+            index(name, Map.of("l", Long.MIN_VALUE, "agg_0", 1));
+            index(name, Map.of("l", Long.MAX_VALUE, "agg_0", 1));
+            Session disabled = Session.builder(getSession())
+                    .setCatalogSessionProperty("elasticsearch", "aggregation_pushdown_enabled", "false").build();
+            for (String column : List.of("b", "s", "i", "l")) {
+                String sql = "SELECT avg(" + column + ") FROM " + name;
+                assertThat(query(sql)).matches(disabled, sql).isFullyPushedDown();
+                String grouped = "SELECT ts, flag, agg_0, avg(" + column + ") FROM " + name + " GROUP BY ts, flag, agg_0";
+                assertThat(query(grouped)).matches(disabled, grouped).isFullyPushedDown();
+                String empty = "SELECT avg(" + column + ") FROM " + name + " WHERE agg_0 < 0";
+                assertThat(query(empty)).matches("VALUES CAST(NULL AS double)").isFullyPushedDown();
+            }
+            assertThat(query("SELECT agg_0, count(*) FROM " + name + " GROUP BY agg_0"))
+                    .matches(disabled, "SELECT agg_0, count(*) FROM " + name + " GROUP BY agg_0").isFullyPushedDown();
+        }
+        finally {
+            deleteIndex(name);
+        }
+    }
+
+    @Test
+    public void testAverageFiftyThousandDocuments()
+            throws IOException
+    {
+        String name = "avg_volume_" + randomNameSuffix();
+        Request create = new Request("PUT", "/" + name);
+        create.setJsonEntity(
+                """
+                {"settings":{"number_of_shards":3},"mappings":{"properties":{"value":{"type":"long"}}}}
+                """);
+        client.performRequest(create);
+        try {
+            StringBuilder data = new StringBuilder();
+            for (int i = 0; i < 50_000; i++) {
+                data.append("{\"index\":{}}\n{\"value\":").append(i - 25_000).append("}\n");
+            }
+            Request bulk = new Request("POST", "/" + name + "/_bulk");
+            bulk.addParameter("refresh", "true");
+            bulk.setJsonEntity(data.toString());
+            var response = client.performRequest(bulk);
+            assertThat(new JsonMapper().readTree(response.getEntity().getContent()).path("errors").asBoolean()).isFalse();
+            assertThat(query("SELECT avg(value) FROM " + name)).matches("VALUES DOUBLE '-0.5'").isFullyPushedDown();
+            Session disabled = Session.builder(getSession())
+                    .setCatalogSessionProperty("elasticsearch", "aggregation_pushdown_enabled", "false").build();
+            assertThat(query(disabled, "SELECT avg(value) FROM " + name)).matches("VALUES DOUBLE '-0.5'")
+                    .isNotFullyPushedDown(AggregationNode.class);
+        }
+        finally {
+            deleteIndex(name);
+        }
     }
 
     @Test

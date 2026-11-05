@@ -489,12 +489,14 @@ public class ElasticsearchClient
 
     private IndexMetadata getIndexMetadata(String index, boolean useBoundedKeyword, boolean statisticsRequest)
     {
-        String path = format("/%s/_mappings", index);
+        String path = statisticsRequest
+                ? format("/%s/_mappings", index)
+                : format("/%s?flat_settings=true&filter_path=*.mappings,*.settings", index);
 
         return doRequest(path, statisticsRequest, body -> {
             try {
-                JsonNode mappings = JSON_MAPPER.readTree(body)
-                        .elements().next()
+                JsonNode indices = JSON_MAPPER.readTree(body);
+                JsonNode mappings = indices.elements().next()
                         .get("mappings");
 
                 if (!mappings.elements().hasNext()) {
@@ -520,7 +522,8 @@ public class ElasticsearchClient
                     metaProperties = nullSafeNode(metaNode, "presto");
                 }
 
-                return new IndexMetadata(parseType(mappings.get("properties"), metaProperties, useBoundedKeyword));
+                IndexMetadata.ObjectType schema = parseType(mappings.get("properties"), metaProperties, useBoundedKeyword);
+                return new IndexMetadata(statisticsRequest ? schema : ElasticsearchQueryShapeMapping.apply(schema, indices));
             }
             catch (IOException e) {
                 throw new TrinoException(ELASTICSEARCH_INVALID_RESPONSE, e);
@@ -1026,7 +1029,7 @@ public class ElasticsearchClient
         try {
             response = client.performRequest(
                     "POST",
-                    format("/%s/_search", index),
+                    format("/%s/_search?allow_partial_search_results=false", index),
                     ImmutableMap.of(),
                     new StringEntity(body.toString(), UTF_8),
                     new BasicHeader("Content-Type", "application/json"));

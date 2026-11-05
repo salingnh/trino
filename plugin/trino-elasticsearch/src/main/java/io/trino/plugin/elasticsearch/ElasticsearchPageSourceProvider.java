@@ -45,6 +45,7 @@ public class ElasticsearchPageSourceProvider
     private final TypeManager typeManager;
     private final ElasticsearchPushdownDiagnostics diagnostics;
     private final ElasticsearchDynamicFilterPlanner dynamicFilterPlanner;
+    private final int aggregationPageSize;
 
     public ElasticsearchPageSourceProvider(ElasticsearchClient client, TypeManager typeManager, ElasticsearchConfig config)
     {
@@ -61,6 +62,7 @@ public class ElasticsearchPageSourceProvider
         this.client = requireNonNull(client, "client is null");
         this.typeManager = requireNonNull(typeManager, "typeManager is null");
         requireNonNull(config, "config is null");
+        this.aggregationPageSize = config.getAggregationPageSize();
         this.diagnostics = requireNonNull(diagnostics, "diagnostics is null");
         this.dynamicFilterPlanner = new ElasticsearchDynamicFilterPlanner(
                 config.getDynamicFilteringMaxValues(),
@@ -97,7 +99,8 @@ public class ElasticsearchPageSourceProvider
                     columns.stream()
                             .map(ElasticsearchColumnHandle.class::cast)
                             .collect(toImmutableList()),
-                    diagnostics);
+                    diagnostics,
+                    aggregationPageSize);
         }
 
         // Dynamic filters are runtime join filters. Only exact Elasticsearch predicates are allowed here: join

@@ -60,6 +60,24 @@ public class TestPointInTimeSearchExecution
     }
 
     @Test
+    public void testLogicalEndpointRetainsConcreteSplitRestriction()
+            throws Exception
+    {
+        try (Server server = new Server(false, false, false);
+                ScanQueryPageSource source = new ScanQueryPageSource(
+                        server.client,
+                        TESTING_TYPE_MANAGER,
+                        TABLE.withTopN(1, List.of(new ElasticsearchColumnSort("id", true, false))),
+                        new ElasticsearchSplit("events-0001", 3, Optional.empty()),
+                        List.of(ID),
+                        server.diagnostics)) {
+            assertThat(source.getNextSourcePage().getPositionCount()).isEqualTo(1);
+            assertThat(server.openQueries).hasSize(1);
+            assertThat(server.searchBodies.getFirst()).contains("\"_index\":\"events-0001\"", "\"sort\"");
+        }
+    }
+
+    @Test
     public void testLimitClosesWithoutNextRequest()
             throws Exception
     {

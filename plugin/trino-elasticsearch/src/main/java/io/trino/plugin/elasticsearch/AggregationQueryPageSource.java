@@ -29,6 +29,7 @@ import io.trino.spi.type.VarcharType;
 import java.util.List;
 import java.util.Optional;
 
+import static com.google.common.base.Preconditions.checkArgument;
 import static io.airlift.slice.Slices.utf8Slice;
 import static io.trino.plugin.elasticsearch.ElasticsearchAggregate.Function.COUNT_ALL;
 import static io.trino.plugin.elasticsearch.ElasticsearchAggregate.Function.SUM;
@@ -43,8 +44,10 @@ import static io.trino.spi.type.DoubleType.DOUBLE;
 import static io.trino.spi.type.IntegerType.INTEGER;
 import static io.trino.spi.type.RealType.REAL;
 import static io.trino.spi.type.SmallintType.SMALLINT;
+import static io.trino.spi.type.TimestampType.TIMESTAMP_MILLIS;
 import static io.trino.spi.type.TinyintType.TINYINT;
 import static java.lang.Float.floatToRawIntBits;
+import static java.lang.Math.multiplyExact;
 import static java.lang.String.format;
 import static java.util.Objects.requireNonNull;
 
@@ -56,7 +59,7 @@ import static java.util.Objects.requireNonNull;
 class AggregationQueryPageSource
         implements ConnectorPageSource
 {
-    private static final int COMPOSITE_SIZE = 1000;
+    private final int compositeSize;
 
     private final ElasticsearchClient client;
     private final String index;
@@ -77,6 +80,13 @@ class AggregationQueryPageSource
 
     public AggregationQueryPageSource(ElasticsearchClient client, ElasticsearchTableHandle table, List<ElasticsearchColumnHandle> columns, ElasticsearchPushdownDiagnostics diagnostics)
     {
+        this(client, table, columns, diagnostics, 10_000);
+    }
+
+    public AggregationQueryPageSource(ElasticsearchClient client, ElasticsearchTableHandle table, List<ElasticsearchColumnHandle> columns, ElasticsearchPushdownDiagnostics diagnostics, int compositeSize)
+    {
+        checkArgument(compositeSize > 0, "compositeSize must be positive");
+        this.compositeSize = compositeSize;
         this.client = requireNonNull(client, "client is null");
         this.diagnostics = requireNonNull(diagnostics, "diagnostics is null");
         requireNonNull(table, "table is null");
@@ -139,12 +149,16 @@ class AggregationQueryPageSource
 
     private SourcePage globalPage()
     {
-        JsonNode body = buildAggregationQuery(filterQuery, groupingColumns, aggregates, COMPOSITE_SIZE, Optional.empty());
+        JsonNode body = buildAggregationQuery(filterQuery, groupingColumns, aggregates, compositeSize, Optional.empty());
         JsonNode response = request(body);
         if (!response.path("hits").path("total").path("relation").asText().equals("eq")) {
             throw new TrinoException(ELASTICSEARCH_INVALID_RESPONSE, "Aggregation returned an inexact document count");
         }
-        long totalHits = response.path("hits").path("total").path("value").asLong();
+        JsonNode count = response.path("hits").path("total").path("value");
+        if (!count.isIntegralNumber() || !count.canConvertToLong() || count.longValue() < 0) {
+            throw new TrinoException(ELASTICSEARCH_INVALID_RESPONSE, "Aggregation returned an invalid document count");
+        }
+        long totalHits = count.longValue();
         JsonNode metrics = response.path("aggregations");
 
         BlockBuilder[] builders = createBuilders(1);
@@ -153,12 +167,12 @@ class AggregationQueryPageSource
             appendMetric(builders[i], outputs.get(i), metrics, totalHits);
         }
         finished = true;
-        return page(builders);
+        return page(builders, 1);
     }
 
     private SourcePage groupedPage()
     {
-        JsonNode body = buildAggregationQuery(filterQuery, groupingColumns, aggregates, COMPOSITE_SIZE, afterKey);
+        JsonNode body = buildAggregationQuery(filterQuery, groupingColumns, aggregates, compositeSize, afterKey);
         JsonNode groups = request(body).path("aggregations").path("groups");
         JsonNode buckets = groups.path("buckets");
         if (!buckets.isArray()) {
@@ -181,7 +195,7 @@ class AggregationQueryPageSource
         }
 
         // A composite page smaller than the requested size is the last page
-        if (buckets.size() < COMPOSITE_SIZE || groups.path("after_key").isMissingNode()) {
+        if (buckets.size() < compositeSize || groups.path("after_key").isMissingNode()) {
             finished = true;
         }
         else {
@@ -191,14 +205,15 @@ class AggregationQueryPageSource
             }
             afterKey = Optional.of(nextKey);
         }
-        return page(builders);
+        return page(builders, buckets.size());
     }
 
     private JsonNode request(JsonNode body)
     {
         diagnostics.recordRemoteRequest(AGGREGATION);
         JsonNode response = client.aggregate(index, body);
-        if (response.path("timed_out").asBoolean() || response.path("_shards").path("failed").asInt() > 0
+        if (!response.path("timed_out").isBoolean() || !response.path("_shards").path("failed").isIntegralNumber()
+                || response.path("timed_out").asBoolean() || response.path("_shards").path("failed").bigIntegerValue().signum() != 0
                 || (body.has("aggs") && !response.path("aggregations").isObject())) {
             throw new TrinoException(ELASTICSEARCH_INVALID_RESPONSE, "Aggregation returned incomplete results");
         }
@@ -230,7 +245,13 @@ class AggregationQueryPageSource
             builder.appendNull();
             return;
         }
-        if (type.equals(BIGINT) || type.equals(INTEGER) || type.equals(SMALLINT) || type.equals(TINYINT)) {
+        if (type.equals(TIMESTAMP_MILLIS)) {
+            if (!value.isIntegralNumber() || !value.canConvertToLong()) {
+                throw new TrinoException(ELASTICSEARCH_INVALID_RESPONSE, "Invalid timestamp aggregation key: " + value);
+            }
+            type.writeLong(builder, multiplyExact(value.longValue(), 1000));
+        }
+        else if (type.equals(BIGINT) || type.equals(INTEGER) || type.equals(SMALLINT) || type.equals(TINYINT)) {
             type.writeLong(builder, value.asLong());
         }
         else if (type.equals(DOUBLE)) {
@@ -288,13 +309,13 @@ class AggregationQueryPageSource
         return builders;
     }
 
-    private static SourcePage page(BlockBuilder[] builders)
+    private static SourcePage page(BlockBuilder[] builders, int positionCount)
     {
         Block[] blocks = new Block[builders.length];
         for (int i = 0; i < builders.length; i++) {
             blocks[i] = builders[i].build();
         }
-        return SourcePage.create(new Page(blocks));
+        return SourcePage.create(new Page(positionCount, blocks));
     }
 
     @Override

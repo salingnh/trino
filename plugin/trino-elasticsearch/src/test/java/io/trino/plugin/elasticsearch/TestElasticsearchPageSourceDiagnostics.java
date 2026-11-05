@@ -16,8 +16,13 @@ package io.trino.plugin.elasticsearch;
 import com.fasterxml.jackson.databind.json.JsonMapper;
 import com.sun.net.httpserver.HttpServer;
 import io.trino.plugin.elasticsearch.client.ElasticsearchClient;
+import io.trino.plugin.elasticsearch.client.IndexMetadata.DateTimeType;
 import io.trino.plugin.elasticsearch.client.IndexMetadata.PrimitiveType;
+import io.trino.plugin.elasticsearch.decoders.BigintDecoder;
+import io.trino.plugin.elasticsearch.decoders.BooleanDecoder;
+import io.trino.plugin.elasticsearch.decoders.DoubleDecoder;
 import io.trino.plugin.elasticsearch.decoders.IntegerDecoder;
+import io.trino.plugin.elasticsearch.decoders.TimestampDecoder;
 import io.trino.plugin.elasticsearch.expression.ElasticsearchRemotePredicate.Term;
 import io.trino.spi.TrinoException;
 import io.trino.spi.connector.ColumnHandle;
@@ -41,7 +46,11 @@ import java.util.concurrent.CopyOnWriteArrayList;
 
 import static io.trino.plugin.elasticsearch.ElasticsearchRemotePredicateTranslator.withRemotePredicate;
 import static io.trino.plugin.elasticsearch.ElasticsearchTableHandle.Type.SCAN;
+import static io.trino.spi.type.BigintType.BIGINT;
+import static io.trino.spi.type.BooleanType.BOOLEAN;
+import static io.trino.spi.type.DoubleType.DOUBLE;
 import static io.trino.spi.type.IntegerType.INTEGER;
+import static io.trino.spi.type.TimestampType.TIMESTAMP_MILLIS;
 import static io.trino.type.InternalTypeManager.TESTING_TYPE_MANAGER;
 import static java.nio.charset.StandardCharsets.UTF_8;
 import static org.assertj.core.api.Assertions.assertThat;
@@ -259,6 +268,87 @@ public class TestElasticsearchPageSourceDiagnostics
     }
 
     @Test
+    public void testLogicalEndpointRetainsConcreteSplitRestriction()
+            throws Exception
+    {
+        try (SearchServer server = new SearchServer("42", false, false);
+                ScanQueryPageSource source = new ScanQueryPageSource(
+                        server.client,
+                        TESTING_TYPE_MANAGER,
+                        TABLE.withTopN(1, List.of(new ElasticsearchColumnSort("id", true, false))),
+                        new ElasticsearchSplit("events-0001", 0, Optional.empty()),
+                        List.of(ID),
+                        server.diagnostics)) {
+            assertThat(source.getNextSourcePage().getPositionCount()).isEqualTo(1);
+            assertThat(server.requests.getFirst()).isEqualTo("POST /events/_search");
+            assertThat(server.searchBodies.getFirst()).contains("\"_index\":\"events-0001\"", "\"sort\"");
+        }
+    }
+
+    @Test
+    public void testGlobalAverageDoesNotDecodeSourceDocuments()
+            throws Exception
+    {
+        try (SearchServer server = new SearchServer("42", false, false)) {
+            var avg = new ElasticsearchColumnHandle(
+                    List.of("avg_result"),
+                    DOUBLE,
+                    new PrimitiveType("double"),
+                    new DoubleDecoder.Descriptor("avg_result"),
+                    false);
+            var table = new ElasticsearchTableHandle(
+                    SCAN,
+                    "default",
+                    "events",
+                    TABLE.constraint(),
+                    Map.of(),
+                    Map.of(),
+                    Map.of(),
+                    Optional.empty(),
+                    OptionalLong.empty(),
+                    List.of(),
+                    Set.of(avg),
+                    Optional.of(new ElasticsearchAggregation(
+                            List.of(),
+                            List.of(new ElasticsearchAggregate("avg_result", ElasticsearchAggregate.Function.AVG, Optional.of("id"), avg.type())))));
+            server.aggregationResponse = "{\"timed_out\":false,\"_shards\":{\"failed\":0},\"hits\":{\"total\":{\"value\":50000,\"relation\":\"eq\"}},\"aggregations\":{\"avg_result\":{\"value\":-0.5}}}";
+            try (var source = new AggregationQueryPageSource(server.client, table, List.of(avg), server.diagnostics, 10_000)) {
+                var page = source.getNextSourcePage();
+                assertThat(page.getPositionCount()).isEqualTo(1);
+                assertThat(avg.type().getDouble(page.getBlock(0), 0)).isEqualTo(-0.5);
+                assertThat(source.getNextSourcePage()).isNull();
+            }
+            var request = JsonMapper.builder().build().readTree(server.searchBodies.getFirst());
+            assertThat(request.path("size").asInt()).isZero();
+            assertThat(request.path("aggs").path("avg_result").path("avg").path("field").asText()).isEqualTo("id");
+            assertThat(server.diagnostics.getAggregationRequests()).isEqualTo(1);
+            assertThat(server.diagnostics.getAggregationRows()).isEqualTo(1);
+            assertThat(server.diagnostics.getAggregationOutputBytes()).isPositive();
+            assertThat(server.diagnostics.getRowsDecoded()).isZero();
+            assertThat(server.diagnostics.getSourceBytesDecoded()).isZero();
+        }
+    }
+
+    @Test
+    public void testAggregationWithoutProjectedColumnsPreservesRowCount()
+            throws Exception
+    {
+        for (boolean grouped : List.of(false, true)) {
+            try (SearchServer server = new SearchServer("42", false, false);
+                    var source = server.aggregation(grouped, 2, List.of())) {
+                if (grouped) {
+                    server.aggregationResponse = "{\"timed_out\":false,\"_shards\":{\"failed\":0},\"aggregations\":{\"groups\":{\"buckets\":[{\"key\":{\"g0\":1},\"doc_count\":3}]}}}";
+                }
+                var page = source.getNextSourcePage();
+                assertThat(page.getPositionCount()).isEqualTo(1);
+                assertThat(page.getChannelCount()).isZero();
+                assertThat(source.isFinished()).isTrue();
+                assertThat(source.getNextSourcePage()).isNull();
+            }
+        }
+    }
+
+    @Test
     public void testAggregationAccountingAndClose()
             throws Exception
     {
@@ -272,6 +362,19 @@ public class TestElasticsearchPageSourceDiagnostics
             assertThat(server.diagnostics.getRemotePagesReceived()).isEqualTo(1);
             assertThat(server.diagnostics.getPagesReturned()).isEqualTo(1);
             assertThat(server.diagnostics.getCancellations()).isZero();
+        }
+    }
+
+    @Test
+    public void testAggregationRejectsMissingCompletionMetadata()
+            throws Exception
+    {
+        try (SearchServer server = new SearchServer("42", false, false);
+                AggregationQueryPageSource source = server.aggregation()) {
+            server.aggregationResponse = "{\"hits\":{\"total\":{\"relation\":\"eq\",\"value\":1}}}";
+            assertThatThrownBy(source::getNextSourcePage).isInstanceOf(TrinoException.class);
+            assertThat(source.isFinished()).isTrue();
+            assertThat(source.getNextSourcePage()).isNull();
         }
     }
 
@@ -310,12 +413,116 @@ public class TestElasticsearchPageSourceDiagnostics
         try (SearchServer server = new SearchServer("42", false, false);
                 AggregationQueryPageSource source = server.aggregation(true)) {
             String buckets = String.join(",", Collections.nCopies(1000, "{\"key\":{\"g0\":1},\"doc_count\":1}"));
-            server.aggregationResponse = "{\"aggregations\":{\"groups\":{\"buckets\":[" + buckets + "],\"after_key\":{\"g0\":1}}}}";
+            server.aggregationResponse = "{\"timed_out\":false,\"_shards\":{\"failed\":0},\"aggregations\":{\"groups\":{\"buckets\":[" + buckets + "],\"after_key\":{\"g0\":1}}}}";
             assertThat(source.getNextSourcePage().getPositionCount()).isEqualTo(1000);
             assertThatThrownBy(source::getNextSourcePage).isInstanceOf(TrinoException.class).hasMessageContaining("non-progressing");
             assertThat(source.isFinished()).isTrue();
             assertThat(server.diagnostics.getAggregationRows()).isEqualTo(1000);
             assertThat(server.diagnostics.getAggregationOutputBytes()).isPositive();
+        }
+    }
+
+    @Test
+    public void testTypedCompositeAfterKeyAndNullBucket()
+            throws Exception
+    {
+        var time = new ElasticsearchColumnHandle(List.of("time"), TIMESTAMP_MILLIS, new DateTimeType(List.of()), new TimestampDecoder.Descriptor("time"), true);
+        var flag = new ElasticsearchColumnHandle(List.of("flag"), BOOLEAN, new PrimitiveType("boolean"), new BooleanDecoder.Descriptor("flag"), true);
+        var key = new ElasticsearchColumnHandle(List.of("key"), BIGINT, new PrimitiveType("long"), new BigintDecoder.Descriptor("key"), true);
+        var columns = List.of(time, flag, key);
+        var table = new ElasticsearchTableHandle(
+                SCAN,
+                "default",
+                "events",
+                TABLE.constraint(),
+                Map.of(),
+                Map.of(),
+                Map.of(),
+                Optional.empty(),
+                OptionalLong.empty(),
+                List.of(),
+                Set.copyOf(columns),
+                Optional.of(new ElasticsearchAggregation(columns, List.of())));
+        try (SearchServer server = new SearchServer("42", false, false);
+                var source = new AggregationQueryPageSource(server.client, table, columns, server.diagnostics, 1)) {
+            String after = "{\"g0\":1234,\"g1\":true,\"g2\":9007199254740993}";
+            server.aggregationResponse = "{\"timed_out\":false,\"_shards\":{\"failed\":0},\"aggregations\":{\"groups\":{\"buckets\":[{\"key\":" + after + ",\"doc_count\":1}],\"after_key\":" + after + "}}}";
+            var page = source.getNextSourcePage();
+            assertThat(TIMESTAMP_MILLIS.getLong(page.getBlock(0), 0)).isEqualTo(1_234_000);
+            assertThat(BOOLEAN.getBoolean(page.getBlock(1), 0)).isTrue();
+            assertThat(BIGINT.getLong(page.getBlock(2), 0)).isEqualTo(9007199254740993L);
+            server.aggregationResponse = "{\"timed_out\":false,\"_shards\":{\"failed\":0},\"aggregations\":{\"groups\":{\"buckets\":[{\"key\":{\"g0\":null,\"g1\":null,\"g2\":null},\"doc_count\":1}]}}}";
+            var nullPage = source.getNextSourcePage();
+            for (int channel = 0; channel < columns.size(); channel++) {
+                assertThat(nullPage.getBlock(channel).isNull(0)).isTrue();
+            }
+            var json = JsonMapper.builder().build();
+            var request = json.readTree(server.searchBodies.getLast());
+            assertThat(request.path("aggs").path("groups").path("composite").path("after")).isEqualTo(json.readTree(after));
+            assertThat(source.isFinished()).isTrue();
+        }
+    }
+
+    @Test
+    public void testGlobalAggregationRequiresExactNonnegativeHitCount()
+            throws Exception
+    {
+        for (String total : List.of(
+                "{\"value\":1,\"relation\":\"gte\"}",
+                "{\"value\":-1,\"relation\":\"eq\"}",
+                "{\"value\":1.5,\"relation\":\"eq\"}",
+                "{\"value\":\"1\",\"relation\":\"eq\"}",
+                "{\"value\":9223372036854775808,\"relation\":\"eq\"}",
+                "{}")) {
+            try (SearchServer server = new SearchServer("42", false, false);
+                    var source = server.aggregation()) {
+                server.aggregationResponse = "{\"timed_out\":false,\"_shards\":{\"failed\":0},\"hits\":{\"total\":" + total + "},\"aggregations\":{}}";
+                assertThatThrownBy(source::getNextSourcePage).isInstanceOf(TrinoException.class);
+                assertThat(source.getNextSourcePage()).isNull();
+                assertThat(server.searchBodies).hasSize(1);
+            }
+        }
+    }
+
+    @Test
+    public void testConfiguredCompositePageSize()
+            throws Exception
+    {
+        for (int size : List.of(1, 2, 1000, 10_000)) {
+            try (SearchServer server = new SearchServer("42", false, false);
+                    AggregationQueryPageSource source = server.aggregation(true, size)) {
+                String bucket = "{\"key\":{\"g0\":1},\"doc_count\":1}";
+                server.aggregationResponse = "{\"timed_out\":false,\"_shards\":{\"failed\":0},\"aggregations\":{\"groups\":{\"buckets\":[" +
+                        String.join(",", Collections.nCopies(size, bucket)) + "],\"after_key\":{\"g0\":1}}}}";
+                assertThat(source.getNextSourcePage().getPositionCount()).isEqualTo(size);
+                assertThat(source.isFinished()).isFalse();
+                server.aggregationResponse = "{\"timed_out\":false,\"_shards\":{\"failed\":0},\"aggregations\":{\"groups\":{\"buckets\":[]}}}";
+                assertThat(source.getNextSourcePage().getPositionCount()).isZero();
+                assertThat(source.isFinished()).isTrue();
+                assertThat(server.searchBodies).hasSize(2);
+                var request = JsonMapper.builder().build().readTree(server.searchBodies.getLast());
+                assertThat(request.path("aggs").path("groups").path("composite").path("size").asInt()).isEqualTo(size);
+                assertThat(request.path("aggs").path("groups").path("composite").path("after").path("g0").isIntegralNumber()).isTrue();
+            }
+        }
+    }
+
+    @Test
+    public void testAggregationRejectsInvalidCompletion()
+            throws Exception
+    {
+        for (String metadata : List.of(
+                "\"timed_out\":true,\"_shards\":{\"failed\":0}",
+                "\"timed_out\":false,\"_shards\":{\"failed\":1}",
+                "\"timed_out\":false,\"_shards\":{\"failed\":4294967296}",
+                "\"timed_out\":\"false\",\"_shards\":{\"failed\":0}")) {
+            try (SearchServer server = new SearchServer("42", false, false);
+                    AggregationQueryPageSource source = server.aggregation()) {
+                server.aggregationResponse = "{" + metadata + ",\"hits\":{\"total\":{\"value\":1,\"relation\":\"eq\"}},\"aggregations\":{}}";
+                assertThatThrownBy(source::getNextSourcePage).isInstanceOf(TrinoException.class);
+                assertThat(source.getNextSourcePage()).isNull();
+                assertThat(server.searchBodies).hasSize(1);
+            }
         }
     }
 
@@ -354,7 +561,7 @@ public class TestElasticsearchPageSourceDiagnostics
         private final List<String> requests = new CopyOnWriteArrayList<>();
         private final List<String> clearBodies = new CopyOnWriteArrayList<>();
         private final List<String> searchBodies = new CopyOnWriteArrayList<>();
-        private volatile String aggregationResponse = "{\"hits\":{\"total\":{\"value\":3,\"relation\":\"eq\"}},\"aggregations\":{}}";
+        private volatile String aggregationResponse = "{\"timed_out\":false,\"_shards\":{\"failed\":0},\"hits\":{\"total\":{\"value\":3,\"relation\":\"eq\"}},\"aggregations\":{}}";
         private volatile String initialSearchResponse;
 
         public SearchServer(String value, boolean failNextPage, boolean failClear)
@@ -441,6 +648,16 @@ public class TestElasticsearchPageSourceDiagnostics
 
         public AggregationQueryPageSource aggregation(boolean grouped)
         {
+            return aggregation(grouped, 1000);
+        }
+
+        public AggregationQueryPageSource aggregation(boolean grouped, int size)
+        {
+            return aggregation(grouped, size, List.of(ID));
+        }
+
+        public AggregationQueryPageSource aggregation(boolean grouped, int size, List<ElasticsearchColumnHandle> outputs)
+        {
             ElasticsearchTableHandle table = new ElasticsearchTableHandle(
                     SCAN,
                     "default",
@@ -454,7 +671,7 @@ public class TestElasticsearchPageSourceDiagnostics
                     List.of(),
                     Set.of(ID),
                     Optional.of(new ElasticsearchAggregation(grouped ? List.of(ID) : List.of(), List.of(new ElasticsearchAggregate("id", ElasticsearchAggregate.Function.COUNT_ALL, Optional.empty(), INTEGER)))));
-            return new AggregationQueryPageSource(client, table, List.of(ID), diagnostics);
+            return new AggregationQueryPageSource(client, table, outputs, diagnostics, size);
         }
 
         @Override

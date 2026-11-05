@@ -1,0 +1,56 @@
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+name: trino-query-shape-lab
+services:
+  es7:
+    image: elasticsearch:7.17.27
+    environment:
+      discovery.type: single-node
+      xpack.security.enabled: "false"
+      node.store.allow_mmap: "false"
+      ES_JAVA_OPTS: -Xms1536m -Xmx1536m
+    ports: ["127.0.0.1:19200:9200"]
+    volumes: ["es7-data:/usr/share/elasticsearch/data"]
+    mem_limit: 3g
+  es8:
+    image: elasticsearch:8.11.3
+    environment:
+      discovery.type: single-node
+      xpack.security.enabled: "false"
+      node.store.allow_mmap: "false"
+      ES_JAVA_OPTS: -Xms1536m -Xmx1536m
+    ports: ["127.0.0.1:19201:9200"]
+    volumes: ["es8-data:/usr/share/elasticsearch/data"]
+    mem_limit: 3g
+  trino:
+    image: eclipse-temurin:25-jdk-noble
+    working_dir: /data
+    command: ["bash", "/start-trino.sh"]
+    ports: ["18081:8080"]
+    volumes:
+      - ./source:/workspace:ro
+      - ./runtime:/runtime:ro
+      - ./etc:/etc/trino:ro
+      - ./data:/data
+      - ./start-trino.sh:/start-trino.sh:ro
+    mem_limit: 8g
+    depends_on: [es7, es8]
+  es_proxy:
+    image: python:3.13-slim
+    command: ["python", "-u", "/lab/proxy.py"]
+    ports: ["127.0.0.1:19202:9200"]
+    volumes: ["./proxy.py:/lab/proxy.py:ro"]
+    depends_on: [es8]
+volumes:
+  es7-data:
+  es8-data:

@@ -104,6 +104,7 @@ import org.elasticsearch.client.ResponseException;
 
 import java.util.ArrayList;
 import java.util.HashMap;
+import java.util.HashSet;
 import java.util.Iterator;
 import java.util.List;
 import java.util.Map;
@@ -136,6 +137,7 @@ import static io.trino.plugin.elasticsearch.ElasticsearchTableHandle.Type.QUERY;
 import static io.trino.plugin.elasticsearch.ElasticsearchTableHandle.Type.SCAN;
 import static io.trino.spi.StandardErrorCode.INVALID_FUNCTION_ARGUMENT;
 import static io.trino.spi.StandardErrorCode.NOT_SUPPORTED;
+import static io.trino.spi.expression.StandardFunctions.CAST_FUNCTION_NAME;
 import static io.trino.spi.expression.StandardFunctions.EQUAL_OPERATOR_FUNCTION_NAME;
 import static io.trino.spi.expression.StandardFunctions.LIKE_FUNCTION_NAME;
 import static io.trino.spi.type.BigintType.BIGINT;
@@ -308,7 +310,8 @@ public class ElasticsearchMetadata
                     converted.type(),
                     field.type(),
                     converted.decoderDescriptor(),
-                    supportsPredicates(field.type(), converted.type)));
+                    supportsPredicates(field.type(), converted.type),
+                    field.supportsQueryShapes()));
         }
 
         return result.buildOrThrow();
@@ -753,7 +756,8 @@ public class ElasticsearchMetadata
         ImmutableList.Builder<ElasticsearchColumnSort> sortOrder = ImmutableList.builder();
         for (SortItem sortItem : sortItems) {
             ElasticsearchColumnHandle column = (ElasticsearchColumnHandle) assignments.get(sortItem.getName());
-            if (column == null || BuiltinColumns.isBuiltinColumn(column.name()) || !isAggregatable(column.elasticsearchType())
+            if (column == null || BuiltinColumns.isBuiltinColumn(column.name()) || (!column.supportsQueryShapes() || !isAggregatable(column.elasticsearchType()))
+                    || column.type().equals(REAL) || column.type().equals(DOUBLE)
                     || column.elasticsearchType() instanceof ScaledFloatType
                     || !(isSupportedGroupingType(column.type()) || column.type().equals(TIMESTAMP_MILLIS))) {
                 return Optional.empty();
@@ -808,8 +812,10 @@ public class ElasticsearchMetadata
         for (ColumnHandle columnHandle : groupingSets.get(0)) {
             ElasticsearchColumnHandle column = (ElasticsearchColumnHandle) columnHandle;
             // Grouping keys become composite terms sources: the field must be aggregatable (doc_values), exact, and a type we can decode
-            if (BuiltinColumns.isBuiltinColumn(column.name()) || !isAggregatable(column.elasticsearchType())
-                    || column.elasticsearchType() instanceof ScaledFloatType || !isSupportedGroupingType(column.type())) {
+            if (BuiltinColumns.isBuiltinColumn(column.name()) || (!column.supportsQueryShapes() || !isAggregatable(column.elasticsearchType()))
+                    || column.elasticsearchType() instanceof ScaledFloatType
+                    || column.type().equals(REAL) || column.type().equals(DOUBLE)
+                    || !(isSupportedGroupingType(column.type()) || column.type().equals(TIMESTAMP_MILLIS))) {
                 return Optional.empty();
             }
             // Grouping columns pass through unchanged: they belong only in the grouping-column mapping,
@@ -820,9 +826,18 @@ public class ElasticsearchMetadata
         }
 
         ImmutableList.Builder<ElasticsearchAggregate> metrics = ImmutableList.builder();
+        Set<String> outputNames = new HashSet<>(assignments.keySet());
+        assignments.values().stream().map(ElasticsearchColumnHandle.class::cast).map(ElasticsearchColumnHandle::name).forEach(outputNames::add);
+        groupingSets.get(0).stream().map(ElasticsearchColumnHandle.class::cast).map(ElasticsearchColumnHandle::name).forEach(outputNames::add);
         int counter = 0;
         for (AggregateFunction aggregate : aggregates) {
-            Optional<ElasticsearchAggregate> converted = toElasticsearchAggregate(aggregate, assignments, "agg_" + counter);
+            String outputName = "agg_" + counter;
+            while (outputNames.contains(outputName) || outputNames.contains(outputName + "_count")) {
+                outputName = "_" + outputName;
+            }
+            outputNames.add(outputName);
+            outputNames.add(outputName + "_count");
+            Optional<ElasticsearchAggregate> converted = toElasticsearchAggregate(aggregate, assignments, outputName);
             if (converted.isEmpty()) {
                 return Optional.empty();
             }
@@ -890,7 +905,7 @@ public class ElasticsearchMetadata
         Optional<ElasticsearchColumnHandle> column = aggregateColumn(arguments, assignments);
         // Reject array columns: value_count/cardinality aggregate individual array elements, not rows (the same
         // exclusion statisticsColumns applies)
-        if (column.isEmpty() || column.get().type() instanceof ArrayType || !isAggregatable(column.get().elasticsearchType())) {
+        if (column.isEmpty() || column.get().type() instanceof ArrayType || (!column.get().supportsQueryShapes() || !isAggregatable(column.get().elasticsearchType()))) {
             return Optional.empty();
         }
         return Optional.of(new ElasticsearchAggregate(outputName, function, Optional.of(column.get().predicateName()), outputType));
@@ -900,7 +915,7 @@ public class ElasticsearchMetadata
     {
         Optional<ElasticsearchColumnHandle> column = aggregateColumn(arguments, assignments);
         // scaled_float doc values are rounded, while the scan decoder returns the original _source value.
-        if (column.isEmpty() || !isAggregatable(column.get().elasticsearchType())
+        if (column.isEmpty() || (!column.get().supportsQueryShapes() || !isAggregatable(column.get().elasticsearchType()))
                 || column.get().elasticsearchType() instanceof ScaledFloatType || !supportsNumericAggregate(function, column.get().type())) {
             return Optional.empty();
         }
@@ -927,10 +942,11 @@ public class ElasticsearchMetadata
     private static boolean supportsNumericAggregate(Function function, Type type)
     {
         // Elasticsearch computes metric aggregations in double precision, so pushdown is only exact within a double's
-        // 2^53 integer range. sum/avg accumulate and must stay on floating-point columns; min/max return an actual
-        // value, so only a 64-bit bigint can exceed the exact range.
+        // 2^53 integer range. Integral SUM must remain in Trino; AVG returns DOUBLE, including for integral inputs.
+        // MIN/MAX return an actual value, so only a 64-bit bigint can exceed the exact range.
         return switch (function) {
-            case SUM, AVG -> type.equals(DOUBLE) || type.equals(REAL);
+            case SUM -> type.equals(DOUBLE) || type.equals(REAL);
+            case AVG -> isNumericType(type);
             case MIN, MAX -> isNumericType(type) && !type.equals(BIGINT);
             case COUNT_ALL, COUNT, COUNT_DISTINCT -> false;
         };
@@ -1270,16 +1286,19 @@ public class ElasticsearchMetadata
         // Create projected column representations for supported sub expressions. Simple column references and chain of
         // dereferences on a variable are supported right now.
         Set<ConnectorExpression> projectedExpressions = projections.stream()
-                .flatMap(expression -> extractSupportedProjectedColumns(expression, ElasticsearchMetadata::isSupportedForPushdown).stream())
+                .flatMap(expression -> isSupportedIntegerWidening(expression)
+                        ? Stream.of(expression)
+                        : extractSupportedProjectedColumns(expression, ElasticsearchMetadata::isSupportedForPushdown).stream())
                 .collect(toImmutableSet());
 
         Map<ConnectorExpression, ProjectedColumnRepresentation> columnProjections = projectedExpressions.stream()
-                .collect(toImmutableMap(identity(), ApplyProjectionUtil::createProjectedColumnRepresentation));
+                .collect(toImmutableMap(identity(), expression -> ApplyProjectionUtil.createProjectedColumnRepresentation(projectionInput(expression))));
 
         ElasticsearchTableHandle elasticsearchTableHandle = (ElasticsearchTableHandle) handle;
 
         // all references are simple variables
-        if (columnProjections.values().stream().allMatch(ProjectedColumnRepresentation::isVariable)) {
+        if (projectedExpressions.stream().noneMatch(ElasticsearchMetadata::isSupportedIntegerWidening)
+                && columnProjections.values().stream().allMatch(ProjectedColumnRepresentation::isVariable)) {
             Set<ElasticsearchColumnHandle> projectedColumns = assignments.values().stream()
                     .map(ElasticsearchColumnHandle.class::cast)
                     .collect(toImmutableSet());
@@ -1309,8 +1328,24 @@ public class ElasticsearchMetadata
             ProjectedColumnRepresentation projectedColumn = entry.getValue();
 
             ElasticsearchColumnHandle baseColumnHandle = (ElasticsearchColumnHandle) assignments.get(projectedColumn.getVariable().getName());
-            ElasticsearchColumnHandle projectedColumnHandle = projectColumn(baseColumnHandle, projectedColumn.getDereferenceIndices(), expression.getType());
+            ElasticsearchColumnHandle projectedColumnHandle = projectColumn(baseColumnHandle, projectedColumn.getDereferenceIndices(), projectionInput(expression).getType());
             String projectedColumnName = projectedColumnHandle.name();
+            if (isSupportedIntegerWidening(expression)) {
+                // AVG over narrow integers is resolved by the engine as AVG(CAST(column AS BIGINT)).
+                // This cast is lossless and can be decoded directly while preserving the mapping proof.
+                projectedColumnHandle = new ElasticsearchColumnHandle(
+                        projectedColumnHandle.path(),
+                        BIGINT,
+                        projectedColumnHandle.elasticsearchType(),
+                        new BigintDecoder.Descriptor(projectedColumnHandle.name()),
+                        projectedColumnHandle.supportsPredicates(),
+                        projectedColumnHandle.supportsQueryShapes());
+                projectedColumnName += "$bigint";
+            }
+            while (newAssignments.containsKey(projectedColumnName)
+                    && !newAssignments.get(projectedColumnName).getColumn().equals(projectedColumnHandle)) {
+                projectedColumnName = "_" + projectedColumnName;
+            }
 
             Variable projectedColumnVariable = new Variable(projectedColumnName, expression.getType());
             Assignment newAssignment = new Assignment(projectedColumnName, projectedColumnHandle, expression.getType());
@@ -1332,6 +1367,23 @@ public class ElasticsearchMetadata
                 newProjections,
                 outputAssignments,
                 false));
+    }
+
+    private static ConnectorExpression projectionInput(ConnectorExpression expression)
+    {
+        return isSupportedIntegerWidening(expression) ? ((Call) expression).getArguments().getFirst() : expression;
+    }
+
+    private static boolean isSupportedIntegerWidening(ConnectorExpression expression)
+    {
+        if (!(expression instanceof Call call) || !call.getFunctionName().equals(CAST_FUNCTION_NAME)
+                || !call.getType().equals(BIGINT) || call.getArguments().size() != 1) {
+            return false;
+        }
+        ConnectorExpression input = call.getArguments().getFirst();
+        Type type = input.getType();
+        return (type.equals(TINYINT) || type.equals(SMALLINT) || type.equals(INTEGER))
+                && extractSupportedProjectedColumns(input, ElasticsearchMetadata::isSupportedForPushdown).equals(List.of(input));
     }
 
     private static boolean isSupportedForPushdown(ConnectorExpression connectorExpression)
@@ -1358,6 +1410,7 @@ public class ElasticsearchMetadata
         DecoderDescriptor decoderDescriptor = baseColumn.decoderDescriptor();
         IndexMetadata.Type elasticsearchType = baseColumn.elasticsearchType();
         Type type = baseColumn.type();
+        boolean supportsQueryShapes = baseColumn.supportsQueryShapes();
 
         for (int index : indices) {
             verify(type instanceof RowType, "type should be Row type");
@@ -1369,7 +1422,11 @@ public class ElasticsearchMetadata
 
             verify(decoderDescriptor instanceof RowDecoder.Descriptor, "decoderDescriptor should be RowDecoder.Descriptor type");
             decoderDescriptor = ((RowDecoder.Descriptor) decoderDescriptor).getFields().get(index).getDescriptor();
-            elasticsearchType = ((IndexMetadata.ObjectType) elasticsearchType).fields().get(index).type();
+            IndexMetadata.Field mappingField = ((IndexMetadata.ObjectType) elasticsearchType).fields().stream()
+                    .filter(candidate -> candidate.name().equals(field.getName().orElseThrow()))
+                    .findFirst().orElseThrow();
+            supportsQueryShapes &= mappingField.supportsQueryShapes();
+            elasticsearchType = mappingField.type();
         }
 
         return new ElasticsearchColumnHandle(
@@ -1377,7 +1434,8 @@ public class ElasticsearchMetadata
                 projectedColumnType,
                 elasticsearchType,
                 decoderDescriptor,
-                supportsPredicates(elasticsearchType, projectedColumnType));
+                supportsPredicates(elasticsearchType, projectedColumnType),
+                supportsQueryShapes);
     }
 
     @Override
