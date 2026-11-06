@@ -31,12 +31,18 @@ public record ElasticsearchColumnHandle(
         IndexMetadata.Type elasticsearchType,
         DecoderDescriptor decoderDescriptor,
         boolean supportsPredicates,
-        boolean supportsQueryShapes)
+        boolean supportsQueryShapes,
+        boolean predicateMappingSafe)
         implements ColumnHandle
 {
     public ElasticsearchColumnHandle(List<String> path, Type type, IndexMetadata.Type elasticsearchType, DecoderDescriptor decoderDescriptor, boolean supportsPredicates)
     {
-        this(path, type, elasticsearchType, decoderDescriptor, supportsPredicates, true);
+        this(path, type, elasticsearchType, decoderDescriptor, supportsPredicates, true, true);
+    }
+
+    public ElasticsearchColumnHandle(List<String> path, Type type, IndexMetadata.Type elasticsearchType, DecoderDescriptor decoderDescriptor, boolean supportsPredicates, boolean supportsQueryShapes)
+    {
+        this(path, type, elasticsearchType, decoderDescriptor, supportsPredicates, supportsQueryShapes, true);
     }
 
     public ElasticsearchColumnHandle
@@ -83,7 +89,7 @@ public record ElasticsearchColumnHandle(
     @JsonIgnore
     public boolean sourceValueSemanticsExact()
     {
-        return elasticsearchType.sourceValueSemanticsExact();
+        return predicateMappingSafe && elasticsearchType.sourceValueSemanticsExact();
     }
 
     /**

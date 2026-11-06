@@ -17,6 +17,8 @@ import com.fasterxml.jackson.databind.json.JsonMapper;
 import org.junit.jupiter.api.Test;
 
 import java.util.List;
+import java.util.Map;
+import java.util.Set;
 
 import static org.assertj.core.api.Assertions.assertThat;
 
@@ -37,6 +39,20 @@ class TestElasticsearchQueryShapeMapping
         assertThat(eligible("{\"type\":\"long\"}", "{\"index.mapping.ignore_malformed\":\"true\"}", "")).isFalse();
         assertThat(eligible("{\"type\":\"long\",\"ignore_malformed\":false}", "{\"index.mapping.ignore_malformed\":\"true\"}", "")).isTrue();
         assertThat(eligible("{\"type\":\"keyword\",\"ignore_above\":3}", "{}", "")).isFalse();
+    }
+
+    @Test
+    void testPredicateSafetyUsesEffectiveDefaultsButDoesNotRequireDocValues()
+            throws Exception
+    {
+        var indices = JSON.readTree("""
+                {"a":{"settings":{"index.mapping.ignore_malformed":"true"},"mappings":{"properties":{"value":{"type":"long","doc_values":false}}}}}
+                """);
+        assertThat(ElasticsearchQueryShapeMapping.apply(SCHEMA, indices).fields().getFirst().predicateMappingSafe()).isFalse();
+        assertThat(ElasticsearchQueryShapeMapping.apply(SCHEMA, indices, Map.of("a", Set.of("value"))).fields().getFirst().predicateMappingSafe()).isFalse();
+        var safe = ElasticsearchQueryShapeMapping.apply(SCHEMA, indices, Map.of("a", Set.of())).fields().getFirst();
+        assertThat(safe.predicateMappingSafe()).isTrue();
+        assertThat(safe.supportsQueryShapes()).isFalse();
     }
 
     @Test

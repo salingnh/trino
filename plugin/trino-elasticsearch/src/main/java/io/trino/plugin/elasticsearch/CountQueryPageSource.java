@@ -13,11 +13,13 @@
  */
 package io.trino.plugin.elasticsearch;
 
+import com.fasterxml.jackson.databind.JsonNode;
 import io.trino.plugin.elasticsearch.client.ElasticsearchClient;
 import io.trino.spi.connector.ConnectorPageSource;
 import io.trino.spi.connector.SourcePage;
 
 import static io.trino.plugin.elasticsearch.ElasticsearchPushdownDiagnostics.RemoteRequestKind.COUNT;
+import static io.trino.plugin.elasticsearch.ElasticsearchQueryBuilder.addIndexFilter;
 import static io.trino.plugin.elasticsearch.ElasticsearchQueryBuilder.buildSearchQuery;
 import static java.lang.Math.toIntExact;
 import static java.util.Objects.requireNonNull;
@@ -55,10 +57,11 @@ class CountQueryPageSource
         long count;
         diagnostics.recordRemoteRequest(COUNT);
         try {
-            count = client.count(
-                    split.index(),
-                    split.shard(),
-                    buildSearchQuery(table, diagnostics));
+            JsonNode query = buildSearchQuery(table, diagnostics);
+            if (!table.index().equals(split.index())) {
+                query = addIndexFilter(query, split.index());
+            }
+            count = client.count(table.index(), split.shard(), query);
         }
         catch (RuntimeException e) {
             diagnostics.recordFailure();

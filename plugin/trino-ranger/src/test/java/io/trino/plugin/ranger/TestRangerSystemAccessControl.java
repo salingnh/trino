@@ -302,12 +302,14 @@ final class TestRangerSystemAccessControl
         accessControlManager.checkCanCreateMaterializedView(context(ALICE), VIEW_ALICE_SCH1_VW1, ImmutableMap.of());
         accessControlManager.checkCanRefreshMaterializedView(context(ALICE), VIEW_ALICE_SCH1_VW1);
         accessControlManager.checkCanSetMaterializedViewProperties(context(ALICE), VIEW_ALICE_SCH1_VW1, ImmutableMap.of());
+        accessControlManager.checkCanSetMaterializedViewComment(context(ALICE), VIEW_ALICE_SCH1_VW1);
         accessControlManager.checkCanDropMaterializedView(context(ALICE), VIEW_ALICE_SCH1_VW1);
         accessControlManager.checkCanRenameMaterializedView(context(ALICE), VIEW_ALICE_SCH1_VW1, newViewName);
 
         assertThatThrownBy(() -> accessControlManager.checkCanCreateMaterializedView(context(BOB), VIEW_ALICE_SCH1_VW1, ImmutableMap.of())).isInstanceOf(AccessDeniedException.class);
         assertThatThrownBy(() -> accessControlManager.checkCanRefreshMaterializedView(context(BOB), VIEW_ALICE_SCH1_VW1)).isInstanceOf(AccessDeniedException.class);
         assertThatThrownBy(() -> accessControlManager.checkCanSetMaterializedViewProperties(context(BOB), VIEW_ALICE_SCH1_VW1, ImmutableMap.of())).isInstanceOf(AccessDeniedException.class);
+        assertThatThrownBy(() -> accessControlManager.checkCanSetMaterializedViewComment(context(BOB), VIEW_ALICE_SCH1_VW1)).isInstanceOf(AccessDeniedException.class);
         assertThatThrownBy(() -> accessControlManager.checkCanDropMaterializedView(context(BOB), VIEW_ALICE_SCH1_VW1)).isInstanceOf(AccessDeniedException.class);
         assertThatThrownBy(() -> accessControlManager.checkCanRenameMaterializedView(context(BOB), VIEW_ALICE_SCH1_VW1, newViewName)).isInstanceOf(AccessDeniedException.class);
     }
@@ -351,14 +353,14 @@ final class TestRangerSystemAccessControl
         ret = accessControlManager.getColumnMasks(context(BOB), TABLE_ALICE_SCH1_TBL1, List.of(createVarcharColumnSchema("national_id")));
         assertThat(ret).hasSize(1);
         assertThat(ret.values().stream().map(ViewExpression::getExpression))
-                .containsExactly("cast(regexp_replace(national_id, '(^.{4})(.*)', x -> x[1] || regexp_replace(x[2], '.', 'X')) as varchar(20))");
+                .containsExactly("cast(regexp_replace(\"national_id\", '(^.{4})(.*)', x -> x[1] || regexp_replace(x[2], '.', 'X')) as varchar(20))");
 
         // MASK_SHOW_FIRST_4 list of columns
-        ret = accessControlManager.getColumnMasks(context(BOB), TABLE_ALICE_SCH1_TBL1, Stream.of("national_id", "new-column")
+        ret = accessControlManager.getColumnMasks(context(BOB), TABLE_ALICE_SCH1_TBL1, Stream.of("national_id", "new-column", "first name")
                 .map(TestRangerSystemAccessControl::createVarcharColumnSchema).toList());
-        assertThat(ret).hasSize(2);
+        assertThat(ret).hasSize(3);
         assertThat(ret.values().stream().map(ViewExpression::getExpression))
-                .containsOnly(Stream.of("national_id", "new-column")
+                .containsOnly(Stream.of("\"national_id\"", "\"new-column\"", "\"first name\"")
                         .map("cast(regexp_replace(%s, '(^.{4})(.*)', x -> x[1] || regexp_replace(x[2], '.', 'X')) as varchar(20))"::formatted)
                         .toArray(String[]::new));
     }

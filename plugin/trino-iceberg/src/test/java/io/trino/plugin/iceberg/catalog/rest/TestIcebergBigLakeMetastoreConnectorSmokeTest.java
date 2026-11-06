@@ -83,10 +83,11 @@ final class TestIcebergBigLakeMetastoreConnectorSmokeTest
                 .addIcebergProperty("iceberg.register-table-procedure.enabled", "true")
                 .addIcebergProperty("iceberg.unique-table-location", "false")
                 .addIcebergProperty("iceberg.catalog.type", "rest")
-                .addIcebergProperty("iceberg.rest-catalog.uri", "https://biglake.googleapis.com/iceberg/v1beta/restcatalog")
+                .addIcebergProperty("iceberg.rest-catalog.uri", "https://biglake.googleapis.com/iceberg/v1/restcatalog")
                 .addIcebergProperty("iceberg.rest-catalog.warehouse", "gs://" + GCP_STORAGE_BUCKET)
                 .addIcebergProperty("iceberg.rest-catalog.security", "GOOGLE")
                 .addIcebergProperty("iceberg.rest-catalog.google-project-id", projectId)
+                .addIcebergProperty("iceberg.rest-catalog.google-json-key", gcsJson.toString())
                 .addIcebergProperty("iceberg.rest-catalog.view-endpoints-enabled", "false")
                 .addIcebergProperty("iceberg.rest-catalog.server-assigned-table-location-enabled", "true")
                 .addIcebergProperty("iceberg.writer-sort-buffer-size", "1MB")
@@ -204,7 +205,7 @@ final class TestIcebergBigLakeMetastoreConnectorSmokeTest
     public void testView()
     {
         assertThatThrownBy(super::testView)
-                .hasMessageContaining("Server does not support endpoint: POST /v1/{prefix}/namespaces/{namespace}/views");
+                .hasMessage("Cannot create views when iceberg.rest-catalog.view-endpoints-enabled is disabled");
     }
 
     @Test
@@ -212,7 +213,7 @@ final class TestIcebergBigLakeMetastoreConnectorSmokeTest
     public void testCommentViewColumn()
     {
         assertThatThrownBy(super::testCommentViewColumn)
-                .hasMessageContaining("Server does not support endpoint: POST /v1/{prefix}/namespaces/{namespace}/views");
+                .hasMessage("Cannot create views when iceberg.rest-catalog.view-endpoints-enabled is disabled");
     }
 
     @Test
@@ -220,7 +221,7 @@ final class TestIcebergBigLakeMetastoreConnectorSmokeTest
     public void testCommentView()
     {
         assertThatThrownBy(super::testCommentView)
-                .hasMessageContaining("Server does not support endpoint: POST /v1/{prefix}/namespaces/{namespace}/views");
+                .hasMessage("Cannot create views when iceberg.rest-catalog.view-endpoints-enabled is disabled");
     }
 
     @Test

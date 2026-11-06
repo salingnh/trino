@@ -58,7 +58,6 @@ import io.trino.spi.type.TypeOperators;
 import io.trino.sql.gen.JoinFilterFunctionCompiler.JoinFilterFunctionFactory;
 import it.unimi.dsi.fastutil.longs.LongArrayList;
 import it.unimi.dsi.fastutil.objects.ObjectArrayList;
-import org.objectweb.asm.MethodTooLargeException;
 import org.weakref.jmx.Managed;
 import org.weakref.jmx.Nested;
 
@@ -101,6 +100,8 @@ import static io.trino.spi.function.InvocationConvention.InvocationReturnConvent
 import static io.trino.spi.function.InvocationConvention.simpleConvention;
 import static io.trino.sql.gen.BytecodeUtils.invoke;
 import static io.trino.util.CompilerUtils.defineHiddenClass;
+import static io.trino.util.CompilerUtils.isClassDumpEnabled;
+import static io.trino.util.CompilerUtils.isCompilerLimitExceeded;
 import static io.trino.util.CompilerUtils.makeClassName;
 import static java.util.Objects.requireNonNull;
 
@@ -196,7 +197,9 @@ public class JoinCompiler
 
     private LookupSourceSupplierFactory internalCompileLookupSourceFactory(List<Type> types, List<Integer> outputChannels, List<Integer> joinChannels, OptionalInt sortChannel)
     {
-        Class<? extends PagesHashStrategy> pagesHashStrategyClass = internalCompileHashStrategy(types, outputChannels, joinChannels, sortChannel);
+        // the same strategy is reachable through compilePagesHashStrategyFactory, so it is
+        // taken from the cache rather than compiled again into a second identical class
+        Class<? extends PagesHashStrategy> pagesHashStrategyClass = hashStrategies.getUnchecked(new CacheKey(types, outputChannels, joinChannels, sortChannel));
 
         OptionalInt singleBigintJoinChannel = OptionalInt.empty();
         if (enableSingleChannelBigintLookupSource) {
@@ -356,8 +359,10 @@ public class JoinCompiler
 
             BytecodeExpression blockBuilderExpression = pageBuilder
                     .invoke("getBlockBuilder", BlockBuilder.class, add(outputChannelOffset, constantInt(pageBuilderOutputChannel)));
+            if (isClassDumpEnabled()) {
+                appendToBody.comment("pageBuilder.getBlockBuilder(outputChannelOffset + %s).append(block.getUnderlyingValueBlock(), block.getUnderlyingValuePosition(blockPosition));", pageBuilderOutputChannel);
+            }
             appendToBody
-                    .comment("pageBuilder.getBlockBuilder(outputChannelOffset + %s).append(block.getUnderlyingValueBlock(), block.getUnderlyingValuePosition(blockPosition));", pageBuilderOutputChannel)
                     .append(blockBuilderExpression.invoke(
                             "append",
                             void.class,
@@ -906,7 +911,7 @@ public class JoinCompiler
 
     private static RuntimeException convertCompilationException(RuntimeException e)
     {
-        if (getCausalChain(e).stream().anyMatch(MethodTooLargeException.class::isInstance)) {
+        if (isCompilerLimitExceeded(e)) {
             return new TrinoException(
                     QUERY_EXCEEDED_COMPILER_LIMIT,
                     "Compiler failed. Possible reasons include: the query may have too many columns",

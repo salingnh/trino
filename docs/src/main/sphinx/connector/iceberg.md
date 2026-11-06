@@ -271,6 +271,13 @@ implementation is used:
   - Enable bucket-aware execution. This allows the engine to use physical
     bucketing information to optimize queries by reducing data exchanges.
   - `true`
+* - `iceberg.domain-compaction-threshold`
+  - Minimum size of query predicates above which Trino compacts the predicates.
+    Pushing a large list of predicates down to the data source can compromise
+    performance. For optimization in that situation, Trino can compact the large
+    predicates. If necessary, adjust the threshold to ensure a balance between
+    performance and predicate pushdown.
+  - `1000`
 * - `iceberg.encryption.kms-type`
   - Key Management Service type for
     [Iceberg table encryption](https://iceberg.apache.org/docs/latest/encryption/).
@@ -345,7 +352,7 @@ Trino and the data source. Refer to the following sections for type mapping in
 each direction.
 
 The Iceberg specification includes supported data types and the mapping to the
-formating in the Avro, ORC, or Parquet files:
+formatting in the Avro, ORC, or Parquet files:
 
 - [Iceberg to Avro](https://iceberg.apache.org/spec/#avro)
 - [Iceberg to ORC](https://iceberg.apache.org/spec/#orc)
@@ -402,9 +409,11 @@ the following table:
   - `ARRAY(e)`
 * - `MAP(k,v)`
   - `MAP(k,v)`
+* - `UNKNOWN`
+  - `UNKNOWN`
 :::
 
-`TIMESTAMP_NS` and `TIMESTAMPTZ_NS` are supported only for Iceberg format
+`TIMESTAMP_NS`, `TIMESTAMPTZ_NS` and `UNKNOWN` are supported only for Iceberg format
 version `3` tables.
 
 No other types are supported.
@@ -649,6 +658,20 @@ CALL example.system.register_table(
   schema_name => 'testdb', 
   table_name => 'customer_orders', 
   table_location => 'hdfs://hadoop-master:9000/user/hive/warehouse/customer_orders-581fad8517934af6be1857a903559d44', 
+  metadata_file_name => '00003-409702ba-4735-4645-8f14-09537cc0b2c8.metadata.json');
+```
+
+You can also provide a metadata location different from the default
+`<table_location>/metadata` directory by specifying the `metadata_location`
+argument. This may be necessary when the metadata file does not reside in the
+default metadata folder relative to the table location:
+
+```sql
+CALL example.system.register_table(
+  schema_name => 'testdb', 
+  table_name => 'orders', 
+  table_location => 'hdfs://hadoop-master:9000/user/hive/warehouse/orders', 
+  metadata_location => 'hdfs://hadoop-master:9000/user/hive/warehouse/orders/custom_metadata', 
   metadata_file_name => '00003-409702ba-4735-4645-8f14-09537cc0b2c8.metadata.json');
 ```
 
@@ -939,6 +962,16 @@ under 128 megabytes in size:
 ALTER TABLE test_table EXECUTE optimize(file_size_threshold => '128MB')
 ```
 
+By default, `optimize` writes the rewritten data files using the table's
+existing [sort order](iceberg-sorted-files), configured with the `sorted_by`
+table property. Use the `sorted_by` parameter of the `optimize` command to
+apply a different sort order for the rewritten files only, without changing
+the table's configured sort order:
+
+```sql
+ALTER TABLE test_table EXECUTE optimize (sorted_by => ARRAY['order_date'])
+```
+
 You can use a `WHERE` clause with the columns used to partition the table
 to filter which partitions are optimized:
 
@@ -1019,6 +1052,9 @@ The command accepts an optional `clean_expired_metadata` parameter (defaults to 
 When true, cleans up metadata such as partition specs and schemas that are no
 longer referenced by snapshots.
 
+The procedure fails on tables with the `gc_enabled` table property set to
+`false`.
+
 (iceberg-remove-orphan-files)=
 ##### remove_orphan_files
 
@@ -1048,6 +1084,9 @@ The value for `retention_threshold` must be higher than or equal to
 procedure fails with a similar message: `Retention specified (1.00d) is shorter
 than the minimum retention configured in the system (7.00d)`. The default value
 for this property is `7d`.
+
+The procedure fails on tables with the `gc_enabled` table property set to
+`false`.
 
 The output of the query has the following metrics:
 
@@ -1108,6 +1147,7 @@ The following table properties can be updated after a table is created:
 - `max_commit_retry`
 - `delete_after_commit_enabled`
 - `max_previous_versions`
+- `max_inferred_metrics_column_defaults`
 - `object_store_layout_enabled`
 - `data_location`
 
@@ -1182,6 +1222,13 @@ connector using a {doc}`WITH </sql/create-table-as>` clause.
   - The max number of previous version metadata files to track.
     Defaults to the value of the `iceberg.max-previous-versions` 
     catalog configuration property, which defaults to `100`.
+* - `max_inferred_metrics_column_defaults`
+  - The maximum number of columns for which column metrics are collected by
+    default. Must be greater than or equal to `0`. Defaults to `100` when not
+    set. Maps to the Iceberg
+    `write.metadata.metrics.max-inferred-column-defaults` table property.
+    The connector applies this limit only to ORC writes. The Parquet and Avro
+    writers ignore it.
 * - `orc_bloom_filter_columns`
   - Comma-separated list of columns to use for ORC bloom filter. It improves the
     performance of queries using Equality and IN predicates when reading ORC
@@ -1208,6 +1255,11 @@ connector using a {doc}`WITH </sql/create-table-as>` clause.
     written by this table.
     Defaults to the value of the `parquet.writer.row-group-size` Parquet
     writer configuration property.
+* - `gc_enabled`
+  - Allows garbage collection operations such as expiring snapshots and
+    removing orphan files. Defaults to `true`. See Iceberg's
+    [`gc.enabled`](https://iceberg.apache.org/docs/latest/configuration/?h=gc.enabled#table-behavior-properties)
+    for details.
 * - `extra_properties`
   - Additional properties added to an Iceberg table. The properties are not used by Trino,
     and are available in the `$properties` metadata table.

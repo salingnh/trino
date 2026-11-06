@@ -30,11 +30,16 @@ public record IndexMetadata(ObjectType schema)
         requireNonNull(schema, "schema is null");
     }
 
-    public record Field(boolean asRawJson, boolean isArray, String name, Type type, boolean supportsQueryShapes)
+    public record Field(boolean asRawJson, boolean isArray, String name, Type type, boolean supportsQueryShapes, boolean predicateMappingSafe)
     {
         public Field(boolean asRawJson, boolean isArray, String name, Type type)
         {
-            this(asRawJson, isArray, name, type, true);
+            this(asRawJson, isArray, name, type, true, true);
+        }
+
+        public Field(boolean asRawJson, boolean isArray, String name, Type type, boolean supportsQueryShapes)
+        {
+            this(asRawJson, isArray, name, type, supportsQueryShapes, true);
         }
 
         public Field

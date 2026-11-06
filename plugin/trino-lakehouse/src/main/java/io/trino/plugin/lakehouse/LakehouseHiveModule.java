@@ -29,6 +29,7 @@ import io.trino.plugin.hive.HiveSessionProperties;
 import io.trino.plugin.hive.HiveSplitManager;
 import io.trino.plugin.hive.HiveTableProperties;
 import io.trino.plugin.hive.HiveTransactionManager;
+import io.trino.plugin.hive.HiveViewProperties;
 import io.trino.plugin.hive.HiveWriterStats;
 import io.trino.plugin.hive.LocationService;
 import io.trino.plugin.hive.PartitionUpdate;
@@ -45,10 +46,10 @@ import io.trino.plugin.hive.metastore.glue.GlueCache;
 import io.trino.plugin.hive.procedure.CreateEmptyPartitionProcedure;
 import io.trino.plugin.hive.procedure.DropStatsProcedure;
 import io.trino.plugin.hive.procedure.FlushMetadataCacheProcedure;
-import io.trino.plugin.hive.procedure.OptimizeTableProcedure;
 import io.trino.plugin.hive.procedure.RegisterPartitionProcedure;
 import io.trino.plugin.hive.procedure.SyncPartitionMetadataProcedure;
 import io.trino.plugin.hive.procedure.UnregisterPartitionProcedure;
+import io.trino.plugin.lakehouse.procedure.OptimizeTableProcedure;
 import io.trino.spi.connector.TableProcedureMetadata;
 import io.trino.spi.procedure.Procedure;
 
@@ -79,6 +80,7 @@ class LakehouseHiveModule
         binder.bind(HiveSessionProperties.class).in(Scopes.SINGLETON);
         binder.bind(HiveSplitManager.class).in(Scopes.SINGLETON);
         binder.bind(HiveTableProperties.class).in(Scopes.SINGLETON);
+        binder.bind(HiveViewProperties.class).in(Scopes.SINGLETON);
 
         binder.bind(HiveTransactionManager.class).in(Scopes.SINGLETON);
         binder.bind(HiveMetadataFactory.class).in(Scopes.SINGLETON);

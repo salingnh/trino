@@ -495,6 +495,13 @@ following properties:
 * - `iceberg.rest-catalog.session`
   - Session information included when communicating with the REST Catalog.
     Options are `NONE` or `USER` (default: `NONE`).
+* - `iceberg.rest-catalog.snapshot-loading-mode`
+  - Snapshots to load from the REST catalog server. Options are `ALL` or
+    `REFS`. `REFS` loads only snapshots referenced by branches and tags, which
+    can speed up metadata loading for tables with many snapshots. Requires
+    REST catalog server support. Disable
+    `iceberg.extended-statistics.collect-on-write` when using `REFS`. Defaults
+    to `ALL`.
 * - `iceberg.rest-catalog.connection-timeout`
   - Maximum time [Duration](prop-type-duration) allowed for socket connection
     requests to complete before timing out.
@@ -546,6 +553,17 @@ following properties:
 * - `iceberg.rest-catalog.google-project-id`
   - Google Cloud project name. This property must be set when `iceberg.rest-catalog.security` 
     config property is set to `GOOGLE`. Example: `development-123456`.
+* - `iceberg.rest-catalog.google-json-key`
+  - Google Cloud service account key in JSON format, used to authenticate with the REST
+    catalog when `iceberg.rest-catalog.security` is set to `GOOGLE`. Optional, and not to
+    be set together with `iceberg.rest-catalog.google-json-key-file-path`. Separate from
+    the `gcs.json-key` property, which authenticates access to GCS for table data.
+* - `iceberg.rest-catalog.google-json-key-file-path`
+  - Path to a file containing a Google Cloud service account key in JSON format, used to
+    authenticate with the REST catalog when `iceberg.rest-catalog.security` is set to
+    `GOOGLE`. Optional, and not to be set together with `iceberg.rest-catalog.google-json-key`.
+    Separate from the `gcs.json-key-file-path` property, which authenticates access to GCS
+    for table data.
 * - `iceberg.rest-catalog.case-insensitive-name-matching`
   - Match namespace, table, and view names case insensitively. Defaults to `false`.
 * - `iceberg.rest-catalog.case-insensitive-name-matching.cache-ttl`
@@ -579,6 +597,13 @@ iceberg.catalog.type=rest
 iceberg.rest-catalog.uri=http://iceberg-with-rest:8181
 ```
 
+The REST catalog supports [view management](sql-view-management)
+using the [Iceberg View specification](https://iceberg.apache.org/view-spec/).
+
+The REST catalog does not support [materialized view management](sql-materialized-view-management).
+
+#### Databricks Unity Catalog
+
 `iceberg.security` must be `read_only` when connecting to Databricks Unity catalog
 using an Iceberg REST catalog:
 
@@ -591,6 +616,8 @@ iceberg.rest-catalog.security=OAUTH2
 iceberg.rest-catalog.oauth2.token=***
 ```
 
+#### BigLake metastore
+
 `iceberg.rest-catalog.security` must be `GOOGLE` when connecting to BigLake metastore
 using an Iceberg REST catalog.
 
@@ -599,24 +626,62 @@ connector.name=iceberg
 iceberg.catalog.type=rest
 iceberg.unique-table-location=false
 iceberg.rest-catalog.warehouse=gs://example-bucket
-iceberg.rest-catalog.uri=https://biglake.googleapis.com/iceberg/v1beta/restcatalog
+iceberg.rest-catalog.uri=https://biglake.googleapis.com/iceberg/v1/restcatalog
 iceberg.rest-catalog.security=GOOGLE
 iceberg.rest-catalog.google-project-id=example-project-id
+iceberg.rest-catalog.google-json-key-file-path=/path/to/rest_catalog_keyfile.json
 iceberg.rest-catalog.view-endpoints-enabled=false
 iceberg.rest-catalog.server-assigned-table-location-enabled=true
 fs.gcs.enabled=true
 gcs.json-key-file-path=/path/to/gcs_keyfile.json
 ```
 
-`gcs.json-key` and `gcs.json-key-file-path` are optional. When omitted, [Application Default
-Credentials](https://cloud.google.com/docs/authentication/application-default-credentials)
-(ADC) are used, which supports GKE Workload Identity and other
-environment-based credential sources.
+`iceberg.rest-catalog.google-json-key` and `iceberg.rest-catalog.google-json-key-file-path`
+authenticate with the REST catalog itself, and are independent from `gcs.json-key`
+and `gcs.json-key-file-path`, which authenticate GCS access for table data.
+All four properties are optional. 
 
-The REST catalog supports [view management](sql-view-management) 
-using the [Iceberg View specification](https://iceberg.apache.org/view-spec/).
+When `iceberg.rest-catalog.vended-credentials-enabled` is set to `true`,
+the REST catalog backend issues short-lived, scoped GCS access tokens to Trino
+for table storage operations.
 
-The REST catalog does not support [materialized view management](sql-materialized-view-management).
+```properties
+connector.name=iceberg
+iceberg.catalog.type=rest
+iceberg.unique-table-location=false
+iceberg.rest-catalog.warehouse=gs://example-bucket
+iceberg.rest-catalog.uri=https://biglake.googleapis.com/iceberg/v1/restcatalog
+iceberg.rest-catalog.security=GOOGLE
+iceberg.rest-catalog.google-project-id=example-project-id
+iceberg.rest-catalog.google-json-key-file-path=/path/to/rest_catalog_keyfile.json
+iceberg.rest-catalog.view-endpoints-enabled=false
+iceberg.rest-catalog.server-assigned-table-location-enabled=true
+
+# Enable credential vending supplied by the REST catalog
+iceberg.rest-catalog.vended-credentials-enabled=true
+fs.gcs.enabled=true
+gcs.auth-type=APPLICATION_DEFAULT
+```
+
+[Application Default Credentials](https://cloud.google.com/docs/authentication/application-default-credentials)
+(ADC) can be used to authenticate against the REST Catalog and GCS, which
+supports GKE Workload Identity and other environment-based credential
+sources.
+
+```properties
+connector.name=iceberg
+iceberg.catalog.type=rest
+iceberg.unique-table-location=false
+iceberg.rest-catalog.warehouse=gs://example-bucket
+iceberg.rest-catalog.uri=https://biglake.googleapis.com/iceberg/v1/restcatalog
+iceberg.rest-catalog.security=GOOGLE
+iceberg.rest-catalog.google-project-id=example-project-id
+iceberg.rest-catalog.view-endpoints-enabled=false
+iceberg.rest-catalog.server-assigned-table-location-enabled=true
+
+fs.gcs.enabled=true
+gcs.auth-type=APPLICATION_DEFAULT
+```
 
 (iceberg-jdbc-catalog)=
 ### JDBC catalog

@@ -92,6 +92,8 @@ import static io.trino.sql.query.QueryAssertions.QueryAssert.newQueryAssert;
 import static io.trino.testing.TestingHandles.TEST_CATALOG_NAME;
 import static io.trino.testing.TestingSession.testSessionBuilder;
 import static io.trino.testing.TransactionBuilder.transaction;
+import static io.trino.testing.assertions.Assert.assertContainsAll;
+import static io.trino.testing.assertions.Assert.assertEqualsIgnoreOrder;
 import static io.trino.testing.assertions.TrinoExceptionAssert.assertThatTrinoException;
 import static io.trino.testing.assertions.TrinoExceptionAssert.assertTrinoExceptionThrownBy;
 import static java.util.Objects.requireNonNull;
@@ -719,15 +721,14 @@ public class QueryAssertions
                     hasTypes(expected.getTypes());
                 }
 
-                ListAssert<MaterializedRow> assertion = assertThat(actual.getMaterializedRows())
-                        .as("Rows for query [%s]", description)
-                        .withRepresentation(ROWS_REPRESENTATION);
-
                 if (ordered) {
-                    assertion.containsExactlyElementsOf(expected.getMaterializedRows());
+                    assertThat(actual.getMaterializedRows())
+                            .as("Rows for query [%s]", description)
+                            .withRepresentation(ROWS_REPRESENTATION)
+                            .containsExactlyElementsOf(expected.getMaterializedRows());
                 }
                 else {
-                    assertion.containsExactlyInAnyOrderElementsOf(expected.getMaterializedRows());
+                    assertEqualsIgnoreOrder(actual.getMaterializedRows(), expected.getMaterializedRows(), "Rows for query [%s]".formatted(description));
                 }
             });
         }
@@ -740,26 +741,8 @@ public class QueryAssertions
                     hasTypes(expected.getTypes());
                 }
 
-                assertThat(actual.getMaterializedRows())
-                        .as("Rows for query [%s]", description)
-                        .withRepresentation(ROWS_REPRESENTATION)
-                        .containsAll(expected.getMaterializedRows());
+                assertContainsAll(actual.getMaterializedRows(), expected.getMaterializedRows(), "Rows for query [%s]".formatted(description));
             });
-        }
-
-        @CanIgnoreReturnValue
-        public ResultAssert hasColumnNames(String... expectedColumnNames)
-        {
-            return hasColumnNames(Arrays.asList(expectedColumnNames));
-        }
-
-        @CanIgnoreReturnValue
-        public ResultAssert hasColumnNames(List<String> expectedColumnNames)
-        {
-            assertThat(actual.getColumnNames())
-                    .as("Column names for query [%s]", description)
-                    .isEqualTo(expectedColumnNames);
-            return this;
         }
 
         @CanIgnoreReturnValue
@@ -768,15 +751,6 @@ public class QueryAssertions
             assertThat(actual.getTypes())
                     .as("Output types for query [%s]", description)
                     .isEqualTo(expectedTypes);
-            return this;
-        }
-
-        @CanIgnoreReturnValue
-        public ResultAssert hasType(int index, Type expectedType)
-        {
-            assertThat(actual.getTypes())
-                    .as("Output types for query [%s]", description)
-                    .element(index).isEqualTo(expectedType);
             return this;
         }
 

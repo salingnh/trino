@@ -80,6 +80,7 @@ public final class IcebergQueryRunner
     static {
         Logging logging = Logging.initialize();
         logging.setLevel("org.apache.iceberg", Level.OFF);
+        logging.setLevel("org.apache.parquet.filter2.compat.FilterCompat", Level.OFF);
         logging.setLevel("net.snowflake.client.internal.core", Level.WARN);
     }
 
@@ -258,6 +259,7 @@ public final class IcebergQueryRunner
             Floci floci = new Floci().withNetwork(network).withNetworkAliases("floci");
             floci.start();
             floci.createBucket(bucketName);
+            floci.createRole("iceberg");
 
             String warehouseLocation = "s3://%s/default/".formatted(bucketName);
 
@@ -318,6 +320,7 @@ public final class IcebergQueryRunner
             Floci floci = new Floci().withNetwork(network).withNetworkAliases("floci");
             floci.start();
             floci.createBucket(bucketName);
+            floci.createRole("iceberg");
 
             String warehouseLocation = "s3://%s/default/".formatted(bucketName);
 
@@ -383,10 +386,11 @@ public final class IcebergQueryRunner
                     .addIcebergProperty("iceberg.register-table-procedure.enabled", "true")
                     .addIcebergProperty("iceberg.unique-table-location", "false")
                     .addIcebergProperty("iceberg.catalog.type", "rest")
-                    .addIcebergProperty("iceberg.rest-catalog.uri", "https://biglake.googleapis.com/iceberg/v1beta/restcatalog")
+                    .addIcebergProperty("iceberg.rest-catalog.uri", "https://biglake.googleapis.com/iceberg/v1/restcatalog")
                     .addIcebergProperty("iceberg.rest-catalog.warehouse", "gs://" + requireEnv("GCP_STORAGE_BUCKET"))
                     .addIcebergProperty("iceberg.rest-catalog.security", "GOOGLE")
                     .addIcebergProperty("iceberg.rest-catalog.google-project-id", projectId)
+                    .addIcebergProperty("iceberg.rest-catalog.google-json-key-file-path", gcpCredentialsFile.toString())
                     .addIcebergProperty("iceberg.rest-catalog.view-endpoints-enabled", "false")
                     .addIcebergProperty("fs.gcs.enabled", "true")
                     .addIcebergProperty("gcs.json-key-file-path", gcpCredentialsFile.toString())
@@ -665,6 +669,41 @@ public final class IcebergQueryRunner
         }
     }
 
+    public static final class IcebergFlociRestSparkQueryRunnerMain
+    {
+        private IcebergFlociRestSparkQueryRunnerMain() {}
+
+        static void main()
+                throws Exception
+        {
+            String bucketName = "test-bucket";
+            @SuppressWarnings("resource")
+            SparkIcebergRestFlociDataLake sparkIcebergRestFlociDataLake = new SparkIcebergRestFlociDataLake(bucketName);
+
+            @SuppressWarnings("resource")
+            QueryRunner queryRunner = builder()
+                    .addCoordinatorProperty("http-server.http.port", "8080")
+                    .setIcebergProperties(
+                            ImmutableMap.<String, String>builder()
+                                    .put("iceberg.catalog.type", "rest")
+                                    .put("iceberg.rest-catalog.uri", "http://" + sparkIcebergRestFlociDataLake.restCatalogBackendContainer().getRestCatalogEndpoint())
+                                    .put("iceberg.writer-sort-buffer-size", "1MB")
+                                    .put("fs.s3.enabled", "true")
+                                    .put("s3.aws-access-key", sparkIcebergRestFlociDataLake.accessKey())
+                                    .put("s3.aws-secret-key", sparkIcebergRestFlociDataLake.secretKey())
+                                    .put("s3.region", FLOCI_REGION)
+                                    .put("s3.endpoint", sparkIcebergRestFlociDataLake.floci().endpoint().toString())
+                                    .put("s3.path-style-access", "true")
+                                    .buildOrThrow())
+                    .setInitialTables(TpchTable.getTables())
+                    .build();
+
+            Logger log = Logger.get(IcebergFlociRestSparkQueryRunnerMain.class);
+            log.info("======== SERVER STARTED ========");
+            log.info("\n====\n%s\n====", queryRunner.getCoordinator().getBaseUrl());
+        }
+    }
+
     // TODO: Add a new query runner for table encryption
 
     public static final class IcebergAzureQueryRunnerMain
@@ -678,7 +717,7 @@ public final class IcebergQueryRunner
             String azureAccount = requiredNonEmptySystemProperty("testing.azure-abfs-account");
             String azureAccessKey = requiredNonEmptySystemProperty("testing.azure-abfs-access-key");
 
-            String abfsSpecificCoreSiteXmlContent = Resources.toString(Resources.getResource("hdp3.1-core-site.xml.abfs-template"), UTF_8)
+            String abfsSpecificCoreSiteXmlContent = Resources.toString(Resources.getResource("core-site.xml.abfs-template"), UTF_8)
                     .replace("%ABFS_ACCESS_KEY%", azureAccessKey)
                     .replace("%ABFS_ACCOUNT%", azureAccount);
 
@@ -690,7 +729,7 @@ public final class IcebergQueryRunner
             @SuppressWarnings("resource")
             HiveHadoop hiveHadoop = HiveHadoop.builder()
                     .withImage(HiveHadoop.HIVE3_IMAGE)
-                    .withFilesToMount(ImmutableMap.of("/etc/hadoop/conf/core-site.xml", hadoopCoreSiteXmlTempFile.normalize().toAbsolutePath().toString()))
+                    .withFilesToMount(ImmutableMap.of("/opt/hadoop/etc/hadoop/core-site.xml", hadoopCoreSiteXmlTempFile.normalize().toAbsolutePath().toString()))
                     .build();
             hiveHadoop.start();
 

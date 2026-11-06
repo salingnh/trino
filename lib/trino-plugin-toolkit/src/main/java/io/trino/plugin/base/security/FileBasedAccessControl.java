@@ -52,6 +52,7 @@ import static io.trino.spi.StandardErrorCode.INVALID_COLUMN_MASK;
 import static io.trino.spi.security.AccessDeniedException.denyAddColumn;
 import static io.trino.spi.security.AccessDeniedException.denyAlterColumn;
 import static io.trino.spi.security.AccessDeniedException.denyCommentColumn;
+import static io.trino.spi.security.AccessDeniedException.denyCommentMaterializedView;
 import static io.trino.spi.security.AccessDeniedException.denyCommentTable;
 import static io.trino.spi.security.AccessDeniedException.denyCommentView;
 import static io.trino.spi.security.AccessDeniedException.denyCreateBranch;
@@ -404,7 +405,6 @@ public class FileBasedAccessControl
     }
 
     @Deprecated
-    @Override
     public void checkCanSelectFromColumns(ConnectorSecurityContext context, SchemaTableName tableName, Set<String> columnNames)
     {
         checkCanSelectFromColumns(context, tableName, Optional.empty(), columnNames);
@@ -418,26 +418,12 @@ public class FileBasedAccessControl
         }
     }
 
-    @Deprecated
-    @Override
-    public void checkCanInsertIntoTable(ConnectorSecurityContext context, SchemaTableName tableName)
-    {
-        checkCanInsertIntoTable(context, tableName, Optional.empty());
-    }
-
     @Override
     public void checkCanDeleteFromTable(ConnectorSecurityContext context, SchemaTableName tableName, Optional<String> branch)
     {
         if (!checkTablePermission(context, tableName, DELETE)) {
             denyDeleteTable(tableName.toString(), branch);
         }
-    }
-
-    @Deprecated
-    @Override
-    public void checkCanDeleteFromTable(ConnectorSecurityContext context, SchemaTableName tableName)
-    {
-        checkCanDeleteFromTable(context, tableName, Optional.empty());
     }
 
     @Override
@@ -454,13 +440,6 @@ public class FileBasedAccessControl
         if (!checkTablePermission(context, tableName, UPDATE)) {
             denyUpdateTableColumns(tableName.toString(), branch, updatedColumns);
         }
-    }
-
-    @Deprecated
-    @Override
-    public void checkCanUpdateTableColumns(ConnectorSecurityContext context, SchemaTableName tableName, Set<String> updatedColumns)
-    {
-        checkCanUpdateTableColumns(context, tableName, Optional.empty(), updatedColumns);
     }
 
     @Override
@@ -530,7 +509,6 @@ public class FileBasedAccessControl
     }
 
     @Deprecated
-    @Override
     public void checkCanCreateViewWithSelectFromColumns(ConnectorSecurityContext context, SchemaTableName tableName, Set<String> columnNames)
     {
         checkCanCreateViewWithSelectFromColumns(context, tableName, Optional.empty(), columnNames);
@@ -586,6 +564,14 @@ public class FileBasedAccessControl
     {
         if (!checkTablePermission(context, materializedViewName, OWNERSHIP)) {
             denySetMaterializedViewProperties(materializedViewName.toString());
+        }
+    }
+
+    @Override
+    public void checkCanSetMaterializedViewComment(ConnectorSecurityContext context, SchemaTableName materializedViewName)
+    {
+        if (!checkTablePermission(context, materializedViewName, OWNERSHIP)) {
+            denyCommentMaterializedView(materializedViewName.toString());
         }
     }
 

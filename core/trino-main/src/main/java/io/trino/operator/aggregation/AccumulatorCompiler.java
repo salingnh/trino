@@ -71,6 +71,7 @@ import static io.airlift.bytecode.expression.BytecodeExpressions.constantFalse;
 import static io.airlift.bytecode.expression.BytecodeExpressions.constantInt;
 import static io.airlift.bytecode.expression.BytecodeExpressions.constantLong;
 import static io.airlift.bytecode.expression.BytecodeExpressions.constantString;
+import static io.airlift.bytecode.expression.BytecodeExpressions.constantTrue;
 import static io.airlift.bytecode.expression.BytecodeExpressions.invokeStatic;
 import static io.airlift.bytecode.expression.BytecodeExpressions.newInstance;
 import static io.trino.operator.aggregation.AggregationLoopBuilder.buildLoop;
@@ -79,6 +80,7 @@ import static io.trino.sql.gen.BytecodeUtils.invoke;
 import static io.trino.sql.gen.BytecodeUtils.loadConstant;
 import static io.trino.sql.gen.LambdaMetafactoryGenerator.generateMetafactory;
 import static io.trino.util.CompilerUtils.defineHiddenClass;
+import static io.trino.util.CompilerUtils.isClassDumpEnabled;
 import static io.trino.util.CompilerUtils.makeClassName;
 import static java.lang.String.format;
 import static java.util.Objects.requireNonNull;
@@ -211,11 +213,14 @@ public final class AccumulatorCompiler
             generateGroupedEvaluateFinal(definition, stateFields, implementation.getOutputFunction(), callSiteBinder);
         }
         else {
-            generateEvaluateFinal(definition, "evaluateFinal", true, stateFields, implementation.getOutputFunction(), callSiteBinder);
+            generateEvaluateFinal(definition, "evaluateFinal", stateFields, implementation.getOutputFunction(), callSiteBinder);
         }
 
         if (grouped) {
             generatePrepareFinal(definition);
+        }
+        else {
+            generateNonGroupedPrepareFinal(definition);
         }
 
         Class<? extends T> accumulatorClass = defineHiddenClass(definition, accumulatorInterface, callSiteBinder.getClassData());
@@ -292,7 +297,7 @@ public final class AccumulatorCompiler
                 implementation.getInputFunction(),
                 callSiteBinder);
 
-        generateEvaluateFinal(definition, "output", false, stateFields, implementation.getOutputFunction(), callSiteBinder);
+        generateEvaluateFinal(definition, "output", stateFields, implementation.getOutputFunction(), callSiteBinder);
         generateGetEstimatedSize(definition, stateFields);
 
         Class<? extends WindowAccumulator> windowAccumulatorClass = defineHiddenClass(definition, WindowAccumulator.class, callSiteBinder.getClassData());
@@ -415,8 +420,10 @@ public final class AccumulatorCompiler
 
         // Get all parameter blocks
         for (int i = 0; i < parameterVariables.size(); i++) {
-            body.comment("%s = arguments.getBlock(%d);", parameterVariables.get(i).getName(), i)
-                    .append(parameterVariables.get(i).set(arguments.invoke("getBlock", Block.class, constantInt(i))));
+            if (isClassDumpEnabled()) {
+                body.comment("%s = arguments.getBlock(%d);", parameterVariables.get(i).getName(), i);
+            }
+            body.append(parameterVariables.get(i).set(arguments.invoke("getBlock", Block.class, constantInt(i))));
         }
 
         BytecodeBlock block = generateInputForLoop(
@@ -711,8 +718,10 @@ public final class AccumulatorCompiler
         Variable position = scope.declareVariable(int.class, "position");
         for (int i = 0; i < stateCount; i++) {
             AccumulatorStateDescriptor<?> stateDescriptor = stateFieldAndDescriptors.get(i).descriptor();
-            body.comment(format("scratchState_%s = stateFactory_%s.createSingleState();", i, i))
-                    .append(loadConstant(callSiteBinder, stateDescriptor.getFactory(), AccumulatorStateFactory.class))
+            if (isClassDumpEnabled()) {
+                body.comment(format("scratchState_%s = stateFactory_%s.createSingleState();", i, i));
+            }
+            body.append(loadConstant(callSiteBinder, stateDescriptor.getFactory(), AccumulatorStateFactory.class))
                     .invokeInterface(AccumulatorStateFactory.class, "createSingleState", AccumulatorState.class)
                     .checkCast(scratchStates.get(i).getType())
                     .putVariable(scratchStates.get(i));
@@ -934,23 +943,16 @@ public final class AccumulatorCompiler
     private static void generateEvaluateFinal(
             ClassDefinition definition,
             String methodName,
-            boolean acceptUpdateMemory,
             List<FieldDefinition> stateFields,
             MethodHandle outputFunction,
             CallSiteBinder callSiteBinder)
     {
         Parameter out = arg("out", BlockBuilder.class);
-        List<Parameter> parameters = new ArrayList<>();
-        parameters.add(out);
-        if (acceptUpdateMemory) {
-            // the callback is only used by accumulators that move data while producing final output
-            parameters.add(arg("updateMemory", UpdateMemory.class));
-        }
         MethodDefinition method = definition.declareMethod(
                 a(PUBLIC),
                 methodName,
                 type(void.class),
-                parameters);
+                out);
 
         BytecodeBlock body = method.getBody();
         Variable thisVariable = method.getThis();
@@ -978,6 +980,16 @@ public final class AccumulatorCompiler
                 type(void.class),
                 arg("updateMemory", UpdateMemory.class));
         method.getBody().ret();
+    }
+
+    private static void generateNonGroupedPrepareFinal(ClassDefinition definition)
+    {
+        MethodDefinition method = definition.declareMethod(
+                a(PUBLIC),
+                "prepareFinal",
+                type(boolean.class),
+                arg("updateMemory", UpdateMemory.class));
+        method.getBody().append(constantTrue().ret());
     }
 
     private static void generateConstructor(

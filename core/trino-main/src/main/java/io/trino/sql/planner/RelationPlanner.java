@@ -33,6 +33,7 @@ import io.trino.operator.table.json.JsonTablePlanSingle;
 import io.trino.operator.table.json.JsonTablePlanUnion;
 import io.trino.operator.table.json.JsonTableQueryColumn;
 import io.trino.operator.table.json.JsonTableValueColumn;
+import io.trino.spi.TrinoException;
 import io.trino.spi.connector.ColumnHandle;
 import io.trino.spi.connector.SortOrder;
 import io.trino.spi.function.table.TableArgument;
@@ -160,6 +161,7 @@ import io.trino.sql.tree.ValueColumn;
 import io.trino.sql.tree.Values;
 import io.trino.sql.tree.VariableDefinition;
 import io.trino.sql.util.AstUtils;
+import jakarta.annotation.Nullable;
 
 import java.util.ArrayList;
 import java.util.Collection;
@@ -177,9 +179,12 @@ import static com.google.common.collect.ImmutableList.toImmutableList;
 import static com.google.common.collect.ImmutableMap.toImmutableMap;
 import static com.google.common.collect.ImmutableSet.toImmutableSet;
 import static com.google.common.collect.Iterables.getOnlyElement;
+import static io.trino.SystemSessionProperties.QUERY_MAX_INITIAL_PLAN_NODES;
 import static io.trino.SystemSessionProperties.getCharVarcharCoercion;
+import static io.trino.SystemSessionProperties.getQueryMaxInitialPlanNodes;
 import static io.trino.spi.StandardErrorCode.CONSTRAINT_VIOLATION;
 import static io.trino.spi.StandardErrorCode.NOT_SUPPORTED;
+import static io.trino.spi.StandardErrorCode.QUERY_PLAN_TOO_LARGE;
 import static io.trino.spi.type.BigintType.BIGINT;
 import static io.trino.spi.type.BooleanType.BOOLEAN;
 import static io.trino.spi.type.TinyintType.TINYINT;
@@ -221,7 +226,7 @@ import static io.trino.sql.tree.JsonTablePlan.SiblingsPlanType.UNION;
 import static io.trino.sql.tree.PatternRecognitionRelation.RowsPerMatch.ONE;
 import static io.trino.sql.tree.PatternSearchMode.Mode.INITIAL;
 import static io.trino.sql.tree.SkipTo.Position.PAST_LAST;
-import static io.trino.type.Json2016Type.JSON_2016;
+import static io.trino.type.JsonType.JSON;
 import static java.util.Objects.requireNonNull;
 
 class RelationPlanner
@@ -236,6 +241,7 @@ class RelationPlanner
     private final Session session;
     private final SubqueryPlanner subqueryPlanner;
     private final Map<NodeRef<Node>, RelationPlan> recursiveSubqueries;
+    private final int maxInitialPlanNodes;
 
     RelationPlanner(
             Analysis analysis,
@@ -265,6 +271,7 @@ class RelationPlanner
         this.session = session;
         this.subqueryPlanner = new SubqueryPlanner(analysis, symbolAllocator, idAllocator, lambdaDeclarationToSymbolMap, plannerContext, outerContext, session, recursiveSubqueries);
         this.recursiveSubqueries = recursiveSubqueries;
+        this.maxInitialPlanNodes = getQueryMaxInitialPlanNodes(session);
     }
 
     public static JoinType mapJoinType(Join.Type joinType)
@@ -283,6 +290,22 @@ class RelationPlanner
             case BERNOULLI -> SampleNode.Type.BERNOULLI;
             case SYSTEM -> SampleNode.Type.SYSTEM;
         };
+    }
+
+    @Override
+    public RelationPlan process(Node node, @Nullable Void context)
+    {
+        RelationPlan plan = super.process(node, context);
+        // Checked after planning the relation to include nodes added after its nested relations
+        if (idAllocator.allocatedIdCount() > maxInitialPlanNodes) {
+            throw new TrinoException(QUERY_PLAN_TOO_LARGE,
+                    """
+                    Number of nodes in the initial query plan exceeds the allowed maximum (%s).
+                    The query likely references the same views or WITH queries many times.
+                    Simplify the query or increase the %s session property
+                    """.formatted(maxInitialPlanNodes, QUERY_MAX_INITIAL_PLAN_NODES));
+        }
+        return plan;
     }
 
     @Override
@@ -1524,7 +1547,7 @@ class RelationPlanner
 
         // append projections for inputJson and parametersRow
         // cannot use the 'appendProjections()' method because the projected expressions include resolved input functions, so they are not pure AST expressions
-        Symbol inputJsonSymbol = symbolAllocator.newSymbol("inputJson", JSON_2016);
+        Symbol inputJsonSymbol = symbolAllocator.newSymbol("inputJson", JSON);
         Symbol parametersRowSymbol = symbolAllocator.newSymbol("parametersRow", parametersType);
         ProjectNode appended = new ProjectNode(
                 idAllocator.getNextId(),
@@ -1578,12 +1601,12 @@ class RelationPlanner
         // create new symbols for json_table function's proper columns
         // These are the types produced by the table function.
         // For ordinality and value columns, the types match the expected output type.
-        // Query columns return JSON_2016. Later we need to apply an output function, and potentially a coercion to match the declared output type.
+        // Query columns return JSON. Later we need to apply an output function, and potentially a coercion to match the declared output type.
         RelationType jsonTableRelationType = analysis.getScope(jsonTable).getRelationType();
         List<Symbol> properOutputs = IntStream.range(0, orderedColumns.size())
                 .mapToObj(index -> {
                     if (orderedColumns.get(index).getNode() instanceof QueryColumn queryColumn) {
-                        return symbolAllocator.newSymbol(queryColumn.getName().getCanonicalValue(), JSON_2016);
+                        return symbolAllocator.newSymbol(queryColumn.getName().getCanonicalValue(), JSON);
                     }
                     return symbolAllocator.newSymbol(jsonTableRelationType.getFieldByIndex(index));
                 })
@@ -1630,7 +1653,7 @@ class RelationPlanner
                         jsonTableAnalysis.transactionHandle()));
 
         // append output functions and coercions for query columns
-        // The table function returns JSON_2016 for query columns. We need to apply output functions and coercions to match the declared output type.
+        // The table function returns JSON for query columns. We need to apply output functions and coercions to match the declared output type.
         // create output layout: first the left side of the join, next the proper columns
         ImmutableList.Builder<Symbol> outputLayout = ImmutableList.<Symbol>builder()
                 .addAll(leftFieldMappings);
