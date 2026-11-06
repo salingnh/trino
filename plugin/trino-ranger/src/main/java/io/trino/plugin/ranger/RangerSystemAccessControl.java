@@ -81,6 +81,7 @@ import static io.trino.spi.StandardErrorCode.INVALID_ARGUMENTS;
 import static io.trino.spi.security.AccessDeniedException.denyAddColumn;
 import static io.trino.spi.security.AccessDeniedException.denyAlterColumn;
 import static io.trino.spi.security.AccessDeniedException.denyCommentColumn;
+import static io.trino.spi.security.AccessDeniedException.denyCommentMaterializedView;
 import static io.trino.spi.security.AccessDeniedException.denyCommentTable;
 import static io.trino.spi.security.AccessDeniedException.denyCommentView;
 import static io.trino.spi.security.AccessDeniedException.denyCreateCatalog;
@@ -664,6 +665,14 @@ public class RangerSystemAccessControl
     }
 
     @Override
+    public void checkCanSetMaterializedViewComment(SystemSecurityContext context, CatalogSchemaTableName materializedView)
+    {
+        if (!hasPermission(createTableResource(materializedView), context, ALTER, "SetMaterializedViewComment")) {
+            denyCommentMaterializedView(materializedView.toString());
+        }
+    }
+
+    @Override
     public void checkCanDropMaterializedView(SystemSecurityContext context, CatalogSchemaTableName materializedView)
     {
         if (!hasPermission(createTableResource(materializedView), context, DROP, "DropMaterializedView")) {
@@ -894,7 +903,7 @@ public class RangerSystemAccessControl
             return Optional.empty();
         }
         else {
-            transformer = transformer.replace("{col}", columnName).replace("{type}", type.getDisplayName());
+            transformer = transformer.replace("{col}", quoteIdentifier(columnName)).replace("{type}", type.getDisplayName());
 
             return Optional.of(ViewExpression.builder().identity(context.getIdentity().getUser()).catalog(tableName.getCatalogName()).schema(tableName.getSchemaTableName().getSchemaName()).expression(transformer).build());
         }
@@ -1053,24 +1062,13 @@ public class RangerSystemAccessControl
         return result != null && result.getIsAllowed();
     }
 
-    private boolean hasPermission(RangerTrinoResource resource, Optional<Principal> principal, QueryId queryId, RangerTrinoAccessType accessType, String action)
-    {
-        RangerAccessResult result = rangerPlugin.isAccessAllowed(createAccessRequest(resource, toIdentity(principal), queryId, accessType, action));
-
-        return result != null && result.getIsAllowed();
-    }
-
     private static RangerTrinoResource createTableResource(CatalogSchemaTableName catalogSchemaTableName)
     {
         return RangerTrinoResource.forTable(catalogSchemaTableName.getCatalogName(), catalogSchemaTableName.getSchemaTableName().getSchemaName(), catalogSchemaTableName.getSchemaTableName().getTableName());
     }
 
-    private static Identity toIdentity(Optional<Principal> principal)
+    private static String quoteIdentifier(String identifier)
     {
-        if (principal.isPresent()) {
-            return Identity.ofUser(principal.get().getName());
-        }
-
-        return Identity.ofUser("");
+        return '"' + identifier.replace("\"", "\"\"") + '"';
     }
 }

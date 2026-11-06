@@ -62,6 +62,12 @@ import static io.trino.testing.containers.environment.QueryRetry.executeWithRetr
 public class SparkIcebergRestEnvironment
         extends SparkIcebergEnvironment
 {
+    public static final String REST_CATALOG_SELF_SUPPRESSION_ISSUE = "https://github.com/trinodb/trino/issues/20131";
+    // HDFS rethrows the same exception from close(), which try-with-resources rejects as self-suppression;
+    // the REST catalog server reports the resulting IllegalArgumentException back to the client
+    @Language("RegExp")
+    public static final String REST_CATALOG_SELF_SUPPRESSION_MATCH = "Self-suppression not permitted\\s+at \\Qorg.apache.iceberg.rest.ErrorHandlers\\E";
+
     static {
         // Ensure the Hive JDBC driver is loaded for Spark Thrift Server connections
         try {
@@ -234,22 +240,6 @@ public class SparkIcebergRestEnvironment
     }
 
     // REST catalog methods
-
-    /**
-     * Returns the internal REST catalog URI (for containers on the same network).
-     */
-    public String getRestCatalogUri()
-    {
-        return restCatalog.getRestUri();
-    }
-
-    /**
-     * Returns the external REST catalog URI (for connecting from the host).
-     */
-    public String getExternalRestCatalogUri()
-    {
-        return restCatalog.getExternalRestUri();
-    }
 
     // Standard ProductTestEnvironment methods
 

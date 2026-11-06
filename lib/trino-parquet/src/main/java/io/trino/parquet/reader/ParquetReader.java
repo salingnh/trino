@@ -59,6 +59,7 @@ import io.trino.spi.type.ArrayType;
 import io.trino.spi.type.DecimalType;
 import io.trino.spi.type.MapType;
 import io.trino.spi.type.RowType;
+import io.trino.spi.type.Type;
 import jakarta.annotation.Nullable;
 import org.apache.parquet.column.ColumnDescriptor;
 import org.apache.parquet.filter2.compat.FilterCompat;
@@ -72,6 +73,7 @@ import org.joda.time.DateTimeZone;
 
 import java.io.Closeable;
 import java.io.IOException;
+import java.io.UncheckedIOException;
 import java.time.ZoneId;
 import java.util.Arrays;
 import java.util.HashMap;
@@ -99,7 +101,6 @@ import static io.trino.parquet.reader.ListColumnReader.calculateCollectionOffset
 import static io.trino.parquet.reader.PageReader.createPageReader;
 import static io.trino.spi.block.Bitmap.isSet;
 import static io.trino.spi.type.VarbinaryType.VARBINARY;
-import static io.trino.spi.type.VarcharType.VARCHAR;
 import static io.trino.spi.type.VariantType.VARIANT;
 import static java.lang.Math.max;
 import static java.lang.Math.min;
@@ -442,8 +443,8 @@ public class ParquetReader
                         };
                         recordSelectionDecision(readMode);
                     }
-                    catch (IOException e) {
-                        throw exceptionTransform.apply(e);
+                    catch (IOException | RuntimeException e) {
+                        throw transformException(e);
                     }
                 }
                 blocks[channel] = block;
@@ -451,6 +452,15 @@ public class ParquetReader
                 retainedSizeInBytes += block.getRetainedSizeInBytes();
             }
             return block;
+        }
+
+        private RuntimeException transformException(Exception exception)
+        {
+            // Page readers cannot throw checked exceptions, so unwrap to let the transform see the original cause
+            if (exception instanceof UncheckedIOException uncheckedIOException) {
+                return exceptionTransform.apply(uncheckedIOException.getCause());
+            }
+            return exceptionTransform.apply(exception);
         }
 
         @Override
@@ -1122,10 +1132,13 @@ public class ParquetReader
     private ColumnChunk readVariantAsJson(VariantField field)
             throws IOException
     {
+        // The field renders the variant to JSON text, so the column is the JSON type; build its
+        // block through that type rather than VARCHAR, since JSON is backed by its own block.
+        Type jsonType = field.getType();
         ColumnChunk metadataChunk = readColumnChunk(field.getMetadata());
 
         int positionCount = metadataChunk.getBlock().getPositionCount();
-        BlockBuilder variantBlock = VARCHAR.createBlockBuilder(null, max(1, positionCount));
+        BlockBuilder variantBlock = jsonType.createBlockBuilder(null, max(1, positionCount));
         ColumnChunk valueChunk = readColumnChunk(field.getValue());
         for (int position = 0; position < positionCount; position++) {
             Slice metadata = VARBINARY.getSlice(metadataChunk.getBlock(), position);
@@ -1135,7 +1148,7 @@ public class ParquetReader
             }
             Slice value = VARBINARY.getSlice(valueChunk.getBlock(), position);
             Variant variant = new Variant(value.getBytes(), metadata.getBytes());
-            VARCHAR.writeSlice(variantBlock, utf8Slice(variant.toJson(zoneId)));
+            jsonType.writeSlice(variantBlock, utf8Slice(variant.toJson(zoneId)));
         }
         return new ColumnChunk(variantBlock.build(), metadataChunk.getDefinitionLevels(), metadataChunk.getRepetitionLevels());
     }
@@ -1274,7 +1287,7 @@ public class ParquetReader
             columnChunk = columnReader.readPrimitive();
         }
 
-        updateMaxBytesPerCell(field.getId(), columnChunk);
+        updateMaxBytesPerCell(field, columnChunk);
         return columnChunk;
     }
 
@@ -1286,20 +1299,28 @@ public class ParquetReader
                 selectedPositions.positions(),
                 selectedPositions.positionsOffset(),
                 selectedPositions.positionCount());
-        updateMaxBytesPerCell(field.getId(), columnChunk);
+        updateMaxBytesPerCell(field, columnChunk);
         return columnChunk;
     }
 
-    private void updateMaxBytesPerCell(int fieldId, ColumnChunk columnChunk)
+    private void updateMaxBytesPerCell(PrimitiveField field, ColumnChunk columnChunk)
     {
-        if (columnChunk.getMaxBlockPositionCount() == 0) {
+        // A leaf under a repeated field holds many values per row, so its size is spread over the rows in the batch
+        int rowCount;
+        if (field.getRepetitionLevel() > 0) {
+            rowCount = batchSize;
+        }
+        else {
+            rowCount = columnChunk.getMaxBlockPositionCount();
+        }
+        if (rowCount == 0) {
             return;
         }
-        double previousBytesPerCell = maxBytesPerCell.getOrDefault(fieldId, 0.0);
-        double bytesPerCell = max(previousBytesPerCell, ((double) columnChunk.getMaxBlockSize()) / columnChunk.getMaxBlockPositionCount());
+        double previousBytesPerCell = maxBytesPerCell.getOrDefault(field.getId(), 0.0);
+        double bytesPerCell = max(previousBytesPerCell, ((double) columnChunk.getMaxBlockSize()) / rowCount);
 
         if (bytesPerCell != previousBytesPerCell) {
-            maxBytesPerCell.put(fieldId, bytesPerCell);
+            maxBytesPerCell.put(field.getId(), bytesPerCell);
             maxCombinedBytesPerRow = max(0, maxCombinedBytesPerRow + bytesPerCell - previousBytesPerCell);
             maxBatchSize = maxCombinedBytesPerRow == 0
                     ? options.getMaxReadBlockRowCount()

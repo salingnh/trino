@@ -61,7 +61,8 @@ public class DictionaryFallbackValuesWriter
         return rawDataByteSize;
     }
 
-    public long getEstimatedBufferedSize()
+    @Override
+    public long getEstimatedDataPageSize()
     {
         long estimatedBufferedSize = currentWriter.getBufferedSize();
         if (!fellBackAlready && firstPage && initialWriter != null &&
@@ -69,6 +70,22 @@ public class DictionaryFallbackValuesWriter
             return rawDataByteSize;
         }
         return estimatedBufferedSize;
+    }
+
+    @Override
+    public long getEstimatedDictionaryPageSize()
+    {
+        if (!fellBackAlready && firstPage && initialWriter != null &&
+                !initialWriter.isCompressionSatisfying(rawDataByteSize, initialWriter.getBufferedSize())) {
+            return 0;
+        }
+        if (!fellBackAlready && initialWriter != null) {
+            return initialWriter.getDictionaryByteSize();
+        }
+        if (initialUsedAndHadDictionary) {
+            return initialWriter.getLastUsedDictionaryByteSize();
+        }
+        return 0;
     }
 
     @Override
@@ -154,10 +171,12 @@ public class DictionaryFallbackValuesWriter
     public String memUsageString(String prefix)
     {
         return String.format(
-                "%s FallbackValuesWriter{\n"
-                        + "%s\n"
-                        + "%s\n"
-                        + "%s}\n",
+                """
+                %s FallbackValuesWriter{
+                %s
+                %s
+                %s}
+                """,
                 prefix,
                 initialWriter != null ? initialWriter.memUsageString(prefix + " initial:") : "",
                 fallBackWriter.memUsageString(prefix + " fallback:"),

@@ -183,7 +183,7 @@ public abstract class BaseBigQueryConnectorTest
     protected MaterializedResult getDescribeOrdersResult()
     {
         // shippriority column is bigint (not integer) in BigQuery connector
-        return resultBuilder(getSession(), VARCHAR, VARCHAR, VARCHAR, VARCHAR)
+        return resultBuilder(VARCHAR, VARCHAR, VARCHAR, VARCHAR)
                 .row("orderkey", "bigint", "", "")
                 .row("custkey", "bigint", "", "")
                 .row("orderstatus", "varchar", "", "")
@@ -442,6 +442,12 @@ public abstract class BaseBigQueryConnectorTest
     protected boolean isColumnNameRejected(Exception exception, String columnName, boolean delimited)
     {
         return nullToEmpty(exception.getMessage()).matches(".*Invalid field name \"%s\". Fields must contain the allowed characters, and be at most 300 characters long..*".formatted(columnName.replace("\\", "\\\\")));
+    }
+
+    @Override
+    protected boolean isRowFieldNameRejected(Exception exception, String fieldName)
+    {
+        return nullToEmpty(exception.getMessage()).matches(".*Invalid field name \"%s\". Fields must contain .*".formatted(fieldName.replace("\\", "\\\\")));
     }
 
     @Test // TODO: Move this test to BaseConnectorTest
@@ -988,7 +994,7 @@ public abstract class BaseBigQueryConnectorTest
                 )\
                 """.formatted(expectedLabel);
 
-        assertEventually(new Duration(1, MINUTES), () -> assertThat(bigQuerySqlExecutor.executeQuery(checkForLabelQuery).getValues())
+        assertEventually(new Duration(3, MINUTES), new Duration(2, SECONDS), () -> assertThat(bigQuerySqlExecutor.executeQuery(checkForLabelQuery).getValues())
                 .extracting(values -> values.get("query").getStringValue())
                 .singleElement()
                 .matches(statement -> statement.contains(expectedView)));

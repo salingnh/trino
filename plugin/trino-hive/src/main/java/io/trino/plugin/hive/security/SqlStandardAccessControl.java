@@ -62,6 +62,7 @@ import static io.trino.spi.StandardErrorCode.NOT_SUPPORTED;
 import static io.trino.spi.security.AccessDeniedException.denyAddColumn;
 import static io.trino.spi.security.AccessDeniedException.denyAlterColumn;
 import static io.trino.spi.security.AccessDeniedException.denyCommentColumn;
+import static io.trino.spi.security.AccessDeniedException.denyCommentMaterializedView;
 import static io.trino.spi.security.AccessDeniedException.denyCommentTable;
 import static io.trino.spi.security.AccessDeniedException.denyCommentView;
 import static io.trino.spi.security.AccessDeniedException.denyCreateFunction;
@@ -337,7 +338,6 @@ public class SqlStandardAccessControl
     }
 
     @Deprecated
-    @Override
     public void checkCanSelectFromColumns(ConnectorSecurityContext context, SchemaTableName tableName, Set<String> columnNames)
     {
         checkCanSelectFromColumns(context, tableName, Optional.empty(), columnNames);
@@ -351,26 +351,12 @@ public class SqlStandardAccessControl
         }
     }
 
-    @Deprecated
-    @Override
-    public void checkCanInsertIntoTable(ConnectorSecurityContext context, SchemaTableName tableName)
-    {
-        checkCanInsertIntoTable(context, tableName, Optional.empty());
-    }
-
     @Override
     public void checkCanDeleteFromTable(ConnectorSecurityContext context, SchemaTableName tableName, Optional<String> branch)
     {
         if (!checkTablePermission(context, tableName, DELETE, false)) {
             denyDeleteTable(tableName.toString(), branch);
         }
-    }
-
-    @Deprecated
-    @Override
-    public void checkCanDeleteFromTable(ConnectorSecurityContext context, SchemaTableName tableName)
-    {
-        checkCanDeleteFromTable(context, tableName, Optional.empty());
     }
 
     @Override
@@ -387,13 +373,6 @@ public class SqlStandardAccessControl
         if (!checkTablePermission(context, tableName, UPDATE, false)) {
             denyUpdateTableColumns(tableName.toString(), branch, updatedColumns);
         }
-    }
-
-    @Deprecated
-    @Override
-    public void checkCanUpdateTableColumns(ConnectorSecurityContext context, SchemaTableName tableName, Set<String> updatedColumns)
-    {
-        checkCanUpdateTableColumns(context, tableName, Optional.empty(), updatedColumns);
     }
 
     @Override
@@ -440,7 +419,6 @@ public class SqlStandardAccessControl
     }
 
     @Deprecated
-    @Override
     public void checkCanCreateViewWithSelectFromColumns(ConnectorSecurityContext context, SchemaTableName tableName, Set<String> columnNames)
     {
         checkCanCreateViewWithSelectFromColumns(context, tableName, Optional.empty(), columnNames);
@@ -491,6 +469,14 @@ public class SqlStandardAccessControl
     {
         if (!isTableOwner(context, materializedViewName)) {
             denySetMaterializedViewProperties(materializedViewName.toString());
+        }
+    }
+
+    @Override
+    public void checkCanSetMaterializedViewComment(ConnectorSecurityContext context, SchemaTableName materializedViewName)
+    {
+        if (!isTableOwner(context, materializedViewName)) {
+            denyCommentMaterializedView(materializedViewName.toString());
         }
     }
 

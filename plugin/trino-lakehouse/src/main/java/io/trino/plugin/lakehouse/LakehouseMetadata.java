@@ -194,6 +194,9 @@ public class LakehouseMetadata
         if (!tableProcedureNames.getOrDefault(tableType, ImmutableSet.of()).contains(procedureName)) {
             throw new TrinoException(NOT_SUPPORTED, "Table procedure not supported for %s tables: %s".formatted(tableType, procedureName));
         }
+        if (procedureName.equals("OPTIMIZE") && tableType != TableType.ICEBERG && executeProperties.get("sorted_by") != null) {
+            throw new TrinoException(NOT_SUPPORTED, "sorted_by option not supported for %s tables: %s".formatted(tableType, procedureName));
+        }
         return forHandle(tableHandle).getTableHandleForExecute(session, accessControl, tableHandle, procedureName, executeProperties, retryMode);
     }
 
@@ -414,7 +417,7 @@ public class LakehouseMetadata
     @Override
     public void setTableProperties(ConnectorSession session, ConnectorTableHandle tableHandle, Map<String, Optional<Object>> properties)
     {
-        forHandle(tableHandle).setTableProperties(session, tableHandle, properties);
+        forHandle(tableHandle).setTableProperties(session, tableHandle, tableProperties.unwrapUpdatedProperties(tableTypeForHandle(tableHandle), properties));
     }
 
     @Override
@@ -433,6 +436,12 @@ public class LakehouseMetadata
     public void setViewColumnComment(ConnectorSession session, SchemaTableName viewName, String columnName, Optional<String> comment)
     {
         hiveMetadata.setViewColumnComment(session, viewName, columnName, comment);
+    }
+
+    @Override
+    public void setMaterializedViewComment(ConnectorSession session, SchemaTableName viewName, Optional<String> comment)
+    {
+        icebergMetadata.setMaterializedViewComment(session, viewName, comment);
     }
 
     @Override
@@ -595,12 +604,6 @@ public class LakehouseMetadata
     public Optional<ConnectorOutputMetadata> finishInsert(ConnectorSession session, ConnectorInsertTableHandle insertHandle, List<ConnectorTableHandle> sourceTableHandles, Collection<Slice> fragments, Collection<ComputedStatistics> computedStatistics)
     {
         return forHandle(insertHandle).finishInsert(session, insertHandle, sourceTableHandles, fragments, computedStatistics);
-    }
-
-    @Override
-    public boolean delegateMaterializedViewRefreshToConnector(ConnectorSession session, SchemaTableName viewName)
-    {
-        return icebergMetadata.delegateMaterializedViewRefreshToConnector(session, viewName);
     }
 
     @Override

@@ -32,6 +32,7 @@ import java.util.Map;
 import java.util.Map.Entry;
 import java.util.Optional;
 
+import static io.trino.spi.predicate.FloatingPointValueSet.requiresNaNPredicate;
 import static io.trino.spi.type.BigintType.BIGINT;
 import static io.trino.spi.type.BooleanType.BOOLEAN;
 import static io.trino.spi.type.DoubleType.DOUBLE;
@@ -103,11 +104,30 @@ final class ElasticsearchRemotePredicateTranslator
         return conjunction(predicates.build());
     }
 
+    static boolean canTranslateDomain(Domain domain)
+    {
+        if (requiresNaNPredicate(domain.getValues())) {
+            return false;
+        }
+        if ((!domain.getType().equals(DOUBLE) && !domain.getType().equals(REAL)) || domain.getValues().isAll() || domain.getValues().isNone()) {
+            return true;
+        }
+        // Elasticsearch distinguishes signed zero, while Trino treats both zeros as equal.
+        return domain.getValues().getRanges().getOrderedRanges().stream()
+                .noneMatch(range -> (!range.isLowUnbounded() && isFloatingPointZero(domain.getType(), range.getLowBoundedValue()))
+                        || (!range.isHighUnbounded() && isFloatingPointZero(domain.getType(), range.getHighBoundedValue())));
+    }
+
+    private static boolean isFloatingPointZero(Type type, Object value)
+    {
+        return type.equals(DOUBLE) ? (double) value == 0.0 : Float.intBitsToFloat(((Long) value).intValue()) == 0.0f;
+    }
+
     public static Optional<ElasticsearchRemotePredicate> translateDomain(ElasticsearchColumnHandle column, Domain domain)
     {
         requireNonNull(column, "column is null");
         requireNonNull(domain, "domain is null");
-        if (domain.isAll()) {
+        if (domain.isAll() || !column.predicateMappingSafe() || !canTranslateDomain(domain)) {
             return Optional.empty();
         }
 
@@ -144,7 +164,7 @@ final class ElasticsearchRemotePredicateTranslator
                 alternatives.add(new ElasticsearchRemotePredicate.Terms(field, values));
             }
         }
-        else if (domain.getValues().complement().isDiscreteSet()) {
+        else if (domain.getValues().complement().isDiscreteSet() && !requiresNaNPredicate(domain.getValues().complement())) {
             List<Object> excludedValues = domain.getValues().complement().getDiscreteSet().stream()
                     .map(value -> getValue(column.type(), value))
                     .toList();

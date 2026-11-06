@@ -374,15 +374,14 @@ export const RootLayout = (props: { children: React.ReactNode }) => {
                         {routers.map((routerItem: RouterItem) =>
                             routerItem.hidden ? null : (
                                 <ListItem key={routerItem.text} disablePadding>
-                                    {/*@ts-expect-error TS2769*/}
                                     <ListItemButton
                                         key={routerItem.itemKey}
                                         component={Link}
-                                        to={routerItem.routeProps.path}
+                                        to={routerItem.routeProps.path ?? '/'}
                                         selected={routerItem.itemKey === selectedDrawerItemKey}
                                     >
                                         <ListItemIcon>{routerItem.icon}</ListItemIcon>
-                                        <ListItemText primary={routerItem.text} />
+                                        {drawerOpen && <ListItemText primary={routerItem.text} />}
                                     </ListItemButton>
                                 </ListItem>
                             )

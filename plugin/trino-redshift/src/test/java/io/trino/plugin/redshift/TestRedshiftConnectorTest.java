@@ -682,10 +682,10 @@ public class TestRedshiftConnectorTest
                     .isInstanceOf(AssertionError.class)
                     .hasMessageContaining(
                             """
-                            elements not found:
-                              (555555555555555555561728450.9938271605)
-                            and elements not expected:
-                              (555555555555555555561728450.9938271604)
+                            Unexpected:
+                              [555555555555555555561728450.9938271604]
+                            Missing:
+                              [555555555555555555561728450.9938271605]
                             """);
         }
     }

@@ -111,7 +111,6 @@ public class ElasticsearchClient
 
     private static final JsonCodec<SearchShardsResponse> SEARCH_SHARDS_RESPONSE_CODEC = jsonCodec(SearchShardsResponse.class);
     private static final JsonCodec<NodesResponse> NODES_RESPONSE_CODEC = jsonCodec(NodesResponse.class);
-    private static final JsonCodec<CountResponse> COUNT_RESPONSE_CODEC = jsonCodec(CountResponse.class);
     private static final JsonMapper JSON_MAPPER = new JsonMapperProvider().get();
     private static final JsonNodeFactory JSON = JsonNodeFactory.instance;
 
@@ -523,12 +522,55 @@ public class ElasticsearchClient
                 }
 
                 IndexMetadata.ObjectType schema = parseType(mappings.get("properties"), metaProperties, useBoundedKeyword);
-                return new IndexMetadata(statisticsRequest ? schema : ElasticsearchQueryShapeMapping.apply(schema, indices));
+                if (statisticsRequest) {
+                    return new IndexMetadata(schema);
+                }
+                Map<String, Set<String>> ignoredMalformedFields = ImmutableMap.of();
+                for (JsonNode indexMetadata : indices) {
+                    if (ElasticsearchQueryShapeMapping.requiresFieldMappingDefaults(indexMetadata)) {
+                        ignoredMalformedFields = fetchIgnoredMalformedFields(index);
+                        break;
+                    }
+                }
+                return new IndexMetadata(ElasticsearchQueryShapeMapping.apply(schema, indices, ignoredMalformedFields));
             }
             catch (IOException e) {
                 throw new TrinoException(ELASTICSEARCH_INVALID_RESPONSE, e);
             }
         });
+    }
+
+    private Map<String, Set<String>> fetchIgnoredMalformedFields(String index)
+    {
+        try {
+            return doRequest(format("/%s/_mapping/field/*?include_defaults=true&filter_path=*.mappings.*.full_name,*.mappings.*.mapping.*.ignore_malformed", index), body -> {
+                try {
+                    ImmutableMap.Builder<String, Set<String>> result = ImmutableMap.builder();
+                    for (Entry<String, JsonNode> indexEntry : JSON_MAPPER.readTree(body).properties()) {
+                        ImmutableSet.Builder<String> fields = ImmutableSet.builder();
+                        for (JsonNode field : indexEntry.getValue().path("mappings")) {
+                            for (JsonNode mapping : field.path("mapping")) {
+                                if (mapping.path("ignore_malformed").asBoolean(false)) {
+                                    fields.add(field.path("full_name").asText());
+                                }
+                            }
+                        }
+                        result.put(indexEntry.getKey(), fields.build());
+                    }
+                    return result.buildOrThrow();
+                }
+                catch (IOException e) {
+                    throw new TrinoException(ELASTICSEARCH_INVALID_RESPONSE, e);
+                }
+            });
+        }
+        catch (TrinoException e) {
+            if (e.getCause() instanceof ResponseException responseException && responseException.getResponse().getStatusLine().getStatusCode() == 404) {
+                // Closed indices retain mappings but cannot supply field defaults.
+                return ImmutableMap.of();
+            }
+            throw e;
+        }
     }
 
     private IndexMetadata.ObjectType parseType(JsonNode properties, JsonNode metaProperties, boolean useBoundedKeyword)
@@ -908,6 +950,8 @@ public class ElasticsearchClient
     public long count(String index, int shard, JsonNode query)
     {
         ObjectNode countBody = JSON.objectNode();
+        countBody.put("size", 0);
+        countBody.put("track_total_hits", true);
         countBody.set("query", query);
 
         LOG.debug("Count: %s:%s, query: %s", index, shard, countBody);
@@ -917,8 +961,8 @@ public class ElasticsearchClient
             Response response;
             try {
                 response = client.performRequest(
-                        "GET",
-                        format("/%s/_count?preference=_shards:%s", index, shard),
+                        "POST",
+                        format("/%s/_search?preference=_shards:%s&pre_filter_shard_size=1&allow_partial_search_results=false", index, shard),
                         ImmutableMap.of(),
                         new StringEntity(countBody.toString(), UTF_8),
                         new BasicHeader("Content-Type", "application/json"));
@@ -931,8 +975,7 @@ public class ElasticsearchClient
             }
 
             try (InputStream input = response.getEntity().getContent()) {
-                return COUNT_RESPONSE_CODEC.fromJson(input)
-                        .getCount();
+                return parseCountResponse(input.readAllBytes());
             }
             catch (IOException e) {
                 throw new TrinoException(ELASTICSEARCH_INVALID_RESPONSE, e);
@@ -941,6 +984,28 @@ public class ElasticsearchClient
         finally {
             countStats.add(Duration.nanosSince(start));
         }
+    }
+
+    @VisibleForTesting
+    static long parseCountResponse(byte[] responseBody)
+            throws IOException
+    {
+        JsonNode response = JSON_MAPPER.readTree(responseBody);
+        if (response == null || !response.path("timed_out").isBoolean() || !response.path("_shards").path("failed").isIntegralNumber()) {
+            throw new TrinoException(ELASTICSEARCH_INVALID_RESPONSE, "Elasticsearch count response is missing search completion information");
+        }
+        if (response.path("timed_out").asBoolean()) {
+            throw new TrinoException(ELASTICSEARCH_QUERY_FAILURE, "Elasticsearch count search timed out");
+        }
+        if (response.path("_shards").path("failed").bigIntegerValue().signum() != 0) {
+            throw new TrinoException(ELASTICSEARCH_QUERY_FAILURE, "Elasticsearch count search failed on one or more shards: " + response.path("_shards").path("failures"));
+        }
+        JsonNode total = response.path("hits").path("total");
+        JsonNode value = total.path("value");
+        if (!"eq".equals(total.path("relation").asText()) || !value.isIntegralNumber() || !value.canConvertToLong() || value.longValue() < 0) {
+            throw new TrinoException(ELASTICSEARCH_INVALID_RESPONSE, "Elasticsearch count response is missing an exact nonnegative hit count");
+        }
+        return value.longValue();
     }
 
     public IndexStatistics getIndexStatistics(String index, JsonNode query, List<String> fields, Set<String> rangeFields, boolean includeCardinality)

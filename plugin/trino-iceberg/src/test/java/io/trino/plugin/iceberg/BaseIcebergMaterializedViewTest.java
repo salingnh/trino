@@ -47,6 +47,8 @@ import io.trino.sql.tree.ExplainType;
 import io.trino.testing.AbstractTestQueryFramework;
 import io.trino.testing.MaterializedRow;
 import io.trino.testing.QueryRunner;
+import io.trino.testing.sql.TestTable;
+import io.trino.testing.sql.TestView;
 import org.apache.iceberg.PartitionField;
 import org.apache.iceberg.Snapshot;
 import org.apache.iceberg.TableMetadata;
@@ -213,13 +215,16 @@ public abstract class BaseIcebergMaterializedViewTest
     {
         String schema = getSession().getSchema().orElseThrow();
 
-        assertUpdate("CREATE MATERIALIZED VIEW test_mv_show_create " +
-                "WITH (\n" +
-                "   partitioning = ARRAY['_date'],\n" +
-                "   format = 'ORC',\n" +
-                "   orc_bloom_filter_columns = ARRAY['_date'],\n" +
-                "   orc_bloom_filter_fpp = 0.1) AS " +
-                "SELECT _bigint, _date FROM base_table1");
+        assertUpdate(
+                """
+                CREATE MATERIALIZED VIEW test_mv_show_create
+                WITH (
+                   partitioning = ARRAY['_date'],
+                   format = 'ORC',
+                   orc_bloom_filter_columns = ARRAY['_date'],
+                   orc_bloom_filter_fpp = 0.1) AS
+                SELECT _bigint, _date FROM base_table1
+                """);
         assertQuery("SELECT COUNT(*) FROM test_mv_show_create", "VALUES 6");
 
         assertThat((String) computeScalar("SHOW CREATE MATERIALIZED VIEW test_mv_show_create"))
@@ -612,6 +617,27 @@ public abstract class BaseIcebergMaterializedViewTest
         assertThat(storageMetadata.snapshots()).hasSize(6).containsAll(storageSnapshots);
 
         assertUpdate("DROP MATERIALIZED VIEW materialized_view_replace");
+    }
+
+    @Test
+    public void testCommentDoesNotAffectStorageTable()
+    {
+        String materializedViewName = "test_comment_materialized_view" + randomNameSuffix();
+        assertUpdate("CREATE MATERIALIZED VIEW " + materializedViewName + " AS SELECT _date, count(_date) AS num_dates FROM base_table1 GROUP BY 1");
+        assertUpdate("REFRESH MATERIALIZED VIEW " + materializedViewName, 3);
+
+        TableMetadata storageMetadataBefore = getStorageTableMetadata(materializedViewName);
+        String storageTableUuid = storageMetadataBefore.uuid();
+        List<Snapshot> storageSnapshotsBefore = storageMetadataBefore.snapshots();
+
+        assertUpdate("COMMENT ON MATERIALIZED VIEW " + materializedViewName + " IS 'new comment'");
+        assertThat((String) computeScalar("SHOW CREATE MATERIALIZED VIEW " + materializedViewName)).contains("COMMENT 'new comment'");
+
+        TableMetadata storageMetadataAfter = getStorageTableMetadata(materializedViewName);
+        assertThat(storageMetadataAfter.uuid()).isEqualTo(storageTableUuid);
+        assertThat(storageMetadataAfter.snapshots()).isEqualTo(storageSnapshotsBefore);
+
+        assertUpdate("DROP MATERIALIZED VIEW " + materializedViewName);
     }
 
     @Test
@@ -1750,6 +1776,96 @@ public abstract class BaseIcebergMaterializedViewTest
         assertUpdate("DROP MATERIALIZED VIEW %s_1".formatted(materializedViewName));
         assertUpdate("DROP MATERIALIZED VIEW %s_2".formatted(materializedViewName));
         assertUpdate("DROP TABLE %s".formatted(sourceTableName));
+    }
+
+    @Test
+    public void testRefreshWithHistoricalSnapshot()
+    {
+        try (TestTable source = newTrinoTable("test_historical_refresh", "AS SELECT 1 AS value")) {
+            long snapshotId = getLatestSnapshotId(source.getName());
+            String materializedViewName = "test_materialized_view_" + randomNameSuffix();
+            // Keep queries on the storage table after newer source snapshots appear.
+            assertUpdate("CREATE MATERIALIZED VIEW %s GRACE PERIOD INTERVAL '1' DAY AS SELECT value FROM %s FOR VERSION AS OF %s"
+                    .formatted(materializedViewName, source.getName(), snapshotId));
+            try {
+                assertUpdate("REFRESH MATERIALIZED VIEW " + materializedViewName, 1);
+                assertThat(query("TABLE " + materializedViewName)).matches("VALUES 1");
+
+                assertUpdate("INSERT INTO " + source.getName() + " VALUES 2", 1);
+                assertThat(query("SELECT value FROM %s FOR VERSION AS OF %s".formatted(source.getName(), snapshotId))).matches("VALUES 1");
+
+                assertUpdate("REFRESH MATERIALIZED VIEW " + materializedViewName, 1);
+                assertThat(query("TABLE " + materializedViewName)).matches("VALUES 1");
+                assertUpdate("REFRESH MATERIALIZED VIEW " + materializedViewName, 1);
+                assertThat(query("TABLE " + materializedViewName)).matches("VALUES 1");
+            }
+            finally {
+                assertUpdate("DROP MATERIALIZED VIEW " + materializedViewName);
+            }
+        }
+    }
+
+    @Test
+    public void testIncrementalRefreshWithHistoricalSnapshot()
+    {
+        try (TestTable source = newTrinoTable("test_historical_refresh", "AS SELECT 1 AS value")) {
+            long firstSnapshotId = getLatestSnapshotId(source.getName());
+            try (TestView sourceView = new TestView(
+                    getQueryRunner()::execute,
+                    "test_historical_source",
+                    "SELECT value FROM %s FOR VERSION AS OF %s".formatted(source.getName(), firstSnapshotId))) {
+                String materializedViewName = "test_materialized_view_" + randomNameSuffix();
+                assertUpdate("CREATE MATERIALIZED VIEW %s GRACE PERIOD INTERVAL '1' DAY AS SELECT value FROM %s"
+                        .formatted(materializedViewName, sourceView.getName()));
+                try {
+                    assertUpdate("REFRESH MATERIALIZED VIEW " + materializedViewName, 1);
+                    assertUpdate("INSERT INTO " + source.getName() + " VALUES 2", 1);
+                    long secondSnapshotId = getLatestSnapshotId(source.getName());
+                    assertUpdate("INSERT INTO " + source.getName() + " VALUES 3", 1);
+
+                    assertUpdate("CREATE OR REPLACE VIEW %s AS SELECT value FROM %s FOR VERSION AS OF %s"
+                            .formatted(sourceView.getName(), source.getName(), secondSnapshotId));
+                    assertThat(query("TABLE " + sourceView.getName())).matches("VALUES 1, 2");
+                    assertUpdate("REFRESH MATERIALIZED VIEW " + materializedViewName, 1);
+                    assertThat(query("TABLE " + materializedViewName)).matches("VALUES 1, 2");
+
+                    assertUpdate("CREATE OR REPLACE VIEW %s AS SELECT value FROM %s FOR VERSION AS OF %s"
+                            .formatted(sourceView.getName(), source.getName(), firstSnapshotId));
+                    assertThat(query("TABLE " + sourceView.getName())).matches("VALUES 1");
+                    assertUpdate("REFRESH MATERIALIZED VIEW " + materializedViewName, 1);
+                    assertThat(query("TABLE " + materializedViewName)).matches("VALUES 1");
+                }
+                finally {
+                    assertUpdate("DROP MATERIALIZED VIEW " + materializedViewName);
+                }
+            }
+        }
+    }
+
+    @Test
+    public void testIncrementalRefreshAfterExpiringFromSnapshot()
+    {
+        Session sessionWithShortRetentionUnlocked = Session.builder(getSession())
+                .setCatalogSessionProperty("iceberg", "expire_snapshots_min_retention", "0s")
+                .build();
+        try (TestTable source = newTrinoTable("test_expired_from_snapshot", "AS SELECT 1 AS value")) {
+            String materializedViewName = "test_materialized_view_" + randomNameSuffix();
+            assertUpdate("CREATE MATERIALIZED VIEW %s GRACE PERIOD INTERVAL '1' DAY AS SELECT value FROM %s"
+                    .formatted(materializedViewName, source.getName()));
+            try {
+                assertUpdate("REFRESH MATERIALIZED VIEW " + materializedViewName, 1);
+                assertUpdate("INSERT INTO " + source.getName() + " VALUES 2", 1);
+                assertUpdate("INSERT INTO " + source.getName() + " VALUES 3", 1);
+                computeActual(sessionWithShortRetentionUnlocked, "ALTER TABLE " + source.getName() + " EXECUTE EXPIRE_SNAPSHOTS (retention_threshold => '0s', retain_last => 2)");
+                assertThat(query("SELECT count(*) FROM \"" + source.getName() + "$snapshots\"")).matches("VALUES BIGINT '2'");
+
+                assertUpdate("REFRESH MATERIALIZED VIEW " + materializedViewName, 2);
+                assertThat(query("TABLE " + materializedViewName)).matches("VALUES 1, 2, 3");
+            }
+            finally {
+                assertUpdate("DROP MATERIALIZED VIEW " + materializedViewName);
+            }
+        }
     }
 
     @Test

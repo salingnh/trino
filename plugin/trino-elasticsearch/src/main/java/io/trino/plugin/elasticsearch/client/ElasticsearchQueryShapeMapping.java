@@ -19,6 +19,8 @@ import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.HashSet;
 import java.util.List;
+import java.util.Map;
+import java.util.Optional;
 import java.util.Set;
 import java.util.regex.Pattern;
 
@@ -33,33 +35,40 @@ final class ElasticsearchQueryShapeMapping
 
     static IndexMetadata.ObjectType apply(IndexMetadata.ObjectType schema, JsonNode indices)
     {
-        List<Mapping> mappings = new ArrayList<>();
-        for (JsonNode index : indices) {
-            Set<String> targets = new HashSet<>();
-            collectCopyTargets(index.path("mappings").path("properties"), targets);
-            mappings.add(new Mapping(index, Set.copyOf(targets)));
-        }
-        return apply(schema, mappings, "", true);
+        return apply(schema, indices, Map.of());
     }
 
-    private static IndexMetadata.ObjectType apply(IndexMetadata.ObjectType schema, List<Mapping> indices, String parent, boolean ancestorSafe)
+    static IndexMetadata.ObjectType apply(IndexMetadata.ObjectType schema, JsonNode indices, Map<String, Set<String>> ignoredMalformedFields)
+    {
+        List<Mapping> mappings = new ArrayList<>();
+        for (var entry : indices.properties()) {
+            JsonNode index = entry.getValue();
+            Set<String> targets = new HashSet<>();
+            collectCopyTargets(index.path("mappings").path("properties"), targets);
+            mappings.add(new Mapping(index, Set.copyOf(targets), Optional.ofNullable(ignoredMalformedFields.get(entry.getKey()))));
+        }
+        return apply(schema, mappings, "", true, true);
+    }
+
+    private static IndexMetadata.ObjectType apply(IndexMetadata.ObjectType schema, List<Mapping> indices, String parent, boolean ancestorShapeSafe, boolean ancestorPredicateSafe)
     {
         List<IndexMetadata.Field> fields = schema.fields().stream()
                 .map(field -> {
                     String path = parent.isEmpty() ? field.name() : parent + "." + field.name();
                     boolean object = field.type() instanceof IndexMetadata.ObjectType;
-                    boolean safe = ancestorSafe && safeAcrossIndices(indices, path, object, field);
+                    boolean predicateSafe = ancestorPredicateSafe && safeAcrossIndices(indices, path, object, field, false);
+                    boolean shapeSafe = ancestorShapeSafe && safeAcrossIndices(indices, path, object, field, true);
                     IndexMetadata.Type type = field.type();
                     if (type instanceof IndexMetadata.ObjectType children) {
-                        type = apply(children, indices, path, safe);
+                        type = apply(children, indices, path, shapeSafe, predicateSafe);
                     }
-                    return new IndexMetadata.Field(field.asRawJson(), field.isArray(), field.name(), type, safe);
+                    return new IndexMetadata.Field(field.asRawJson(), field.isArray(), field.name(), type, shapeSafe, predicateSafe);
                 })
                 .toList();
         return new IndexMetadata.ObjectType(fields);
     }
 
-    private static boolean safeAcrossIndices(List<Mapping> indices, String path, boolean object, IndexMetadata.Field field)
+    private static boolean safeAcrossIndices(List<Mapping> indices, String path, boolean object, IndexMetadata.Field field, boolean queryShape)
     {
         JsonNode first = null;
         if (indices.isEmpty()) {
@@ -80,7 +89,7 @@ final class ElasticsearchQueryShapeMapping
                 node = node.path("properties").path(part);
                 meta = meta.path(part);
             }
-            if (!node.isObject() || (first != null && !first.equals(node))
+            if (!node.isObject() || (first != null && (queryShape || !object) && !first.equals(node))
                     || meta.path("isArray").asBoolean() != field.isArray()
                     || meta.path("asRawJson").asBoolean() != field.asRawJson()) {
                 return false;
@@ -90,7 +99,7 @@ final class ElasticsearchQueryShapeMapping
             if (!mappings.path("enabled").asBoolean(true)
                     || !mappings.path("_source").path("enabled").asBoolean(true)
                     || copyTargets.contains(path) || mappings.path("runtime").has(path)
-                    || field.asRawJson() || field.isArray()
+                    || field.asRawJson() || (queryShape && field.isArray())
                     || !node.path("enabled").asBoolean(true) || node.path("type").asText().equals("nested")) {
                 return false;
             }
@@ -100,21 +109,36 @@ final class ElasticsearchQueryShapeMapping
             JsonNode source = mappings.path("_source");
             if ((!source.path("includes").isMissingNode() && !source.path("includes").isEmpty() && !matches(source.path("includes"), path))
                     || matches(source.path("excludes"), path)
-                    || !index.path("settings").isObject()
-                    || !node.path("doc_values").asBoolean(true)
                     || node.has("script") || node.has("null_value") || node.has("normalizer") || node.has("ignore_above")
-                    || node.path("ignore_malformed").asBoolean(index.path("settings").path("index.mapping.ignore_malformed").asBoolean(false))) {
+                    || ignoresMalformed(entry, node, path)) {
                 return false;
             }
             // A newly added multi-field need not be backfilled for existing source documents.
-            if (node.path("type").asText().equals("text")) {
+            if (queryShape && (!node.path("doc_values").asBoolean(true) || node.path("type").asText().equals("text"))) {
                 return false;
             }
         }
         return true;
     }
 
-    private record Mapping(JsonNode index, Set<String> copyTargets) {}
+    static boolean requiresFieldMappingDefaults(JsonNode index)
+    {
+        JsonNode settings = index.path("settings");
+        return !settings.isObject()
+                || (settings.has("index.mapping.ignore_malformed")
+                && !settings.path("index.mapping.ignore_malformed").asText().equals("false"));
+    }
+
+    private static boolean ignoresMalformed(Mapping mapping, JsonNode field, String path)
+    {
+        if (field.has("ignore_malformed")) {
+            return field.path("ignore_malformed").asBoolean();
+        }
+        return requiresFieldMappingDefaults(mapping.index()) &&
+                mapping.ignoredMalformedFields().map(fields -> fields.contains(path)).orElse(true);
+    }
+
+    private record Mapping(JsonNode index, Set<String> copyTargets, Optional<Set<String>> ignoredMalformedFields) {}
 
     private static boolean matches(JsonNode patterns, String path)
     {

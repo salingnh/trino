@@ -5,7 +5,7 @@
     <parent>
         <groupId>io.trino</groupId>
         <artifactId>trino-root</artifactId>
-        <version>484-SNAPSHOT</version>
+        <version>485-SNAPSHOT</version>
         <relativePath>../../pom.xml</relativePath>
     </parent>
 
@@ -16,7 +16,7 @@
 
     <properties>
         <dep.aws-sdk.version>1.12.797</dep.aws-sdk.version>
-        <dep.graalvm.version>25.3.4.1</dep.graalvm.version>
+        <dep.graalvm.version>25.4.4.1.1</dep.graalvm.version>
         <!-- TODO: remove once Ranger upgrades to Jetty 12 -->
         <dep.jetty11.version>11.0.26</dep.jetty11.version>
         <dep.ranger.version>2.9.0</dep.ranger.version>
@@ -72,14 +72,6 @@
                     <artifactId>commons-logging</artifactId>
                 </exclusion>
                 <exclusion>
-                    <groupId>javax.servlet</groupId>
-                    <artifactId>javax.servlet-api</artifactId>
-                </exclusion>
-                <exclusion>
-                    <groupId>org.apache.hadoop</groupId>
-                    <artifactId>hadoop-apache</artifactId>
-                </exclusion>
-                <exclusion>
                     <groupId>org.apache.hadoop</groupId>
                     <artifactId>hadoop-auth</artifactId>
                 </exclusion>
@@ -91,16 +83,18 @@
                     <groupId>org.apache.hadoop</groupId>
                     <artifactId>hadoop-client-runtime</artifactId>
                 </exclusion>
-                <exclusion>
-                    <groupId>org.apache.hadoop</groupId>
-                    <artifactId>hadoop-common</artifactId>
-                </exclusion>
             </exclusions>
         </dependency>
 
         <dependency>
             <groupId>com.fasterxml.jackson.core</groupId>
             <artifactId>jackson-annotations</artifactId>
+            <scope>provided</scope>
+        </dependency>
+
+        <dependency>
+            <groupId>io.airlift</groupId>
+            <artifactId>slice</artifactId>
             <scope>provided</scope>
         </dependency>
 
@@ -138,7 +132,7 @@
         <dependency>
             <groupId>com.carrotsearch</groupId>
             <artifactId>hppc</artifactId>
-            <version>0.11.1</version>
+            <version>0.12.0</version>
             <scope>runtime</scope>
         </dependency>
 
@@ -152,7 +146,7 @@
         <dependency>
             <groupId>org.apache.hadoop.thirdparty</groupId>
             <artifactId>hadoop-shaded-guava</artifactId>
-            <version>1.5.0</version>
+            <version>1.6.0</version>
             <scope>runtime</scope>
         </dependency>
 
@@ -201,10 +195,6 @@
                 <exclusion>
                     <groupId>org.apache.hadoop</groupId>
                     <artifactId>hadoop-client-runtime</artifactId>
-                </exclusion>
-                <exclusion>
-                    <groupId>org.apache.hadoop</groupId>
-                    <artifactId>hadoop-common</artifactId>
                 </exclusion>
             </exclusions>
         </dependency>
@@ -413,6 +403,16 @@
                                 <include>com.amazonaws:*:*</include>
                             </includes>
                         </bannedDependencies>
+                        <requireUpperBoundDeps>
+                            <excludes combine.children="append">
+                                <!-- Jetty 11 pinned until Ranger upgrades to Jetty 12 -->
+                                <exclude>org.eclipse.jetty:jetty-alpn-client</exclude>
+                                <exclude>org.eclipse.jetty:jetty-client</exclude>
+                                <exclude>org.eclipse.jetty:jetty-http</exclude>
+                                <exclude>org.eclipse.jetty:jetty-io</exclude>
+                                <exclude>org.eclipse.jetty:jetty-util</exclude>
+                            </excludes>
+                        </requireUpperBoundDeps>
                     </rules>
                 </configuration>
             </plugin>
