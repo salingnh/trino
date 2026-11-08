@@ -45,7 +45,8 @@ class TestElasticsearchQueryShapeMapping
     void testPredicateSafetyUsesEffectiveDefaultsButDoesNotRequireDocValues()
             throws Exception
     {
-        var indices = JSON.readTree("""
+        var indices = JSON.readTree(
+                """
                 {"a":{"settings":{"index.mapping.ignore_malformed":"true"},"mappings":{"properties":{"value":{"type":"long","doc_values":false}}}}}
                 """);
         assertThat(ElasticsearchQueryShapeMapping.apply(SCHEMA, indices).fields().getFirst().predicateMappingSafe()).isFalse();

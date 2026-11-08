@@ -269,7 +269,16 @@ jobs:
         with:
           fetch-depth: 0 # checkout all commits to be able to determine merge base
           persist-credentials: false
+      - name: Inspect reviewed production sync
+        id: production-sync
+        env:
+          PR_BASE_REF: ${{ github.event.pull_request.base.ref }}
+          PR_HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        run: |
+          python3 .github/bin/check-production-sync.py --test
+          python3 .github/bin/check-production-sync.py "$PR_BASE_REF" "$PR_HEAD_SHA" >> "$GITHUB_OUTPUT"
       - name: Block illegal commits
+        if: steps.production-sync.outputs.reviewed != 'true'
         uses: trinodb/github-actions/block-commits@c2991972560c5219d9ae5fb68c0c9d687ffcdd10
         with:
           action-merge: fail
@@ -279,13 +288,20 @@ jobs:
         env:
           PR_BASE_REF: ${{ github.event.pull_request.base.ref }}
           PR_HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+          REVIEWED_PRODUCTION_SYNC: ${{ steps.production-sync.outputs.reviewed }}
         run: |
           # Make sure the PR branch contains the compile-commit composite job
           if git merge-base --is-ancestor $( git rev-list HEAD -- .github/actions/compile-commit/action.yml | tail -n 1 ) "${PR_HEAD_SHA}"
           then
             # The HEAD commit of the PR can be safely ignored since it's already compiled in other jobs
             # This is achieved by adding a tilde (~) after the HEAD sha
-            git log --reverse --pretty=format:'%H,%T,"%s"' "refs/remotes/origin/${PR_BASE_REF}..${PR_HEAD_SHA}~" | ./.github/bin/prepare-check-commits-matrix.py > commit-matrix.json
+            if [ "${REVIEWED_PRODUCTION_SYNC}" = 'true' ]; then
+              # Full CI validates the merged tree. Compile follow-up commits on
+              # the production first-parent path, not imported upstream history.
+              git log --first-parent --no-merges --reverse --pretty=format:'%H,%T,"%s"' "refs/remotes/origin/${PR_BASE_REF}..${PR_HEAD_SHA}~" | ./.github/bin/prepare-check-commits-matrix.py > commit-matrix.json
+            else
+              git log --reverse --pretty=format:'%H,%T,"%s"' "refs/remotes/origin/${PR_BASE_REF}..${PR_HEAD_SHA}~" | ./.github/bin/prepare-check-commits-matrix.py > commit-matrix.json
+            fi
           else
             echo -n '' > commit-matrix.json
           fi
