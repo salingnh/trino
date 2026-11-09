@@ -66,6 +66,7 @@ import static io.trino.spi.StandardErrorCode.INVALID_COLUMN_MASK;
 import static io.trino.spi.security.AccessDeniedException.denyAddColumn;
 import static io.trino.spi.security.AccessDeniedException.denyAlterColumn;
 import static io.trino.spi.security.AccessDeniedException.denyCommentColumn;
+import static io.trino.spi.security.AccessDeniedException.denyCommentMaterializedView;
 import static io.trino.spi.security.AccessDeniedException.denyCommentTable;
 import static io.trino.spi.security.AccessDeniedException.denyCommentView;
 import static io.trino.spi.security.AccessDeniedException.denyCreateCatalog;
@@ -862,6 +863,14 @@ public class FileBasedSystemAccessControl
     }
 
     @Override
+    public void checkCanSetMaterializedViewComment(SystemSecurityContext context, CatalogSchemaTableName materializedView)
+    {
+        if (!checkTablePermission(context, materializedView, OWNERSHIP)) {
+            denyCommentMaterializedView(materializedView.toString());
+        }
+    }
+
+    @Override
     public void checkCanSetCatalogSessionProperty(SystemSecurityContext context, String catalogName, String propertyName)
     {
         Identity identity = context.getIdentity();
@@ -1356,24 +1365,6 @@ public class FileBasedSystemAccessControl
         public Builder setLifeCycleManager(LifeCycleManager lifeCycleManager)
         {
             this.lifeCycleManager = lifeCycleManager;
-            return this;
-        }
-
-        @SuppressWarnings("unused")
-        public Builder denyAllAccess()
-        {
-            catalogRules = ImmutableList.of();
-            queryAccessRules = Optional.of(ImmutableList.of());
-            impersonationRules = Optional.of(ImmutableList.of());
-            principalUserMatchRules = Optional.of(ImmutableList.of());
-            systemInformationRules = Optional.of(ImmutableList.of());
-            authorizationRules = ImmutableList.of();
-            schemaRules = ImmutableList.of();
-            tableRules = ImmutableList.of();
-            sessionPropertyRules = ImmutableList.of();
-            catalogSessionPropertyRules = ImmutableList.of();
-            functionRules = ImmutableList.of();
-            procedureRules = ImmutableList.of();
             return this;
         }
 

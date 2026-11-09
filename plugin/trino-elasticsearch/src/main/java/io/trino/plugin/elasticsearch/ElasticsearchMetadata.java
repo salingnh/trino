@@ -311,7 +311,8 @@ public class ElasticsearchMetadata
                     field.type(),
                     converted.decoderDescriptor(),
                     supportsPredicates(field.type(), converted.type),
-                    field.supportsQueryShapes()));
+                    field.supportsQueryShapes(),
+                    field.predicateMappingSafe()));
         }
 
         return result.buildOrThrow();
@@ -398,7 +399,7 @@ public class ElasticsearchMetadata
     public static IndexMetadata.Field elementField(IndexMetadata.Field field)
     {
         checkArgument(field.isArray(), "Cannot get element field from a non-array field");
-        return new IndexMetadata.Field(field.asRawJson(), false, field.name(), field.type());
+        return new IndexMetadata.Field(field.asRawJson(), false, field.name(), field.type(), field.supportsQueryShapes(), field.predicateMappingSafe());
     }
 
     @Override
@@ -999,10 +1000,10 @@ public class ElasticsearchMetadata
         for (Entry<ColumnHandle, Domain> entry : domains.entrySet()) {
             ElasticsearchColumnHandle column = (ElasticsearchColumnHandle) entry.getKey();
 
-            if (column.supportsPredicates()) {
+            if (column.supportsPredicates() && ElasticsearchRemotePredicateTranslator.canTranslateDomain(entry.getValue())) {
                 supported.put(column, entry.getValue());
             }
-            else if (fullTextMode != FullTextPushdownMode.DISABLED && isFullTextCandidate(column, entry.getValue())) {
+            else if (column.predicateMappingSafe() && fullTextMode != FullTextPushdownMode.DISABLED && isFullTextCandidate(column, entry.getValue())) {
                 // Push an analyzed text predicate as a full-text match_phrase query
                 supported.put(column, entry.getValue());
                 if (fullTextMode == FullTextPushdownMode.SAFE) {
@@ -1038,7 +1039,7 @@ public class ElasticsearchMetadata
                     }
 
                     boolean exactLike = supportsLikePushdown(column);
-                    boolean fullTextLike = !exactLike && fullTextMode != FullTextPushdownMode.DISABLED && column.type() instanceof VarcharType;
+                    boolean fullTextLike = !exactLike && column.predicateMappingSafe() && fullTextMode != FullTextPushdownMode.DISABLED && column.type() instanceof VarcharType;
                     if (pattern instanceof Slice slice && (exactLike || fullTextLike)) {
                         String predicateName = column.predicateName();
                         if (!newRegexes.containsKey(predicateName) && !newPrefixes.containsKey(predicateName) && !newMatchPhrasePrefixes.containsKey(predicateName)) {
@@ -1339,7 +1340,8 @@ public class ElasticsearchMetadata
                         projectedColumnHandle.elasticsearchType(),
                         new BigintDecoder.Descriptor(projectedColumnHandle.name()),
                         projectedColumnHandle.supportsPredicates(),
-                        projectedColumnHandle.supportsQueryShapes());
+                        projectedColumnHandle.supportsQueryShapes(),
+                        projectedColumnHandle.predicateMappingSafe());
                 projectedColumnName += "$bigint";
             }
             while (newAssignments.containsKey(projectedColumnName)
@@ -1411,6 +1413,7 @@ public class ElasticsearchMetadata
         IndexMetadata.Type elasticsearchType = baseColumn.elasticsearchType();
         Type type = baseColumn.type();
         boolean supportsQueryShapes = baseColumn.supportsQueryShapes();
+        boolean predicateMappingSafe = baseColumn.predicateMappingSafe();
 
         for (int index : indices) {
             verify(type instanceof RowType, "type should be Row type");
@@ -1426,6 +1429,7 @@ public class ElasticsearchMetadata
                     .filter(candidate -> candidate.name().equals(field.getName().orElseThrow()))
                     .findFirst().orElseThrow();
             supportsQueryShapes &= mappingField.supportsQueryShapes();
+            predicateMappingSafe &= mappingField.predicateMappingSafe();
             elasticsearchType = mappingField.type();
         }
 
@@ -1435,7 +1439,8 @@ public class ElasticsearchMetadata
                 elasticsearchType,
                 decoderDescriptor,
                 supportsPredicates(elasticsearchType, projectedColumnType),
-                supportsQueryShapes);
+                supportsQueryShapes,
+                predicateMappingSafe);
     }
 
     @Override
@@ -1469,7 +1474,8 @@ public class ElasticsearchMetadata
 
     private static boolean supportsLikePushdown(ElasticsearchColumnHandle column)
     {
-        return column.elasticsearchType() instanceof PrimitiveType primitiveType
+        return column.supportsPredicates()
+                && column.elasticsearchType() instanceof PrimitiveType primitiveType
                 && (primitiveType.name().toLowerCase(ENGLISH).equals("keyword") || primitiveType.keyword().isPresent());
     }
 

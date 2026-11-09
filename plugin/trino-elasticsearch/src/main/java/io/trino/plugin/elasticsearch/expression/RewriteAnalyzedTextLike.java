@@ -112,6 +112,7 @@ final class RewriteAnalyzedTextLike
     private static boolean isAnalyzedTextOnly(ElasticsearchColumnHandle column)
     {
         return column != null
+                && column.predicateMappingSafe()
                 && !column.supportsPredicates()
                 && column.elasticsearchType() instanceof PrimitiveType primitiveType
                 && primitiveType.name().equalsIgnoreCase("text")

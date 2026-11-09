@@ -13,6 +13,20 @@ TYPES = "build|ci|docs|feat|fix|chore|refactor|style|test|perf"
 CONVENTIONAL = re.compile(rf"(?:{TYPES}): (\S.*)")
 PAST_TENSE = {"added", "changed", "fixed", "improved", "refactored", "removed", "updated"}
 
+# Preserve the original commits in the November 2026 upstream sync.
+# Remove these exceptions once the commits are present on internal/production.
+UPSTREAM_SYNC_EXCEPTIONS = {
+    "60d1e307a1a59ca6205e4dceb5f09d42659702f7",
+    "6a6eb097676ad7bc04eaff6dc7b71cb0806bf453",
+    "7b699e350b5d3bb184aac78ffbafcb802ff30f9d",
+    "8c10fb1ece2ccba2606a5a7f6f8141f9c50b4de6",
+    "bc741e679b1909e5ee36e7c76538681c5e0e22ac",
+    "e2d50bb733e193607c44be84ad80ce2430ba1d01",
+    "f130387b21e179f4c0d6c032c10b2ec66c67fb7e",
+    "f8c6e46cea4d9d23ce4a0cbec0e3f58447df1ab6",
+    "fdff8b888dbdc6f46299b6fb39f9d0d9b2c52901",
+}
+
 
 def validate_subject(subject):
     errors = []
@@ -33,16 +47,18 @@ def validate_subject(subject):
 
 def check_commits(revision):
     output = subprocess.run(
-        ["git", "log", "--no-merges", "--format=%h%x00%s", revision, "--"],
+        ["git", "log", "--no-merges", "--format=%H%x00%s", revision, "--"],
         check=True, capture_output=True, text=True,
     ).stdout
     failed = False
     for line in output.splitlines():
         commit, subject = line.split("\0", 1)
+        if commit in UPSTREAM_SYNC_EXCEPTIONS:
+            continue
         errors = validate_subject(subject)
         if errors:
             failed = True
-            print(f"{commit} {subject}")
+            print(f"{commit[:11]} {subject}")
             for error in errors:
                 print(f"  {error}")
     return int(failed)

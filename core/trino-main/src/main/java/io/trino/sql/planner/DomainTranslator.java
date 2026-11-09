@@ -16,26 +16,28 @@ package io.trino.sql.planner;
 import com.google.common.base.Throwables;
 import com.google.common.collect.ImmutableList;
 import com.google.common.collect.ImmutableMap;
-import com.google.common.collect.PeekingIterator;
 import io.airlift.slice.Slice;
 import io.airlift.slice.Slices;
 import io.trino.Session;
+import io.trino.metadata.FunctionPreimages;
 import io.trino.metadata.Metadata;
 import io.trino.metadata.OperatorNotFoundException;
 import io.trino.metadata.ResolvedFunction;
 import io.trino.spi.ErrorCode;
 import io.trino.spi.TrinoException;
 import io.trino.spi.function.CatalogSchemaFunctionName;
-import io.trino.spi.predicate.DiscreteValues;
 import io.trino.spi.predicate.Domain;
 import io.trino.spi.predicate.NullableValue;
 import io.trino.spi.predicate.Range;
-import io.trino.spi.predicate.Ranges;
 import io.trino.spi.predicate.SortedRangeSet;
 import io.trino.spi.predicate.TupleDomain;
 import io.trino.spi.predicate.ValueSet;
+import io.trino.spi.type.ArrayType;
 import io.trino.spi.type.CharType;
+import io.trino.spi.type.MapType;
+import io.trino.spi.type.RowType;
 import io.trino.spi.type.Type;
+import io.trino.spi.type.TypeOperators;
 import io.trino.spi.type.VarcharType;
 import io.trino.sql.InterpretedFunctionInvoker;
 import io.trino.sql.PlannerContext;
@@ -68,26 +70,29 @@ import java.util.List;
 import java.util.Map;
 import java.util.Optional;
 import java.util.Set;
+import java.util.function.Predicate;
 
 import static com.google.common.base.Preconditions.checkArgument;
 import static com.google.common.base.Preconditions.checkState;
 import static com.google.common.base.Verify.verify;
 import static com.google.common.collect.ImmutableList.toImmutableList;
 import static com.google.common.collect.Iterables.getOnlyElement;
-import static com.google.common.collect.Iterators.peekingIterator;
 import static io.airlift.slice.SliceUtf8.countCodePoints;
 import static io.airlift.slice.SliceUtf8.getCodePointAt;
 import static io.airlift.slice.SliceUtf8.lengthOfCodePoint;
 import static io.airlift.slice.SliceUtf8.setCodePointAt;
 import static io.airlift.slice.Slices.utf8Slice;
 import static io.trino.SystemSessionProperties.getCharVarcharCoercion;
+import static io.trino.SystemSessionProperties.isFunctionPreimagesEnabled;
 import static io.trino.metadata.GlobalFunctionCatalog.builtinFunctionName;
 import static io.trino.spi.StandardErrorCode.GENERIC_INTERNAL_ERROR;
 import static io.trino.spi.StandardErrorCode.INVALID_CAST_ARGUMENT;
 import static io.trino.spi.function.InvocationConvention.InvocationArgumentConvention.NEVER_NULL;
 import static io.trino.spi.function.InvocationConvention.InvocationReturnConvention.FAIL_ON_NULL;
+import static io.trino.spi.function.InvocationConvention.InvocationReturnConvention.NULLABLE_RETURN;
 import static io.trino.spi.function.InvocationConvention.simpleConvention;
 import static io.trino.spi.function.OperatorType.SATURATED_FLOOR_CAST;
+import static io.trino.spi.function.PreimageResult.Exactness.EXACT;
 import static io.trino.spi.predicate.TupleDomain.strictUnion;
 import static io.trino.spi.type.BooleanType.BOOLEAN;
 import static io.trino.spi.type.DateType.DATE;
@@ -103,17 +108,16 @@ import static io.trino.sql.ir.ComparisonOperator.LESS_THAN;
 import static io.trino.sql.ir.ComparisonOperator.LESS_THAN_OR_EQUAL;
 import static io.trino.sql.ir.ComparisonOperator.NOT_EQUAL;
 import static io.trino.sql.ir.IrExpressions.comparison;
+import static io.trino.sql.ir.IrExpressions.isAtTimeZone;
 import static io.trino.sql.ir.IrExpressions.matchComparison;
 import static io.trino.sql.ir.IrExpressions.not;
 import static io.trino.sql.ir.IrUtils.and;
 import static io.trino.sql.ir.IrUtils.combineConjuncts;
 import static io.trino.sql.ir.IrUtils.combineDisjunctsWithDefault;
 import static io.trino.sql.ir.IrUtils.or;
-import static io.trino.sql.ir.Logical.Operator.AND;
 import static io.trino.type.BooleanOperators.NOT_FUNCTION_NAME;
 import static io.trino.type.LikeFunctions.LIKE_FUNCTION_NAME;
 import static java.util.Objects.requireNonNull;
-import static java.util.stream.Collectors.toList;
 
 public final class DomainTranslator
 {
@@ -159,153 +163,9 @@ public final class DomainTranslator
             disjuncts.add(new IsNull(reference));
         }
 
-        disjuncts.addAll(domain.getValues().getValuesProcessor().transform(
-                ranges -> extractDisjuncts(charVarcharCoercion, domain.getType(), ranges, reference),
-                discreteValues -> extractDisjuncts(charVarcharCoercion, domain.getType(), discreteValues, reference),
-                _ -> {
-                    throw new IllegalStateException("Case should not be reachable");
-                }));
+        disjuncts.add(new ValueSetToExpression(metadata).toExpression(charVarcharCoercion, domain.getValues(), reference));
 
         return combineDisjunctsWithDefault(disjuncts, TRUE);
-    }
-
-    private Expression processRange(CharVarcharCoercion charVarcharCoercion, Type type, Range range, Reference reference)
-    {
-        if (range.isAll()) {
-            return TRUE;
-        }
-
-        if (isBetween(range)) {
-            return new Logical(AND, ImmutableList.of(
-                    comparison(metadata, charVarcharCoercion, GREATER_THAN_OR_EQUAL, reference, new Constant(type, range.getLowBoundedValue())),
-                    comparison(metadata, charVarcharCoercion, LESS_THAN_OR_EQUAL, reference, new Constant(type, range.getHighBoundedValue()))));
-        }
-
-        List<Expression> rangeConjuncts = new ArrayList<>();
-        if (!range.isLowUnbounded()) {
-            rangeConjuncts.add(comparison(
-                    metadata,
-                    charVarcharCoercion,
-                    range.isLowInclusive() ? GREATER_THAN_OR_EQUAL : GREATER_THAN,
-                    reference,
-                    new Constant(type, range.getLowBoundedValue())));
-        }
-        if (!range.isHighUnbounded()) {
-            rangeConjuncts.add(comparison(
-                    metadata,
-                    charVarcharCoercion,
-                    range.isHighInclusive() ? LESS_THAN_OR_EQUAL : LESS_THAN,
-                    reference,
-                    new Constant(type, range.getHighBoundedValue())));
-        }
-        // If rangeConjuncts is null, then the range was ALL, which should already have been checked for
-        checkState(!rangeConjuncts.isEmpty());
-        return combineConjuncts(rangeConjuncts);
-    }
-
-    private Expression combineRangeWithExcludedPoints(CharVarcharCoercion charVarcharCoercion, Type type, Reference reference, Range range, List<Expression> excludedPoints)
-    {
-        if (excludedPoints.isEmpty()) {
-            return processRange(charVarcharCoercion, type, range, reference);
-        }
-
-        Expression excludedPointsExpression = not(metadata, charVarcharCoercion, new In(reference, excludedPoints));
-        if (excludedPoints.size() == 1) {
-            excludedPointsExpression = comparison(metadata, charVarcharCoercion, NOT_EQUAL, reference, getOnlyElement(excludedPoints));
-        }
-
-        return combineConjuncts(processRange(charVarcharCoercion, type, range, reference), excludedPointsExpression);
-    }
-
-    private List<Expression> extractDisjuncts(CharVarcharCoercion charVarcharCoercion, Type type, Ranges ranges, Reference reference)
-    {
-        List<Expression> disjuncts = new ArrayList<>();
-        List<Expression> singleValues = new ArrayList<>();
-        List<Range> orderedRanges = ranges.getOrderedRanges();
-
-        SortedRangeSet sortedRangeSet = SortedRangeSet.copyOf(type, orderedRanges);
-        SortedRangeSet complement = sortedRangeSet.complement();
-
-        List<Range> singleValueExclusionsList = complement.getOrderedRanges().stream().filter(Range::isSingleValue).collect(toList());
-        List<Range> originalUnionSingleValues = SortedRangeSet.copyOf(type, singleValueExclusionsList).union(sortedRangeSet).getOrderedRanges();
-        PeekingIterator<Range> singleValueExclusions = peekingIterator(singleValueExclusionsList.iterator());
-
-        /*
-        For types including NaN, it is incorrect to introduce range "all" while processing a set of ranges,
-        even if the component ranges cover the entire value set.
-        This is because partial ranges don't include NaN, while range "all" does.
-        Example: ranges (unbounded , 1.0) and (1.0, unbounded) should not be coalesced to (unbounded, unbounded) with excluded point 1.0.
-        That result would be further translated to expression "xxx <> 1.0", which is satisfied by NaN.
-        To avoid error, in such case the ranges are not optimised.
-         */
-        if (typeHasNaN(type)) {
-            boolean originalRangeIsAll = orderedRanges.stream().anyMatch(Range::isAll);
-            boolean coalescedRangeIsAll = originalUnionSingleValues.stream().anyMatch(Range::isAll);
-            if (!originalRangeIsAll && coalescedRangeIsAll) {
-                for (Range range : orderedRanges) {
-                    disjuncts.add(processRange(charVarcharCoercion, type, range, reference));
-                }
-                return disjuncts;
-            }
-        }
-
-        for (Range range : originalUnionSingleValues) {
-            if (range.isSingleValue()) {
-                singleValues.add(new Constant(type, range.getSingleValue()));
-                continue;
-            }
-
-            // attempt to optimize ranges that can be coalesced as long as single value points are excluded
-            List<Expression> singleValuesInRange = new ArrayList<>();
-            while (singleValueExclusions.hasNext() && range.contains(singleValueExclusions.peek())) {
-                singleValuesInRange.add(new Constant(type, singleValueExclusions.next().getSingleValue()));
-            }
-
-            if (!singleValuesInRange.isEmpty()) {
-                disjuncts.add(combineRangeWithExcludedPoints(charVarcharCoercion, type, reference, range, singleValuesInRange));
-                continue;
-            }
-
-            disjuncts.add(processRange(charVarcharCoercion, type, range, reference));
-        }
-
-        // Add back all of the possible single values either as an equality or an IN predicate
-        if (singleValues.size() == 1) {
-            disjuncts.add(comparison(metadata, charVarcharCoercion, EQUAL, reference, getOnlyElement(singleValues)));
-        }
-        else if (singleValues.size() > 1) {
-            disjuncts.add(new In(reference, singleValues));
-        }
-        return disjuncts;
-    }
-
-    private List<Expression> extractDisjuncts(CharVarcharCoercion charVarcharCoercion, Type type, DiscreteValues discreteValues, Reference reference)
-    {
-        List<Expression> values = discreteValues.getValues().stream()
-                .map(object -> new Constant(type, object))
-                .collect(toList());
-
-        // If values is empty, then the equatableValues was either ALL or NONE, both of which should already have been checked for
-        checkState(!values.isEmpty());
-
-        Expression predicate;
-        if (values.size() == 1) {
-            predicate = comparison(metadata, charVarcharCoercion, EQUAL, reference, getOnlyElement(values));
-        }
-        else {
-            predicate = new In(reference, values);
-        }
-
-        if (!discreteValues.isInclusive()) {
-            predicate = not(metadata, charVarcharCoercion, predicate);
-        }
-        return ImmutableList.of(predicate);
-    }
-
-    private static boolean isBetween(Range range)
-    {
-        // inclusive implies bounded
-        return range.isLowInclusive() && range.isHighInclusive();
     }
 
     /**
@@ -320,6 +180,29 @@ public final class DomainTranslator
         return new Visitor(plannerContext, session).process(predicate, false);
     }
 
+    public static boolean isStructural(Type type)
+    {
+        return type instanceof ArrayType || type instanceof MapType || type instanceof RowType;
+    }
+
+    /**
+     * Returns a predicate testing whether {@code value = value} is true for a value of the type, i.e. whether the
+     * value contains no null or NaN at any level.
+     */
+    public static Predicate<Object> equalToItself(TypeOperators typeOperators, Type type)
+    {
+        MethodHandle equalOperator = typeOperators.getEqualOperator(type, simpleConvention(NULLABLE_RETURN, NEVER_NULL, NEVER_NULL));
+        return value -> {
+            try {
+                return Boolean.TRUE.equals(equalOperator.invoke(value, value));
+            }
+            catch (Throwable throwable) {
+                Throwables.throwIfUnchecked(throwable);
+                throw new TrinoException(GENERIC_INTERNAL_ERROR, throwable);
+            }
+        };
+    }
+
     private static class Visitor
             extends IrVisitor<ExtractionResult, Boolean>
     {
@@ -327,6 +210,9 @@ public final class DomainTranslator
         private final Session session;
         private final InterpretedFunctionInvoker functionInvoker;
         private final TypeCoercion typeCoercion;
+        private final ComparisonPreimages preimages;
+        private final FunctionPreimages functionPreimages;
+        private final boolean functionPreimagesEnabled;
 
         private Visitor(PlannerContext plannerContext, Session session)
         {
@@ -334,6 +220,21 @@ public final class DomainTranslator
             this.session = requireNonNull(session, "session is null");
             this.functionInvoker = new InterpretedFunctionInvoker(plannerContext.getFunctionManager());
             this.typeCoercion = new TypeCoercion(plannerContext.getTypeManager()::getType, getCharVarcharCoercion(session));
+            this.preimages = new ComparisonPreimages(plannerContext);
+            // Shares projection, implementation, and cast resolutions across this extraction.
+            this.functionPreimages = preimages.newFunctionPreimages();
+            this.functionPreimagesEnabled = isFunctionPreimagesEnabled(session);
+        }
+
+        private Optional<ExtractionResult> extractPreimage(Expression expression, boolean complement)
+        {
+            if (!functionPreimagesEnabled) {
+                return Optional.empty();
+            }
+            return preimages.extract(session, functionPreimages, expression, complement)
+                    .map(result -> new ExtractionResult(
+                            TupleDomain.withColumnDomains(ImmutableMap.of(Symbol.from(result.reference()), result.domain())),
+                            result.exactness() == EXACT ? TRUE : complementIfNecessary(expression, complement)));
         }
 
         private static ValueSet complementIfNecessary(ValueSet valueSet, boolean complement)
@@ -361,6 +262,10 @@ public final class DomainTranslator
         @Override
         protected ExtractionResult visitLet(Let node, Boolean complement)
         {
+            Optional<ExtractionResult> preimage = extractPreimage(node, complement);
+            if (preimage.isPresent()) {
+                return preimage.get();
+            }
             // Domain extraction is symbolic, so inlining the bound reference back into the body
             // preserves the predicate's runtime semantics for extraction purposes.
             Expression inlined = ExpressionTreeRewriter.rewriteWith(
@@ -385,6 +290,10 @@ public final class DomainTranslator
         @Override
         protected ExtractionResult visitLogical(Logical node, Boolean complement)
         {
+            Optional<ExtractionResult> preimage = extractPreimage(node, complement);
+            if (preimage.isPresent()) {
+                return preimage.get();
+            }
             List<ExtractionResult> results = node.terms().stream()
                     .map(term -> process(term, complement))
                     .collect(toImmutableList());
@@ -439,6 +348,10 @@ public final class DomainTranslator
 
         private ExtractionResult processComparison(Comparison node, Expression originalExpression, Boolean complement)
         {
+            Optional<ExtractionResult> preimage = extractPreimage(originalExpression, complement);
+            if (preimage.isPresent()) {
+                return preimage.get();
+            }
             Optional<NormalizedSimpleComparison> optionalNormalized = toNormalizedSimpleComparison(node);
             if (optionalNormalized.isEmpty()) {
                 return visitExpression(originalExpression, complement);
@@ -461,7 +374,8 @@ public final class DomainTranslator
                 // type of expression which is then cast to type of value
                 Type castSourceType = castExpression.expression().type();
                 Type castTargetType = castExpression.type();
-                if (castSourceType instanceof VarcharType varcharType && castTargetType == DATE) {
+                // With function preimages, the cast providers supply these conservative domains
+                if (!functionPreimagesEnabled && castSourceType instanceof VarcharType varcharType && castTargetType == DATE) {
                     Optional<ExtractionResult> result = createVarcharCastToDateComparisonExtractionResult(
                             normalized,
                             varcharType,
@@ -471,7 +385,30 @@ public final class DomainTranslator
                         return result.get();
                     }
                 }
-                if (!isOrderPreserving(castExpression)) {
+                if (!functionPreimagesEnabled && castSourceType instanceof CharType charType && castTargetType instanceof VarcharType varcharType) {
+                    Optional<ExtractionResult> result = createCharCastToVarcharOrderingExtractionResult(
+                            normalized,
+                            charType,
+                            varcharType,
+                            complement,
+                            originalExpression);
+                    if (result.isPresent()) {
+                        return result.get();
+                    }
+                    return visitExpression(originalExpression, complement);
+                }
+                if (!functionPreimagesEnabled && castSourceType instanceof VarcharType sourceVarcharType && castTargetType instanceof CharType) {
+                    Optional<ExtractionResult> result = createVarcharCastToCharComparisonExtractionResult(
+                            normalized,
+                            sourceVarcharType,
+                            complement,
+                            originalExpression);
+                    if (result.isPresent()) {
+                        return result.get();
+                    }
+                    return visitExpression(originalExpression, complement);
+                }
+                if (functionPreimagesEnabled || !isOrderPreserving(castExpression)) {
                     //
                     // we cannot use non-coercion cast to literal_type on symbol side to build tuple domain
                     //
@@ -502,6 +439,12 @@ public final class DomainTranslator
                 }
 
                 return visitExpression(originalExpression, complement);
+            }
+            if (expression instanceof Call call && isAtTimeZone(call)) {
+                Optional<ExtractionResult> result = createAtTimeZoneComparisonExtractionResult(normalized, complement, originalExpression);
+                if (result.isPresent()) {
+                    return result.get();
+                }
             }
             return visitExpression(originalExpression, complement);
         }
@@ -541,14 +484,47 @@ public final class DomainTranslator
             }
             Map.Entry<Symbol, Domain> entry = getOnlyElement(domains.entrySet());
             Domain domain = entry.getValue();
-            if (typeHasNaN(domain.getType()) && !domain.getValues().isAll() && !domain.getValues().isNone()) {
-                // NaN belongs to no range, so complementing a proper subset of the values would drop it, while the negated predicate selects it.
-                // An all or empty value set is the exception: it contains NaN exactly when it contains everything, so complementing it flips NaN too.
-                return Optional.empty();
-            }
             return Optional.of(new ExtractionResult(
                     TupleDomain.withColumnDomains(ImmutableMap.of(entry.getKey(), domain.complement())),
                     TRUE));
+        }
+
+        /// `at_timezone` changes only the zone a `timestamp with time zone` value is rendered in, never
+        /// the instant, and `timestamp with time zone` comparisons are instant-based. A comparison over
+        /// `at_timezone(column, zone)` therefore constrains the underlying column to exactly the range
+        /// a direct comparison would. Derive that range as a pushable domain while keeping the original
+        /// expression as the remaining predicate, so the zone argument's null and invalid-zone behavior is
+        /// preserved for rows that are actually read.
+        private static Optional<ExtractionResult> createAtTimeZoneComparisonExtractionResult(
+                NormalizedSimpleComparison comparison,
+                boolean complement,
+                Expression originalExpression)
+        {
+            // IDENTICAL under complement gives "anything but the value, or null", which prunes a row
+            // with x = c and a null zone that NOT (at_timezone(x, zone) IDENTICAL c) keeps
+            if (complement) {
+                return Optional.empty();
+            }
+            NullableValue value = comparison.value();
+            if (value.isNull()) {
+                // at_timezone(x, zone) is null when either argument is null, so e.g. the onlyNull domain
+                // IDENTICAL would produce for the column alone would wrongly exclude non-null x with null zone
+                return Optional.empty();
+            }
+
+            Expression base = comparison.expression();
+            while (base instanceof Call call && isAtTimeZone(call)) {
+                base = call.arguments().getFirst();
+            }
+            if (!(base instanceof Reference reference)) {
+                return Optional.empty();
+            }
+            Symbol symbol = Symbol.from(reference);
+            // value type is the common comparison type, which at_timezone preserves from its first argument
+            return extractOrderableDomain(comparison.comparisonOperator(), value.getType(), value.getValue(), false)
+                    .map(domain -> new ExtractionResult(
+                            TupleDomain.withColumnDomains(ImmutableMap.of(symbol, domain)),
+                            originalExpression));
         }
 
         /**
@@ -587,7 +563,8 @@ public final class DomainTranslator
                 // CHAR -> VARCHAR trims trailing spaces, so it has no inverse on the value side: a VARCHAR constant
                 // carrying trailing spaces has no CHAR preimage. Peeling the cast and rounding the constant back to
                 // CHAR would drop those trailing spaces and build a domain that matches rows it should not
-                // (e.g. CAST(c AS varchar) = 'a ' is unsatisfiable, but would be rewritten to c = CHAR 'a'). Leave it.
+                // (e.g. CAST(c AS varchar) = 'a ' is unsatisfiable, but would be rewritten to c = CHAR 'a').
+                // The trimming is per SQL_STANDARD CharVarcharCoercion; processComparison handles such comparisons.
                 return false;
             }
             // Implicit coercions are typically order-preserving and injective.
@@ -699,7 +676,146 @@ public final class DomainTranslator
             return (SortedRangeSet) ValueSet.ofRanges(valueRanges);
         }
 
-        private static Optional<ExtractionResult> createComparisonExtractionResult(ComparisonOperator comparisonOperator, Symbol column, Type type, @Nullable Object value, boolean complement)
+        /// Extract a domain from `CAST(char_expression AS varchar) OP varchar_constant` for an ordering `OP`.
+        /// The cast is not order-preserving, so the domain is a superset of the values satisfying the comparison
+        /// and the comparison must be retained.
+        private Optional<ExtractionResult> createCharCastToVarcharOrderingExtractionResult(
+                NormalizedSimpleComparison comparison,
+                CharType charType,
+                VarcharType varcharType,
+                boolean complement,
+                Expression originalExpression)
+        {
+            Expression sourceExpression = ((Cast) comparison.expression()).expression();
+            ComparisonOperator operator = comparison.comparisonOperator();
+            NullableValue value = comparison.value();
+
+            // The domain is a superset of the values satisfying the comparison, and the complement of a superset is
+            // not a superset of the complement.
+            if (complement || value.isNull()) {
+                return Optional.empty();
+            }
+            if (!(sourceExpression instanceof Reference)) {
+                // Calculation is not useful
+                return Optional.empty();
+            }
+            // The equality family is left to UnwrapCastInComparison: a cast that does not truncate is injective, so
+            // such a comparison has an equivalent form on the char value.
+            if (operator != LESS_THAN && operator != LESS_THAN_OR_EQUAL && operator != GREATER_THAN && operator != GREATER_THAN_OR_EQUAL) {
+                return Optional.empty();
+            }
+            // A cast to a varchar shorter than the char length truncates, which reorders the values.
+            if (!varcharType.isUnbounded() && varcharType.getBoundedLength() < charType.getLength()) {
+                return Optional.empty();
+            }
+
+            ResolvedFunction varcharToChar;
+            ResolvedFunction charToVarchar;
+            try {
+                varcharToChar = plannerContext.getMetadata().getCoercion(getCharVarcharCoercion(session), varcharType, charType);
+                charToVarchar = plannerContext.getMetadata().getCoercion(getCharVarcharCoercion(session), charType, varcharType);
+            }
+            catch (OperatorNotFoundException e) {
+                return Optional.empty();
+            }
+            Slice constant = (Slice) value.getValue();
+            // Both coercions are declared neverFails
+            Slice bound = (Slice) functionInvoker.invoke(varcharToChar, session.toConnectorSession(), constant);
+            Slice boundAsVarchar = (Slice) functionInvoker.invoke(charToVarchar, session.toConnectorSession(), bound);
+            for (int i = 0; i < bound.length(); i++) {
+                if (Byte.toUnsignedInt(bound.getByte(i)) < ' ') {
+                    // Char comparison pads with spaces, so a character below the space makes a value sort before its
+                    // own prefix as a char and after it as a varchar. Such a bound is not usable.
+                    return Optional.empty();
+                }
+            }
+
+            // The bound is the char value the constant is rounded down to; it satisfies the comparison exactly when
+            // its own varchar form does, and no other char value shares its position in the char ordering.
+            int boundCompared = boundAsVarchar.compareTo(constant);
+            boolean boundSatisfiesComparison = switch (operator) {
+                case LESS_THAN -> boundCompared < 0;
+                case LESS_THAN_OR_EQUAL -> boundCompared <= 0;
+                case GREATER_THAN -> boundCompared > 0;
+                case GREATER_THAN_OR_EQUAL -> boundCompared >= 0;
+                case EQUAL, NOT_EQUAL, IDENTICAL -> throw new IllegalStateException("Unexpected operator: " + operator);
+            };
+            Optional<Range> range = switch (operator) {
+                // A char value below the bound casts to a varchar below the constant, so the comparison holds for no
+                // value above the bound.
+                case LESS_THAN, LESS_THAN_OR_EQUAL -> Optional.of(boundSatisfiesComparison
+                        ? Range.lessThanOrEqual(charType, bound)
+                        : Range.lessThan(charType, bound));
+                case GREATER_THAN, GREATER_THAN_OR_EQUAL -> {
+                    if (countCodePoints(bound) == charType.getLength()) {
+                        // No char value extends the bound
+                        yield Optional.of(boundSatisfiesComparison
+                                ? Range.greaterThanOrEqual(charType, bound)
+                                : Range.greaterThan(charType, bound));
+                    }
+                    // A value extending the bound casts to a varchar above the constant while sorting below the bound
+                    // as a char, when the extension starts below the space. Every such value is above the bound with
+                    // its last character decremented, which in turn is above every value below the bound.
+                    int lastByte = bound.length() == 0 ? 0 : Byte.toUnsignedInt(bound.getByte(bound.length() - 1));
+                    if (lastByte <= '!' || lastByte > 0x7F) {
+                        // The last character does not decrement within ASCII: the bound is empty, the character is a
+                        // '!', which would decrement to a trailing space, or it is not ASCII. Connectors are better
+                        // off without such a bound anyway.
+                        yield Optional.empty();
+                    }
+                    Slice loweredBound = Slices.wrappedBuffer(bound.getBytes());
+                    loweredBound.setByte(loweredBound.length() - 1, lastByte - 1);
+                    yield Optional.of(Range.greaterThan(charType, loweredBound));
+                }
+                case EQUAL, NOT_EQUAL, IDENTICAL -> throw new IllegalStateException("Unexpected operator: " + operator);
+            };
+            return range.map(boundRange -> new ExtractionResult(
+                    TupleDomain.withColumnDomains(ImmutableMap.of(Symbol.from(sourceExpression), Domain.create(ValueSet.ofRanges(boundRange), false))),
+                    originalExpression));
+        }
+
+        /// Extract a domain from `CAST(varchar_expression AS char) OP char_constant`. The cast truncates and trims
+        /// trailing spaces, so it is neither injective nor order-preserving, but every value it maps to the constant
+        /// starts with that constant.
+        private Optional<ExtractionResult> createVarcharCastToCharComparisonExtractionResult(
+                NormalizedSimpleComparison comparison,
+                VarcharType sourceType,
+                boolean complement,
+                Expression originalExpression)
+        {
+            Expression sourceExpression = ((Cast) comparison.expression()).expression();
+            ComparisonOperator operator = comparison.comparisonOperator();
+            NullableValue value = comparison.value();
+
+            if (complement || value.isNull()) {
+                return Optional.empty();
+            }
+            if (!(sourceExpression instanceof Reference)) {
+                // Calculation is not useful
+                return Optional.empty();
+            }
+            // Ordering comparisons are not translatable because the cast is not order-preserving (char comparison is
+            // PAD SPACE while varchar comparison is NO PAD). NOT_EQUAL does not constrain the source either: the values
+            // that cast to something else than the constant are spread over the whole source domain, e.g. both 'x' and
+            // 'abcd' cast to a char value different from CHAR 'abc'.
+            if (operator != EQUAL && operator != IDENTICAL) {
+                return Optional.empty();
+            }
+            Symbol sourceSymbol = Symbol.from(sourceExpression);
+
+            Slice charValue = (Slice) value.getValue();
+            if (!sourceType.isUnbounded() && sourceType.getBoundedLength() < countCodePoints(charValue)) {
+                // No value of the source type is long enough to cast to the constant
+                return Optional.of(new ExtractionResult(TupleDomain.none(), TRUE));
+            }
+            // superset of possible values: the cast only trims trailing spaces and truncates
+            return createRangeDomain(sourceType, charValue)
+                    .map(domain -> new ExtractionResult(
+                            TupleDomain.withColumnDomains(ImmutableMap.of(sourceSymbol, domain)),
+                            originalExpression));
+        }
+
+        private Optional<ExtractionResult> createComparisonExtractionResult(ComparisonOperator comparisonOperator, Symbol column, Type type, @Nullable Object value, boolean complement)
         {
             if (value == null) {
                 return switch (comparisonOperator) {
@@ -711,6 +827,13 @@ public final class DomainTranslator
                                 TRUE));
                     }
                 };
+            }
+            if (isStructural(type) && ((comparisonOperator != EQUAL && comparisonOperator != IDENTICAL) || complement || !equalToItself(plannerContext.getTypeOperators(), type).test(value))) {
+                // A domain treats nested nulls and NaN as ordinary values, while SQL comparisons of them are NULL or
+                // false. Equality or identity with a value without them selects exactly that value, as does the
+                // equality the domain translates back to. Other domains contain values the comparison is NULL for, or
+                // translate back to a comparison that is.
+                return Optional.empty();
             }
             if (type.isOrderable()) {
                 return extractOrderableDomain(comparisonOperator, type, value, complement)
@@ -728,61 +851,25 @@ public final class DomainTranslator
         private static Optional<Domain> extractOrderableDomain(ComparisonOperator comparisonOperator, Type type, Object value, boolean complement)
         {
             checkArgument(value != null);
-
-            // Handle orderable types which do not have NaN.
-            if (!typeHasNaN(type)) {
-                return switch (comparisonOperator) {
-                    case EQUAL -> Optional.of(Domain.create(complementIfNecessary(ValueSet.ofRanges(Range.equal(type, value)), complement), false));
-                    case IDENTICAL -> Optional.of(Domain.create(complementIfNecessary(ValueSet.ofRanges(Range.equal(type, value)), complement), complement));
-                    case GREATER_THAN -> Optional.of(Domain.create(complementIfNecessary(ValueSet.ofRanges(Range.greaterThan(type, value)), complement), false));
-                    case GREATER_THAN_OR_EQUAL -> Optional.of(Domain.create(complementIfNecessary(ValueSet.ofRanges(Range.greaterThanOrEqual(type, value)), complement), false));
-                    case LESS_THAN -> Optional.of(Domain.create(complementIfNecessary(ValueSet.ofRanges(Range.lessThan(type, value)), complement), false));
-                    case LESS_THAN_OR_EQUAL -> Optional.of(Domain.create(complementIfNecessary(ValueSet.ofRanges(Range.lessThanOrEqual(type, value)), complement), false));
-                    case NOT_EQUAL -> Optional.of(Domain.create(complementIfNecessary(ValueSet.ofRanges(Range.lessThan(type, value), Range.greaterThan(type, value)), complement), false));
-                };
-            }
-
-            // Handle comparisons against NaN
+            ValueSet values;
             if (isFloatingPointNaN(type, value)) {
-                return switch (comparisonOperator) {
-                    case EQUAL, GREATER_THAN, GREATER_THAN_OR_EQUAL,
-                         LESS_THAN, LESS_THAN_OR_EQUAL -> Optional.of(Domain.create(complementIfNecessary(ValueSet.none(type), complement), false));
-                    case NOT_EQUAL -> Optional.of(Domain.create(complementIfNecessary(ValueSet.all(type), complement), false));
-                    case IDENTICAL -> Optional.empty(); // The Domain should be "NaN". It is currently not supported.
+                values = switch (comparisonOperator) {
+                    case IDENTICAL -> ValueSet.of(type, value);
+                    case NOT_EQUAL -> ValueSet.all(type);
+                    default -> ValueSet.none(type);
                 };
             }
-
-            // Handle comparisons against a non-NaN value when the compared value might be NaN
-            return switch (comparisonOperator) {
-                /*
-                 For comparison operators: EQUAL, IDENTICAL, GREATER_THAN, GREATER_THAN_OR_EQUAL, LESS_THAN, LESS_THAN_OR_EQUAL,
-                 the Domain should not contain NaN, but complemented Domain should contain NaN (for IDENTICAL, null as well).
-                 It is currently not supported.
-                 Currently, NaN is only included when ValueSet.isAll().
-
-                 For comparison operator NOT_EQUAL,
-                 the Domain should consist of ranges (which do not sum to the whole ValueSet), and NaN.
-                 Currently, NaN is only included when ValueSet.isAll().
-                  */
-                case EQUAL, IDENTICAL -> complement ?
-                        Optional.empty() :
-                        Optional.of(Domain.create(ValueSet.ofRanges(Range.equal(type, value)), false));
-                case GREATER_THAN -> complement ?
-                        Optional.empty() :
-                        Optional.of(Domain.create(ValueSet.ofRanges(Range.greaterThan(type, value)), false));
-                case GREATER_THAN_OR_EQUAL -> complement ?
-                        Optional.empty() :
-                        Optional.of(Domain.create(ValueSet.ofRanges(Range.greaterThanOrEqual(type, value)), false));
-                case LESS_THAN -> complement ?
-                        Optional.empty() :
-                        Optional.of(Domain.create(ValueSet.ofRanges(Range.lessThan(type, value)), false));
-                case LESS_THAN_OR_EQUAL -> complement ?
-                        Optional.empty() :
-                        Optional.of(Domain.create(ValueSet.ofRanges(Range.lessThanOrEqual(type, value)), false));
-                case NOT_EQUAL -> complement ?
-                        Optional.of(Domain.create(ValueSet.ofRanges(Range.equal(type, value)), false)) :
-                        Optional.empty();
-            };
+            else {
+                values = switch (comparisonOperator) {
+                    case EQUAL, IDENTICAL -> ValueSet.of(type, value);
+                    case NOT_EQUAL -> ValueSet.of(type, value).complement();
+                    case GREATER_THAN -> ValueSet.ofRanges(Range.greaterThan(type, value));
+                    case GREATER_THAN_OR_EQUAL -> ValueSet.ofRanges(Range.greaterThanOrEqual(type, value));
+                    case LESS_THAN -> ValueSet.ofRanges(Range.lessThan(type, value));
+                    case LESS_THAN_OR_EQUAL -> ValueSet.ofRanges(Range.lessThanOrEqual(type, value));
+                };
+            }
+            return Optional.of(Domain.create(complementIfNecessary(values, complement), comparisonOperator == IDENTICAL && complement));
         }
 
         private static Domain extractEquatableDomain(ComparisonOperator comparisonOperator, Type type, Object value, boolean complement)
@@ -922,6 +1009,10 @@ public final class DomainTranslator
         @Override
         protected ExtractionResult visitIn(In node, Boolean complement)
         {
+            Optional<ExtractionResult> projected = extractPreimage(node, complement);
+            if (projected.isPresent()) {
+                return projected.get();
+            }
             checkState(!node.valueList().isEmpty(), "InListExpression should never be empty");
 
             Optional<ExtractionResult> directExtractionResult = processSimpleInPredicate(node, complement);
@@ -953,6 +1044,10 @@ public final class DomainTranslator
             }
             Symbol symbol = Symbol.from(reference);
             Type type = reference.type();
+            if (isStructural(type) && complement) {
+                return Optional.empty();
+            }
+            Predicate<Object> isEqualToItself = isStructural(type) ? equalToItself(plannerContext.getTypeOperators(), type) : _ -> true;
             List<Object> inValues = new ArrayList<>(node.valueList().size());
             List<Expression> excludedExpressions = new ArrayList<>();
 
@@ -980,7 +1075,8 @@ public final class DomainTranslator
                             }
                         }
                     }
-                    else {
+                    else if (isEqualToItself.test(constant.value())) {
+                        // A structural value with a nested null or NaN can be ignored: it never compares to true
                         inValues.add(constant.value());
                     }
                 }

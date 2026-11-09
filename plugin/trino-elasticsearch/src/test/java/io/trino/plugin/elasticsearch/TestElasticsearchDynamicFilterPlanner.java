@@ -14,6 +14,7 @@
 package io.trino.plugin.elasticsearch;
 
 import io.trino.plugin.elasticsearch.client.IndexMetadata.PrimitiveType;
+import io.trino.plugin.elasticsearch.decoders.DoubleDecoder;
 import io.trino.plugin.elasticsearch.decoders.IntegerDecoder;
 import io.trino.plugin.elasticsearch.decoders.TimestampDecoder;
 import io.trino.plugin.elasticsearch.decoders.VarcharDecoder;
@@ -31,6 +32,7 @@ import java.util.Optional;
 import java.util.stream.IntStream;
 
 import static io.airlift.slice.Slices.utf8Slice;
+import static io.trino.spi.type.DoubleType.DOUBLE;
 import static io.trino.spi.type.IntegerType.INTEGER;
 import static io.trino.spi.type.TimestampType.TIMESTAMP_MILLIS;
 import static io.trino.spi.type.VarcharType.VARCHAR;
@@ -64,6 +66,17 @@ public class TestElasticsearchDynamicFilterPlanner
             new PrimitiveType("date"),
             new TimestampDecoder.Descriptor("EventTime"),
             true);
+
+    @Test
+    public void testFloatingPointDynamicFilterSafety()
+    {
+        ElasticsearchColumnHandle value = new ElasticsearchColumnHandle(
+                List.of("value"), DOUBLE, new PrimitiveType("double"), new DoubleDecoder.Descriptor("value"), true);
+        ElasticsearchDynamicFilterPlanner planner = new ElasticsearchDynamicFilterPlanner(100, 10, 10_000, new ElasticsearchPushdownDiagnostics());
+        assertThat(planner.plan(TupleDomain.withColumnDomains(Map.of(value, Domain.singleValue(DOUBLE, 0.0))))).isEmpty();
+        assertThat(planner.plan(TupleDomain.withColumnDomains(Map.of(value, Domain.singleValue(DOUBLE, Double.NaN))))).isEmpty();
+        assertThat(planner.plan(TupleDomain.withColumnDomains(Map.of(value, Domain.singleValue(DOUBLE, 1.0))))).isPresent();
+    }
 
     @Test
     public void testDynamicFilterOutcomes()

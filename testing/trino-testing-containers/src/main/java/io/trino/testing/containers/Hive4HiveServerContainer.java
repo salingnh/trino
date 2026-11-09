@@ -136,7 +136,7 @@ public class Hive4HiveServerContainer
         withEnv("IS_RESUME", "true");
         // Default S3 credentials for Floci
         withEnv("AWS_ACCESS_KEY_ID", Floci.FLOCI_ACCESS_KEY);
-        withEnv("AWS_SECRET_KEY", Floci.FLOCI_SECRET_KEY);
+        withEnv("AWS_SECRET_ACCESS_KEY", Floci.FLOCI_SECRET_KEY);
         // Default S3 configuration pointing to Floci
         withCopyToContainer(
                 Transferable.of(getHiveSiteXml(
@@ -164,14 +164,6 @@ public class Hive4HiveServerContainer
     }
 
     /**
-     * Helper to get the default internal metastore URI.
-     */
-    private static String getInternalMetastoreUri()
-    {
-        return "thrift://" + Hive4MetastoreContainer.HOST_NAME + ":" + Hive4MetastoreContainer.HIVE_METASTORE_PORT;
-    }
-
-    /**
      * Sets the Metastore URI that this HiveServer2 should connect to.
      * Must be called before start().
      *
@@ -182,25 +174,6 @@ public class Hive4HiveServerContainer
     {
         this.metastoreUri = metastoreUri;
         withEnv("SERVICE_OPTS", "-Xmx1G -Dhive.metastore.uris=" + metastoreUri);
-        return this;
-    }
-
-    /**
-     * Configures S3 settings for HiveServer2.
-     *
-     * @param accessKey S3 access key
-     * @param secretKey S3 secret key
-     * @param s3Host S3 endpoint host
-     * @param s3Port S3 endpoint port
-     * @return this container for chaining
-     */
-    public Hive4HiveServerContainer withS3Config(String accessKey, String secretKey, String s3Host, int s3Port)
-    {
-        withEnv("AWS_ACCESS_KEY_ID", accessKey);
-        withEnv("AWS_SECRET_KEY", secretKey);
-        withCopyToContainer(
-                Transferable.of(getHiveSiteXml(warehouseDir, accessKey, secretKey, s3Host, s3Port)),
-                "/opt/hive/conf/hive-site.xml");
         return this;
     }
 
@@ -261,13 +234,5 @@ public class Hive4HiveServerContainer
     public String getJdbcUrl()
     {
         return "jdbc:hive2://" + getHost() + ":" + getMappedPort(HIVE_SERVER_PORT) + "/default";
-    }
-
-    /**
-     * Returns the internal JDBC URL for connecting from other containers on the same network.
-     */
-    public String getInternalJdbcUrl()
-    {
-        return "jdbc:hive2://" + HOST_NAME + ":" + HIVE_SERVER_PORT + "/default";
     }
 }

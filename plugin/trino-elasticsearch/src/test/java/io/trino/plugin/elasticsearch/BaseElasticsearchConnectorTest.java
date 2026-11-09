@@ -46,6 +46,7 @@ import static io.trino.spi.type.DoubleType.DOUBLE;
 import static io.trino.spi.type.VarcharType.VARCHAR;
 import static io.trino.testing.MaterializedResult.resultBuilder;
 import static io.trino.testing.TestingNames.randomNameSuffix;
+import static io.trino.testing.assertions.Assert.assertEqualsIgnoreOrder;
 import static io.trino.testing.assertions.TrinoExceptionAssert.assertTrinoExceptionThrownBy;
 import static java.lang.String.format;
 import static java.nio.charset.StandardCharsets.UTF_8;
@@ -183,12 +184,107 @@ public abstract class BaseElasticsearchConnectorTest
                     .matches("VALUES BIGINT '10'");
             assertThat(query("SELECT id FROM " + alias + " ORDER BY id DESC NULLS LAST LIMIT 10"))
                     .matches("VALUES BIGINT '10', BIGINT '0'");
+            Session withoutPushdown = Session.builder(getSession())
+                    .setSystemProperty("allow_pushdown_into_connectors", "false")
+                    .build();
+            assertThat(query(withoutPushdown, "SELECT count(*) FROM " + alias))
+                    .matches("VALUES BIGINT '2'");
         }
         finally {
             for (String index : indices) {
                 deleteIndex(index);
             }
         }
+    }
+
+    @Test
+    public void testFieldIgnoreMalformedPreservesSourceErrors()
+            throws IOException
+    {
+        String tableName = "field_ignore_malformed_" + randomNameSuffix();
+        createIndex(tableName,
+                """
+                {"properties": {"value": {"type": "integer", "ignore_malformed": true}}}
+                """);
+        try {
+            index(tableName, ImmutableMap.of("value", 1));
+            index(tableName, ImmutableMap.of("value", "n/a"));
+            Session withoutPushdown = Session.builder(getSession())
+                    .setSystemProperty("allow_pushdown_into_connectors", "false")
+                    .build();
+            String expectedError = "Cannot parse value for field 'value' as INTEGER: n/a";
+            for (String sql : List.of(
+                    "SELECT count(*) FROM " + tableName + " WHERE value IS NOT NULL",
+                    "SELECT count(value) FROM " + tableName,
+                    "SELECT max(value) FROM " + tableName,
+                    "SELECT value FROM " + tableName + " ORDER BY value DESC LIMIT 1")) {
+                assertQueryFails(withoutPushdown, sql, expectedError);
+                assertQueryFails(sql, expectedError);
+            }
+        }
+        finally {
+            deleteIndex(tableName);
+        }
+    }
+
+    @Test
+    public void testIndexIgnoreMalformedPreservesSourceErrors()
+            throws IOException
+    {
+        String tableName = "index_ignore_malformed_" + randomNameSuffix();
+        createIndexWithBody(tableName,
+                """
+                {
+                    "settings": {"index.mapping.ignore_malformed": true},
+                    "mappings": {
+                        "properties": {
+                            "id": {"type": "long", "ignore_malformed": false},
+                            "value": {"type": "long"},
+                            "safe_value": {"type": "long", "ignore_malformed": false},
+                            "other_keyword": {"type": "keyword"},
+                            "row": {"properties": {"value": {"type": "long"}}}
+                        }
+                    }
+                }
+                """);
+        try {
+            index(tableName, ImmutableMap.of("id", 1, "value", 10, "safe_value", 1, "other_keyword", "first", "row", ImmutableMap.of("value", 10)));
+            index(tableName, ImmutableMap.of("id", 2, "value", "n/a", "safe_value", 2, "other_keyword", "second", "row", ImmutableMap.of("value", "n/a")));
+            Session withoutPushdown = Session.builder(getSession())
+                    .setSystemProperty("allow_pushdown_into_connectors", "false")
+                    .build();
+            for (String field : List.of("value", "row.value")) {
+                String expectedError = "Cannot parse value for field '" + field + "' as BIGINT: n/a";
+                for (String sql : List.of(
+                        format("SELECT count(*) FROM %s WHERE %s IS NOT NULL", tableName, field),
+                        format("SELECT count(%s) FROM %s", field, tableName),
+                        format("SELECT id FROM %s WHERE %s IS NOT NULL", tableName, field),
+                        format("SELECT id FROM %s ORDER BY %s DESC NULLS LAST LIMIT 1", tableName, field))) {
+                    assertQueryFails(withoutPushdown, sql, expectedError);
+                    assertQueryFails(sql, expectedError);
+                }
+            }
+            assertThat(query("SELECT count(*) FROM " + tableName))
+                    .matches("VALUES BIGINT '2'")
+                    .isFullyPushedDown();
+            assertThat(query("SELECT safe_value FROM " + tableName + " WHERE safe_value = 1"))
+                    .matches("VALUES BIGINT '1'")
+                    .isFullyPushedDown();
+            assertThat(query("SELECT other_keyword FROM " + tableName + " WHERE other_keyword = 'first'"))
+                    .matches("VALUES VARCHAR 'first'")
+                    .isFullyPushedDown();
+        }
+        finally {
+            deleteIndex(tableName);
+        }
+    }
+
+    private void createIndexWithBody(String indexName, @Language("JSON") String body)
+            throws IOException
+    {
+        Request request = new Request("PUT", "/" + indexName);
+        request.setJsonEntity(body);
+        client.performRequest(request);
     }
 
     @Test
@@ -204,6 +300,9 @@ public abstract class BaseElasticsearchConnectorTest
             Session disabled = Session.builder(getSession())
                     .setCatalogSessionProperty("elasticsearch", "aggregation_pushdown_enabled", "false").build();
             for (String column : List.of("d", "f")) {
+                assertThat(query("SELECT id FROM " + name + " WHERE " + column + " = 0.0"))
+                        .matches("VALUES 1, 2")
+                        .isNotFullyPushedDown(FilterNode.class);
                 assertThat(query("SELECT " + column + ", count(*) FROM " + name + " GROUP BY " + column))
                         .matches(disabled, "SELECT " + column + ", count(*) FROM " + name + " GROUP BY " + column)
                         .isNotFullyPushedDown(AggregationNode.class);
@@ -502,7 +601,7 @@ public abstract class BaseElasticsearchConnectorTest
     {
         // The column metadata for the Elasticsearch connector tables are provided
         // based on the column name in alphabetical order.
-        return resultBuilder(getSession(), VARCHAR, VARCHAR, VARCHAR, VARCHAR)
+        return resultBuilder(VARCHAR, VARCHAR, VARCHAR, VARCHAR)
                 .row("clerk", "varchar", "", "")
                 .row("comment", "varchar", "", "")
                 .row("custkey", "bigint", "", "")
@@ -1009,7 +1108,7 @@ public abstract class BaseElasticsearchConnectorTest
                 ORDER BY order_field
                 """.formatted(indexName));
 
-        MaterializedResult expected = resultBuilder(getSession(), rows.getTypes())
+        MaterializedResult expected = resultBuilder(rows.getTypes())
                 .row("\"abc\"", "\"def\"", "[[\"abc\",\"def\"]]", "123", "234", "345", "[123,[234,345]]")
                 .row(null, null, "\"Check out the bi-weekly Trino Community Broadcast https://trino.io/broadcast/\"", null, null, null, "5309")
                 .build();
@@ -1030,7 +1129,7 @@ public abstract class BaseElasticsearchConnectorTest
                 ORDER BY order_field
                 """.formatted(indexName));
 
-        MaterializedResult nestedExpected = resultBuilder(getSession(), nestedRows.getTypes())
+        MaterializedResult nestedExpected = resultBuilder(nestedRows.getTypes())
                 .row("\"abc\"", "\"def\"", "[[\"abc\",\"def\"]]", "123", "234", "345", "[123,[234,345]]")
                 .row(null, null, "\"Join the Trino Slack: https://trino.io/slack.html\"", null, null, null, "867")
                 .build();
@@ -1051,7 +1150,7 @@ public abstract class BaseElasticsearchConnectorTest
                 ORDER BY order_field
                 """.formatted(indexName));
 
-        MaterializedResult arrayExpected = resultBuilder(getSession(), arrayRows.getTypes())
+        MaterializedResult arrayExpected = resultBuilder(arrayRows.getTypes())
                 .row("\"abc\"", "\"def\"", "[[\"abc\",\"def\"]]", "123", "234", "345", "[123,[234,345]]")
                 .row(null, null, "\"If you like Presto, you'll love Trino: https://trino.io/slack.html\"", null, null, null, "321")
                 .build();
@@ -1072,7 +1171,7 @@ public abstract class BaseElasticsearchConnectorTest
                 ORDER BY order_field
                 """.formatted(indexName));
 
-        MaterializedResult rawRowsExpected = resultBuilder(getSession(), rawRows.getTypes())
+        MaterializedResult rawRowsExpected = resultBuilder(rawRows.getTypes())
                 .row("\"abc\"", "\"def\"", "[[\"abc\",\"def\"]]", "123", "234", "345", "[123,[234,345]]")
                 .row(null, null, "\"The founders and core contributors of Presto, and are now working on Trino: https://trino.io/blog/2020/12/27/announcing-trino.html\"", null, null, null, "654")
                 .build();
@@ -1178,7 +1277,7 @@ public abstract class BaseElasticsearchConnectorTest
                 ORDER BY order_field
                 """.formatted(indexName));
 
-        MaterializedResult expected = resultBuilder(getSession(), rows.getTypes())
+        MaterializedResult expected = resultBuilder(rows.getTypes())
                 .row("\"dGVzdA==\"", "true", "123", "123", "123", "123", "123.0", "123.0")
                 .build();
         assertThat(rows.getTypes())
@@ -1242,7 +1341,7 @@ public abstract class BaseElasticsearchConnectorTest
                 FROM %s
                 """.formatted(indexName));
 
-        MaterializedResult expected = resultBuilder(getSession(), rows.getTypes())
+        MaterializedResult expected = resultBuilder(rows.getTypes())
                 .row("\"dGVzdA==\"", "true", "123")
                 .build();
 
@@ -1626,7 +1725,7 @@ public abstract class BaseElasticsearchConnectorTest
                 FROM types
                 """);
 
-        MaterializedResult expected = resultBuilder(getSession(), rows.getTypes())
+        MaterializedResult expected = resultBuilder(rows.getTypes())
                 .row(
                         true,
                         1.0f,
@@ -1670,7 +1769,7 @@ public abstract class BaseElasticsearchConnectorTest
                 .buildOrThrow());
 
         MaterializedResult rows = computeActual("SELECT * FROM unsupported_types");
-        MaterializedResult expected = resultBuilder(getSession(), rows.getTypes())
+        MaterializedResult expected = resultBuilder(rows.getTypes())
                 .row(1L)
                 .build();
 
@@ -1707,7 +1806,7 @@ public abstract class BaseElasticsearchConnectorTest
 
         MaterializedResult rows = computeActual("SELECT boolean_column FROM booleans");
 
-        MaterializedResult expected = resultBuilder(getSession(), rows.getTypes())
+        MaterializedResult expected = resultBuilder(rows.getTypes())
                 .row(true)
                 .row(true)
                 .row(false)
@@ -1715,7 +1814,7 @@ public abstract class BaseElasticsearchConnectorTest
                 .row(false)
                 .build();
 
-        assertThat(rows.getMaterializedRows()).containsExactlyInAnyOrderElementsOf(expected.getMaterializedRows());
+        assertEqualsIgnoreOrder(rows.getMaterializedRows(), expected.getMaterializedRows());
     }
 
     @Test
@@ -1746,14 +1845,14 @@ public abstract class BaseElasticsearchConnectorTest
 
         MaterializedResult rows = computeActual("SELECT timestamp_column FROM timestamps");
 
-        MaterializedResult expected = resultBuilder(getSession(), rows.getTypes())
+        MaterializedResult expected = resultBuilder(rows.getTypes())
                 .row(LocalDateTime.parse("2015-01-01T00:00:00"))
                 .row(LocalDateTime.parse("2015-01-01T12:10:30"))
                 .row(LocalDateTime.parse("2015-01-01T00:00:00.001"))
                 .row(LocalDateTime.parse("2015-01-01T00:00:00.001"))
                 .build();
 
-        assertThat(rows.getMaterializedRows()).containsExactlyInAnyOrderElementsOf(expected.getMaterializedRows());
+        assertEqualsIgnoreOrder(rows.getMaterializedRows(), expected.getMaterializedRows());
     }
 
     @Test
@@ -1862,7 +1961,7 @@ public abstract class BaseElasticsearchConnectorTest
                 FROM scaled_float_type
                 WHERE scaled_float_column = 123.46
                 """))
-                .result().matches(resultBuilder(getSession(), ImmutableList.of(VARCHAR, DOUBLE))
+                .result().matches(resultBuilder(ImmutableList.of(VARCHAR, DOUBLE))
                         .row("bar", 123.46d)
                         .build());
     }
@@ -1905,7 +2004,7 @@ public abstract class BaseElasticsearchConnectorTest
                 FROM coercions
                 """);
 
-        MaterializedResult expected = resultBuilder(getSession(), rows.getTypes())
+        MaterializedResult expected = resultBuilder(rows.getTypes())
                 .row(1.0f, 1.0d, 1, 1L)
                 .build();
 
@@ -2190,7 +2289,7 @@ public abstract class BaseElasticsearchConnectorTest
                 FROM types_nested
                 """);
 
-        MaterializedResult expected = resultBuilder(getSession(), rows.getTypes())
+        MaterializedResult expected = resultBuilder(rows.getTypes())
                 .row(true,
                         1.0f,
                         1.0d,
@@ -2272,7 +2371,7 @@ public abstract class BaseElasticsearchConnectorTest
                 FROM nested_type_nested
                 """);
 
-        MaterializedResult expected = resultBuilder(getSession(), rows.getTypes())
+        MaterializedResult expected = resultBuilder(rows.getTypes())
                 .row(true,
                         1.0f,
                         1.0d,

@@ -20,9 +20,7 @@ import io.trino.metadata.ResolvedFunction;
 import io.trino.spi.block.BlockBuilder;
 import io.trino.spi.block.SqlRow;
 import io.trino.spi.connector.ConnectorSession;
-import io.trino.spi.function.OperatorType;
 import io.trino.spi.type.RowType;
-import io.trino.spi.type.Type;
 import io.trino.sql.InterpretedFunctionInvoker;
 import io.trino.sql.PlannerContext;
 import io.trino.sql.ir.Array;
@@ -267,14 +265,6 @@ public class IrExpressionEvaluator
         return readNativeValue(expression.type(), row.getRawFieldBlock(expression.field()), row.getRawIndex());
     }
 
-    private Object evaluateOperator(OperatorType operator, Type leftType, Type rightType, Object left, Object right, Session session)
-    {
-        return functionInvoker.invoke(
-                metadata.resolveOperator(getCharVarcharCoercion(session), operator, ImmutableList.of(leftType, rightType)),
-                session.toConnectorSession(),
-                Arrays.asList(left, right));
-    }
-
     private Object evaluateInternal(Coalesce expression, Session session, Map<String, Object> bindings)
     {
         for (Expression operand : expression.operands()) {
@@ -298,10 +288,10 @@ public class IrExpressionEvaluator
     private Object evaluateInternal(Case expression, Session session, Map<String, Object> bindings)
     {
         for (WhenClause whenClause : expression.whenClauses()) {
-            Object operand = evaluate(whenClause.getOperand(), session, bindings);
+            Object operand = evaluate(whenClause.operand(), session, bindings);
 
             if (Boolean.TRUE.equals(operand)) {
-                return evaluate(whenClause.getResult(), session, bindings);
+                return evaluate(whenClause.result(), session, bindings);
             }
         }
 

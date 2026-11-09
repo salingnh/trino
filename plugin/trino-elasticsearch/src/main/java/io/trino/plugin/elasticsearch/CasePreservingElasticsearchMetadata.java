@@ -178,7 +178,7 @@ public class CasePreservingElasticsearchMetadata
         }
 
         ElasticsearchColumnHandle column = (ElasticsearchColumnHandle) constraint.getAssignments().get(variable.getName());
-        if (column == null || !(column.type() instanceof VarcharType)) {
+        if (column == null || !column.predicateMappingSafe() || !(column.type() instanceof VarcharType)) {
             return Optional.empty();
         }
 

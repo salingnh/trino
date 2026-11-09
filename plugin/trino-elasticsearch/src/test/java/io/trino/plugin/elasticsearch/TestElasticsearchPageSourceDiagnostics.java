@@ -258,7 +258,9 @@ public class TestElasticsearchPageSourceDiagnostics
             assertThat(source.getNextSourcePage().getPositionCount()).isEqualTo(10_000);
             assertThat(source.getNextSourcePage().getPositionCount()).isEqualTo(1);
             assertThat(source.isFinished()).isTrue();
-            assertThat(server.requests).containsExactly("GET /events/_count");
+            assertThat(server.requests).containsExactly("POST /events/_search");
+            assertThat(server.searchBodies).singleElement().asString()
+                    .contains("\"size\":0", "\"track_total_hits\":true");
             assertThat(server.diagnostics.getCountRequests()).isEqualTo(1);
             assertThat(server.diagnostics.getPagesReturned()).isEqualTo(2);
             assertThat(server.diagnostics.getRenderedQueries()).isEqualTo(1);
@@ -282,6 +284,23 @@ public class TestElasticsearchPageSourceDiagnostics
             assertThat(source.getNextSourcePage().getPositionCount()).isEqualTo(1);
             assertThat(server.requests.getFirst()).isEqualTo("POST /events/_search");
             assertThat(server.searchBodies.getFirst()).contains("\"_index\":\"events-0001\"", "\"sort\"");
+        }
+    }
+
+    @Test
+    public void testCountUsesLogicalEndpointAndRestrictsBackingIndex()
+            throws Exception
+    {
+        try (SearchServer server = new SearchServer("42", false, false);
+                CountQueryPageSource source = new CountQueryPageSource(
+                        server.client,
+                        TABLE,
+                        new ElasticsearchSplit("events-0001", 0, Optional.empty()),
+                        server.diagnostics)) {
+            assertThat(source.getNextSourcePage().getPositionCount()).isEqualTo(10_000);
+            assertThat(server.requests).containsExactly("POST /events/_search");
+            assertThat(server.searchBodies).singleElement().asString()
+                    .contains("\"_index\":\"events-0001\"", "\"track_total_hits\":true");
         }
     }
 
@@ -594,7 +613,11 @@ public class TestElasticsearchPageSourceDiagnostics
                     }
                     else if (path.equals("/events/_search")) {
                         searchBodies.add(requestBody);
-                        if (requestBody.contains("\"track_total_hits\":true")) {
+                        if (exchange.getRequestURI().getQuery().contains("pre_filter_shard_size=1")) {
+                            body = "{\"timed_out\":false,\"_shards\":{\"failed\":0},\"hits\":{\"total\":{\"value\":10001,\"relation\":\"eq\"}}}";
+                            status = failNextPage ? 500 : 200;
+                        }
+                        else if (requestBody.contains("\"track_total_hits\":true")) {
                             body = aggregationResponse;
                             status = failNextPage ? 500 : 200;
                         }
@@ -605,10 +628,6 @@ public class TestElasticsearchPageSourceDiagnostics
                                 body = initialSearchResponse;
                             }
                         }
-                    }
-                    else if (path.equals("/events/_count")) {
-                        status = failNextPage ? 500 : 200;
-                        body = "{\"count\":10001}";
                     }
                     else {
                         status = failNextPage ? 500 : 200;

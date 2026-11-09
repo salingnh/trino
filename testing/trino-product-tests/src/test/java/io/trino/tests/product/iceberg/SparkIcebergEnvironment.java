@@ -25,7 +25,6 @@ import org.testcontainers.containers.Network;
 import org.testcontainers.trino.TrinoContainer;
 
 import java.net.URI;
-import java.nio.file.Files;
 import java.nio.file.Path;
 import java.sql.Connection;
 import java.sql.DriverManager;
@@ -36,7 +35,7 @@ import java.util.Map;
 
 import static io.trino.testing.containers.environment.QueryRetry.executeWithRetry;
 import static io.trino.tests.product.iceberg.IcebergCatalogPropertiesBuilder.icebergCatalog;
-import static java.util.Objects.requireNonNull;
+import static io.trino.tests.product.utils.DownloadedJars.downloadedJar;
 
 /**
  * Spark/Iceberg product test environment for interoperability testing.
@@ -63,7 +62,7 @@ public class SparkIcebergEnvironment
     private static final String FLOCI_HOST_NAME = "floci";
     private static final String FLOCI_ENDPOINT = "http://" + FLOCI_HOST_NAME + ":" + Floci.FLOCI_PORT;
     // Must be kept in sync with dep.iceberg.version in the root pom.xml.
-    private static final String ICEBERG_VERSION = "1.11.0";
+    private static final String ICEBERG_VERSION = "1.12.0";
 
     static {
         // Ensure the Hive JDBC driver is loaded for Spark Thrift Server connections
@@ -106,7 +105,7 @@ public class SparkIcebergEnvironment
         spark = new SparkIcebergContainer()
                 .withNetwork(network)
                 .withNetworkAliases(SparkIcebergContainer.HOST_NAME)
-                .withIcebergSparkRuntime(findIcebergSparkRuntimeJar(), ICEBERG_VERSION)
+                .withIcebergSparkRuntime(findIcebergSparkRuntimeJar(), findIcebergAwsBundleJar(), ICEBERG_VERSION)
                 .withAwsKmsEncryption(FLOCI_ENDPOINT);
         spark.dependsOn(hadoop, floci);
         spark.start();
@@ -269,16 +268,6 @@ public class SparkIcebergEnvironment
         return trino != null && trino.isRunning();
     }
 
-    protected final Network getNetwork()
-    {
-        return requireNonNull(network, "Environment is not started: network is null");
-    }
-
-    protected final HadoopContainer getHadoopContainer()
-    {
-        return requireNonNull(hadoop, "Environment is not started: hadoop is null");
-    }
-
     @Override
     protected void doClose()
     {
@@ -364,15 +353,12 @@ public class SparkIcebergEnvironment
 
     private static Path findIcebergSparkRuntimeJar()
     {
-        Path current = Path.of(System.getProperty("user.dir")).toAbsolutePath();
-        while (current != null) {
-            Path jar = current.resolve("testing/trino-product-tests/target/iceberg-spark-runtime.jar");
-            if (Files.isRegularFile(jar)) {
-                return jar;
-            }
-            current = current.getParent();
-        }
-        throw new IllegalStateException("iceberg-spark-runtime.jar was not generated");
+        return downloadedJar("iceberg-spark-runtime.jar");
+    }
+
+    private static Path findIcebergAwsBundleJar()
+    {
+        return downloadedJar("iceberg-aws-bundle.jar");
     }
 
     /**

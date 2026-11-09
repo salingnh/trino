@@ -165,7 +165,7 @@ final class ElasticsearchDynamicFilterPlanner
 
     private Optional<ElasticsearchRemotePredicate> planDomain(ElasticsearchColumnHandle column, Domain domain)
     {
-        if (!column.supportsPredicates()) {
+        if (!column.supportsPredicates() || !ElasticsearchRemotePredicateTranslator.canTranslateDomain(domain)) {
             return Optional.empty();
         }
         return planExactDomain(column, domain);
@@ -229,7 +229,8 @@ final class ElasticsearchDynamicFilterPlanner
         return domain.getValues().getValuesProcessor().transform(
                 ranges -> ranges.getOrderedRanges().stream().allMatch(Range::isSingleValue) ? (long) ranges.getRangeCount() : 0L,
                 values -> values.isInclusive() ? (long) values.getValuesCount() : 0L,
-                _ -> 0L);
+                _ -> 0L,
+                values -> values.isDiscreteSet() ? (long) values.getDiscreteSet().size() : 0L);
     }
 
     private static long countPushedValues(ElasticsearchRemotePredicate predicate)

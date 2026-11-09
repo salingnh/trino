@@ -96,7 +96,6 @@ import io.trino.spi.connector.DynamicFilter;
 import io.trino.spi.connector.EmptyPageSource;
 import io.trino.spi.connector.FixedPageSource;
 import io.trino.spi.connector.MemoryContext;
-import io.trino.spi.connector.MemoryUsageReportingPageSource;
 import io.trino.spi.connector.SourcePage;
 import io.trino.spi.connector.SystemColumnHandle;
 import io.trino.spi.predicate.Domain;
@@ -170,7 +169,6 @@ import static io.airlift.slice.Slices.utf8Slice;
 import static io.trino.geospatial.serde.JtsGeometrySerde.OGC_CRS84_SRID;
 import static io.trino.geospatial.serde.JtsGeometrySerde.wkbToEwkb;
 import static io.trino.memory.context.AggregatedMemoryContext.newAggregatedMemoryContext;
-import static io.trino.memory.context.AggregatedMemoryContext.newSimpleAggregatedMemoryContext;
 import static io.trino.orc.OrcReader.INITIAL_BATCH_SIZE;
 import static io.trino.orc.OrcReader.fullyProjectedLayout;
 import static io.trino.parquet.ParquetTypeUtils.getColumnIO;
@@ -183,6 +181,9 @@ import static io.trino.plugin.iceberg.GeoSpatialUtils.isGeospatialType;
 import static io.trino.plugin.iceberg.IcebergErrorCode.ICEBERG_BAD_DATA;
 import static io.trino.plugin.iceberg.IcebergErrorCode.ICEBERG_CANNOT_OPEN_SPLIT;
 import static io.trino.plugin.iceberg.IcebergErrorCode.ICEBERG_CURSOR_ERROR;
+import static io.trino.plugin.iceberg.IcebergFileFormat.AVRO;
+import static io.trino.plugin.iceberg.IcebergFileFormat.ORC;
+import static io.trino.plugin.iceberg.IcebergFileFormat.PARQUET;
 import static io.trino.plugin.iceberg.IcebergMetadataColumn.FILE_MODIFIED_TIME;
 import static io.trino.plugin.iceberg.IcebergMetadataColumn.FILE_PATH;
 import static io.trino.plugin.iceberg.IcebergMetadataColumn.PARTITION;
@@ -203,13 +204,13 @@ import static io.trino.plugin.iceberg.IcebergSessionProperties.isParquetUseColum
 import static io.trino.plugin.iceberg.IcebergSessionProperties.isParquetVectorizedDecodingEnabled;
 import static io.trino.plugin.iceberg.IcebergSessionProperties.isUseFileSizeFromMetadata;
 import static io.trino.plugin.iceberg.IcebergSessionProperties.useParquetBloomFilter;
-import static io.trino.plugin.iceberg.IcebergSplitManager.ICEBERG_DOMAIN_COMPACTION_THRESHOLD;
 import static io.trino.plugin.iceberg.IcebergSplitSource.partitionMatchesPredicate;
 import static io.trino.plugin.iceberg.IcebergTypes.convertIcebergValueToTrino;
 import static io.trino.plugin.iceberg.IcebergUtil.deserializePartitionValue;
 import static io.trino.plugin.iceberg.IcebergUtil.getColumnHandle;
 import static io.trino.plugin.iceberg.IcebergUtil.getPartitionKeys;
 import static io.trino.plugin.iceberg.IcebergUtil.getPartitionValues;
+import static io.trino.plugin.iceberg.IcebergUtil.getProjectedColumns;
 import static io.trino.plugin.iceberg.IcebergUtil.schemaFromHandles;
 import static io.trino.plugin.iceberg.util.OrcIcebergIds.fileColumnsByIcebergId;
 import static io.trino.plugin.iceberg.util.OrcTypeConverter.ORC_ICEBERG_ID_KEY;
@@ -218,6 +219,7 @@ import static io.trino.spi.type.BigintType.BIGINT;
 import static io.trino.spi.type.BooleanType.BOOLEAN;
 import static io.trino.spi.type.DateTimeEncoding.packDateTimeWithZone;
 import static io.trino.spi.type.TimeZoneKey.UTC_KEY;
+import static io.trino.spi.type.TypeUtils.containsType;
 import static io.trino.spi.type.TypeUtils.writeNativeValue;
 import static io.trino.spi.type.VarbinaryType.VARBINARY;
 import static java.lang.Math.addExact;
@@ -256,9 +258,10 @@ public class IcebergPageSourceProvider
     private final ParquetReaderOptions parquetReaderOptions;
     private final TypeManager typeManager;
     private final ParquetFooterCache parquetFooterCache;
-    private final Optional<BlocksHashFactory> blocksHashFactory;
+    private final BlocksHashFactory blocksHashFactory;
     private final EncryptionManagerFactory encryptionManagerFactory;
     private final MemoryContext sharedMemoryContext;
+    private final int domainCompactionThreshold;
     private final DeleteManager unpartitionedTableDeleteManager;
     private final Map<Integer, Function<PartitionData, PartitionKey>> partitionKeyFactories = new ConcurrentHashMap<>();
     private final Map<PartitionKey, DeleteManager> partitionedDeleteManagers = new ConcurrentHashMap<>();
@@ -271,9 +274,10 @@ public class IcebergPageSourceProvider
             ParquetReaderOptions parquetReaderOptions,
             TypeManager typeManager,
             ParquetFooterCache parquetFooterCache,
-            Optional<BlocksHashFactory> blocksHashFactory,
+            BlocksHashFactory blocksHashFactory,
             EncryptionManagerFactory encryptionManagerFactory,
-            MemoryContext sharedMemoryContext)
+            MemoryContext sharedMemoryContext,
+            int domainCompactionThreshold)
     {
         this.fileSystemFactory = requireNonNull(fileSystemFactory, "fileSystemFactory is null");
         this.fileIoFactory = requireNonNull(fileIoFactory, "fileIoFactory is null");
@@ -285,6 +289,8 @@ public class IcebergPageSourceProvider
         this.blocksHashFactory = requireNonNull(blocksHashFactory, "blocksHashFactory is null");
         this.encryptionManagerFactory = requireNonNull(encryptionManagerFactory, "encryptionManagerFactory is null");
         this.sharedMemoryContext = requireNonNull(sharedMemoryContext, "sharedMemoryContext is null");
+        checkArgument(domainCompactionThreshold >= 1, "domainCompactionThreshold must be at least 1");
+        this.domainCompactionThreshold = domainCompactionThreshold;
         this.unpartitionedTableDeleteManager = new DeleteManager(typeManager, blocksHashFactory, this::reportDeleteFilterMemoryUsage);
     }
 
@@ -400,7 +406,8 @@ public class IcebergPageSourceProvider
                 return generatePages(
                         fileRecordCount,
                         icebergColumns,
-                        partitionKeys);
+                        partitionKeys,
+                        memoryContext.newLocalMemoryContext(FixedPageSource.class.getSimpleName())::setBytes);
             }
         }
         catch (IOException e) {
@@ -410,8 +417,12 @@ public class IcebergPageSourceProvider
         List<IcebergColumnHandle> requiredColumns = new ArrayList<>(icebergColumns);
 
         Set<IcebergColumnHandle> deleteFilterRequiredColumns = requiredColumnsForDeletes(tableSchema, deletes);
+        // compare by field id not handle; IcebergColumnHandle can differ when fields have comments
+        Set<Integer> projectedIds = icebergColumns.stream()
+                .map(IcebergColumnHandle::getId)
+                .collect(toImmutableSet());
         deleteFilterRequiredColumns.stream()
-                .filter(not(icebergColumns::contains))
+                .filter(column -> !projectedIds.contains(column.getId()))
                 .forEach(requiredColumns::add);
 
         Optional<FileDecryptionProperties> parquetFileDecryptionProperties = createParquetFileDecryptionProperties(parquetFileDecryptionData, arePlaintextFilesAllowedForEncryptedTables(session));
@@ -421,6 +432,7 @@ public class IcebergPageSourceProvider
                 start,
                 length,
                 fileSize,
+                fileRecordCount,
                 partitionSpec.specId(),
                 PartitionData.toJson(partitionData),
                 fileFormat,
@@ -526,7 +538,7 @@ public class IcebergPageSourceProvider
                         fileStatisticsDomain,
                         dynamicFilter.getCurrentPredicate().transformKeys(IcebergColumnHandle.class::cast))),
                 fileStatisticsDomain)
-                .simplify(ICEBERG_DOMAIN_COMPACTION_THRESHOLD);
+                .simplify(domainCompactionThreshold);
     }
 
     private TupleDomain<IcebergColumnHandle> prunePredicate(
@@ -557,15 +569,18 @@ public class IcebergPageSourceProvider
     private Set<IcebergColumnHandle> requiredColumnsForDeletes(Schema schema, List<DeleteFile> deletes)
     {
         ImmutableSet.Builder<IcebergColumnHandle> requiredColumns = ImmutableSet.builder();
+        ImmutableSet.Builder<Integer> equalityFieldIds = ImmutableSet.builder();
         for (DeleteFile deleteFile : deletes) {
             if (deleteFile.content() == POSITION_DELETES) {
                 requiredColumns.add(getColumnHandle(ROW_POSITION, typeManager));
             }
             else if (deleteFile.content() == EQUALITY_DELETES) {
-                deleteFile.equalityFieldIds().stream()
-                        .map(id -> getColumnHandle(schema.findField(id), typeManager))
-                        .forEach(requiredColumns::add);
+                equalityFieldIds.addAll(deleteFile.equalityFieldIds());
             }
+        }
+        Set<Integer> fieldIds = equalityFieldIds.build();
+        if (!fieldIds.isEmpty()) {
+            requiredColumns.addAll(getProjectedColumns(schema, typeManager, fieldIds));
         }
 
         return requiredColumns.build();
@@ -604,6 +619,7 @@ public class IcebergPageSourceProvider
                 0,
                 delete.fileSizeInBytes(),
                 delete.fileSizeInBytes(),
+                delete.recordCount(),
                 0,
                 "",
                 IcebergFileFormat.fromIceberg(delete.format()),
@@ -626,6 +642,7 @@ public class IcebergPageSourceProvider
             long start,
             long length,
             long fileSize,
+            long fileRecordCount,
             int partitionSpecId,
             String partitionData,
             IcebergFileFormat fileFormat,
@@ -645,11 +662,14 @@ public class IcebergPageSourceProvider
                     inputFile,
                     start,
                     length,
+                    fileSize,
+                    fileRecordCount,
                     partitionSpecId,
                     partitionData,
                     fileSchema,
                     dataColumns,
                     predicate,
+                    domainCompactionThreshold,
                     orcReaderOptions
                             .withMaxMergeDistance(getOrcMaxMergeDistance(session))
                             .withMaxBufferSize(getOrcMaxBufferSize(session))
@@ -672,6 +692,7 @@ public class IcebergPageSourceProvider
                     start,
                     length,
                     fileSize,
+                    fileRecordCount,
                     partitionSpecId,
                     partitionData,
                     fileSchema,
@@ -686,6 +707,7 @@ public class IcebergPageSourceProvider
                             .withVectorizedDecodingEnabled(isParquetVectorizedDecodingEnabled(session))
                             .build(),
                     predicate,
+                    domainCompactionThreshold,
                     fileFormatDataSourceStats,
                     parquetFooterCache,
                     nameMapping,
@@ -699,6 +721,8 @@ public class IcebergPageSourceProvider
                     inputFile,
                     start,
                     length,
+                    fileSize,
+                    fileRecordCount,
                     partitionSpecId,
                     partitionData,
                     fileSchema,
@@ -716,7 +740,8 @@ public class IcebergPageSourceProvider
     private static ConnectorPageSource generatePages(
             long totalRowCount,
             List<IcebergColumnHandle> icebergColumns,
-            Map<Integer, Optional<String>> partitionKeys)
+            Map<Integer, Optional<String>> partitionKeys,
+            MemoryContext memoryContext)
     {
         int maxPageSize = MAX_RLE_PAGE_SIZE;
         Block[] pageBlocks = new Block[icebergColumns.size()];
@@ -745,18 +770,22 @@ public class IcebergPageSourceProvider
                         return page;
                     }
                 },
-                maxPage.getRetainedSizeInBytes());
+                maxPage.getRetainedSizeInBytes(),
+                memoryContext);
     }
 
     private static ReaderPageSourceWithRowPositions createOrcPageSource(
             TrinoInputFile inputFile,
             long start,
             long length,
+            long fileSize,
+            long fileRecordCount,
             int partitionSpecId,
             String partitionData,
             Schema tableSchema,
             List<IcebergColumnHandle> columns,
             TupleDomain<IcebergColumnHandle> effectivePredicate,
+            int domainCompactionThreshold,
             OrcReaderOptions options,
             FileFormatDataSourceStats stats,
             TypeManager typeManager,
@@ -777,7 +806,8 @@ public class IcebergPageSourceProvider
             Map<Integer, OrcColumn> fileColumnsByIcebergId = fileColumnsByIcebergId(reader, nameMapping);
 
             TupleDomainOrcPredicateBuilder predicateBuilder = TupleDomainOrcPredicate.builder()
-                    .setBloomFiltersEnabled(options.isBloomFiltersEnabled());
+                    .setBloomFiltersEnabled(options.isBloomFiltersEnabled())
+                    .setDomainCompactionThreshold(domainCompactionThreshold);
             Map<IcebergColumnHandle, Domain> effectivePredicateDomains = effectivePredicate.getDomains()
                     .orElseThrow(() -> new IllegalArgumentException("Effective predicate is none"));
             for (IcebergColumnHandle column : columns) {
@@ -843,7 +873,10 @@ public class IcebergPageSourceProvider
                             partitionSpecId,
                             utf8Slice(partitionData),
                             fileFirstRowId,
-                            sourceRowIdOrdinal));
+                            sourceRowIdOrdinal,
+                            fileRecordCount,
+                            fileSize,
+                            ORC));
                 }
                 else if (column.isRowPositionColumn()) {
                     appendRowNumberColumn = true;
@@ -1106,12 +1139,14 @@ public class IcebergPageSourceProvider
             long start,
             long length,
             long fileSize,
+            long fileRecordCount,
             int partitionSpecId,
             String partitionData,
             Schema tableSchema,
             List<IcebergColumnHandle> columns,
             ParquetReaderOptions options,
             TupleDomain<IcebergColumnHandle> effectivePredicate,
+            int domainCompactionThreshold,
             FileFormatDataSourceStats fileFormatDataSourceStats,
             ParquetFooterCache parquetFooterCache,
             Optional<NameMapping> nameMapping,
@@ -1198,7 +1233,10 @@ public class IcebergPageSourceProvider
                             partitionSpecId,
                             utf8Slice(partitionData),
                             fileFirstRowId,
-                            sourceRowIdOrdinal));
+                            sourceRowIdOrdinal,
+                            fileRecordCount,
+                            fileSize,
+                            PARQUET));
                 }
                 else if (column.isRowPositionColumn()) {
                     appendRowNumberColumn = true;
@@ -1272,7 +1310,7 @@ public class IcebergPageSourceProvider
                     ImmutableList.of(parquetPredicate),
                     descriptorsByPath,
                     UTC,
-                    ICEBERG_DOMAIN_COMPACTION_THRESHOLD,
+                    domainCompactionThreshold,
                     options);
 
             ParquetDataSourceId dataSourceId = dataSource.getId();
@@ -1410,6 +1448,8 @@ public class IcebergPageSourceProvider
             TrinoInputFile inputFile,
             long start,
             long length,
+            long fileSize,
+            long fileRecordCount,
             int partitionSpecId,
             String partitionData,
             Schema fileSchema,
@@ -1482,7 +1522,10 @@ public class IcebergPageSourceProvider
                             partitionSpecId,
                             utf8Slice(partitionData),
                             fileFirstRowId,
-                            sourceRowIdOrdinal));
+                            sourceRowIdOrdinal,
+                            fileRecordCount,
+                            fileSize,
+                            AVRO));
                 }
                 else if (column.isRowPositionColumn()) {
                     appendRowNumberColumn = true;
@@ -1547,18 +1590,8 @@ public class IcebergPageSourceProvider
                     appendRowNumberColumn,
                     fileFirstRowId,
                     dataSequenceNumber,
-                    newSimpleAggregatedMemoryContext());
+                    memoryContext.newLocalMemoryContext(IcebergAvroPageSource.class.getSimpleName())::setBytes);
             pageSource = transforms.build(pageSource);
-            pageSource = new MemoryUsageReportingPageSource(pageSource, new MemoryContext()
-            {
-                private final LocalMemoryContext localMemoryContext = memoryContext.newLocalMemoryContext(IcebergAvroPageSource.class.getSimpleName());
-
-                @Override
-                public void setBytes(long currentBytes)
-                {
-                    localMemoryContext.setBytes(currentBytes);
-                }
-            });
 
             return new ReaderPageSourceWithRowPositions(
                     pageSource,
@@ -1865,19 +1898,7 @@ public class IcebergPageSourceProvider
 
     private static boolean containsGeospatial(Type type)
     {
-        if (isGeospatialType(type)) {
-            return true;
-        }
-        if (type instanceof ArrayType arrayType) {
-            return containsGeospatial(arrayType.getElementType());
-        }
-        if (type instanceof MapType mapType) {
-            return containsGeospatial(mapType.getKeyType()) || containsGeospatial(mapType.getValueType());
-        }
-        if (type instanceof RowType rowType) {
-            return rowType.getFields().stream().anyMatch(field -> containsGeospatial(field.getType()));
-        }
-        return false;
+        return containsType(type, GeoSpatialUtils::isGeospatialType);
     }
 
     private static boolean containsGeospatial(org.apache.iceberg.types.Type type)
@@ -2029,17 +2050,37 @@ public class IcebergPageSourceProvider
         }
     }
 
-    private record MergeRowIdTransform(VariableWidthBlock filePath, IntArrayBlock partitionSpecId, VariableWidthBlock partitionData, OptionalLong fileFirstRowId, Integer sourceRowIdChannel)
+    private record MergeRowIdTransform(
+            VariableWidthBlock filePath,
+            IntArrayBlock partitionSpecId,
+            VariableWidthBlock partitionData,
+            OptionalLong fileFirstRowId,
+            Integer sourceRowIdChannel,
+            LongArrayBlock fileRecordCount,
+            LongArrayBlock fileSize,
+            VariableWidthBlock fileFormat)
             implements Function<SourcePage, Block>
     {
-        private static Function<SourcePage, Block> create(Slice filePath, int partitionSpecId, Slice partitionData, OptionalLong fileFirstRowId, Integer sourceRowIdChannel)
+        private static Function<SourcePage, Block> create(
+                Slice filePath,
+                int partitionSpecId,
+                Slice partitionData,
+                OptionalLong fileFirstRowId,
+                Integer sourceRowIdChannel,
+                long fileRecordCount,
+                long fileSize,
+                IcebergFileFormat fileFormat)
         {
+            Slice fileFormatName = utf8Slice(fileFormat.name());
             return new MergeRowIdTransform(
                     new VariableWidthBlock(1, filePath, new int[] {0, filePath.length()}, Optional.empty()),
                     new IntArrayBlock(1, Optional.empty(), new int[] {partitionSpecId}),
                     new VariableWidthBlock(1, partitionData, new int[] {0, partitionData.length()}, Optional.empty()),
                     fileFirstRowId,
-                    sourceRowIdChannel);
+                    sourceRowIdChannel,
+                    new LongArrayBlock(1, Optional.empty(), new long[] {fileRecordCount}),
+                    new LongArrayBlock(1, Optional.empty(), new long[] {fileSize}),
+                    new VariableWidthBlock(1, fileFormatName, new int[] {0, fileFormatName.length()}, Optional.empty()));
         }
 
         @Override
@@ -2081,6 +2122,9 @@ public class IcebergPageSourceProvider
                     RunLengthEncodedBlock.create(partitionSpecId, positionCount),
                     RunLengthEncodedBlock.create(partitionData, positionCount),
                     sourceRowIdBlock,
+                    RunLengthEncodedBlock.create(fileRecordCount, positionCount),
+                    RunLengthEncodedBlock.create(fileSize, positionCount),
+                    RunLengthEncodedBlock.create(fileFormat, positionCount),
             };
             return RowBlock.fromFieldBlocks(positionCount, fields);
         }

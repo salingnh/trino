@@ -14,7 +14,6 @@
 package io.trino.metadata;
 
 import com.google.common.collect.Multimap;
-import com.google.common.util.concurrent.ListenableFuture;
 import io.airlift.slice.Slice;
 import io.trino.Session;
 import io.trino.connector.CatalogHandle;
@@ -64,6 +63,7 @@ import io.trino.spi.expression.ConnectorExpression;
 import io.trino.spi.expression.Constant;
 import io.trino.spi.function.BoundSignature;
 import io.trino.spi.function.CatalogSchemaFunctionName;
+import io.trino.spi.function.DomainProjection;
 import io.trino.spi.function.FunctionDependencyDeclaration;
 import io.trino.spi.function.FunctionId;
 import io.trino.spi.function.FunctionMetadata;
@@ -424,16 +424,6 @@ public interface Metadata
     Optional<ConnectorOutputMetadata> finishInsert(Session session, InsertTableHandle tableHandle, List<TableHandle> sourceTableHandles, Collection<Slice> fragments, Collection<ComputedStatistics> computedStatistics);
 
     /**
-     * Returns true if materialized view refresh should be delegated to connector
-     */
-    boolean delegateMaterializedViewRefreshToConnector(Session session, QualifiedObjectName viewName);
-
-    /**
-     * Refresh materialized view
-     */
-    ListenableFuture<Void> refreshMaterializedView(Session session, QualifiedObjectName viewName);
-
-    /**
      * Begin refresh materialized view query
      */
     InsertTableHandle beginRefreshMaterializedView(Session session, TableHandle tableHandle, List<TableHandle> sourceTableHandles, RefreshType refreshType);
@@ -553,7 +543,7 @@ public interface Metadata
     /**
      * Creates the specified view with the specified view definition.
      */
-    void createView(Session session, QualifiedObjectName viewName, ViewDefinition definition, Map<String, Object> properties, boolean replace);
+    void createView(Session session, QualifiedObjectName viewName, ViewDefinition definition, Map<String, Object> properties, SaveMode saveMode);
 
     /**
      * Rename the specified view.
@@ -801,6 +791,8 @@ public interface Metadata
 
     ResolvedFunction getCoercion(CharVarcharCoercion charVarcharCoercion, CatalogSchemaFunctionName name, Type fromType, Type toType);
 
+    Optional<DomainProjection> getDomainProjection(Session session, ResolvedFunction resolvedFunction);
+
     ResolvedAggregationFunctionMetadata getAggregationFunctionMetadata(Session session, ResolvedFunction resolvedFunction);
 
     FunctionDependencyDeclaration getFunctionDependencies(Session session, CatalogHandle catalogHandle, FunctionId functionId, BoundSignature boundSignature);
@@ -879,6 +871,11 @@ public interface Metadata
      * Sets the properties of the specified materialized view.
      */
     void setMaterializedViewProperties(Session session, QualifiedObjectName viewName, Map<String, Optional<Object>> properties);
+
+    /**
+     * Sets the comment of the specified materialized view.
+     */
+    void setMaterializedViewComment(Session session, QualifiedObjectName viewName, Optional<String> comment);
 
     /**
      * Comments to the specified materialized view column.

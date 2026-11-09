@@ -5,7 +5,7 @@
     <parent>
         <groupId>io.trino</groupId>
         <artifactId>trino-root</artifactId>
-        <version>484-SNAPSHOT</version>
+        <version>485-SNAPSHOT</version>
         <relativePath>../../pom.xml</relativePath>
     </parent>
 
@@ -15,6 +15,7 @@
 
     <properties>
         <air.check.skip-duplicate-finder>true</air.check.skip-duplicate-finder>
+        <dep.lzo.version>1.0.6</dep.lzo.version>
     </properties>
 
     <dependencies>
@@ -28,21 +29,21 @@
         </dependency>
 
         <dependency>
-            <groupId>com.clickhouse</groupId>
-            <artifactId>clickhouse-jdbc</artifactId>
-            <scope>test</scope>
-        </dependency>
-
-        <dependency>
             <groupId>com.databricks</groupId>
             <artifactId>databricks-jdbc</artifactId>
-            <version>3.4.2</version>
+            <version>3.4.4</version>
             <scope>test</scope>
         </dependency>
 
         <dependency>
             <groupId>com.exasol</groupId>
             <artifactId>exasol-jdbc</artifactId>
+            <scope>test</scope>
+        </dependency>
+
+        <dependency>
+            <groupId>com.fasterxml.jackson.core</groupId>
+            <artifactId>jackson-databind</artifactId>
             <scope>test</scope>
         </dependency>
 
@@ -151,12 +152,6 @@
             <groupId>io.confluent</groupId>
             <artifactId>kafka-protobuf-provider</artifactId>
             <scope>test</scope>
-            <exclusions>
-                <exclusion>
-                    <groupId>commons-cli</groupId>
-                    <artifactId>commons-cli</artifactId>
-                </exclusion>
-            </exclusions>
         </dependency>
 
         <dependency>
@@ -189,16 +184,6 @@
             <groupId>io.trino</groupId>
             <artifactId>trino-jdbc</artifactId>
             <scope>test</scope>
-            <exclusions>
-                <exclusion>
-                    <groupId>com.squareup.okhttp</groupId>
-                    <artifactId>okhttp</artifactId>
-                </exclusion>
-                <exclusion>
-                    <groupId>com.squareup.okio</groupId>
-                    <artifactId>okio</artifactId>
-                </exclusion>
-            </exclusions>
         </dependency>
 
         <dependency>
@@ -394,6 +379,12 @@
         </dependency>
 
         <dependency>
+            <groupId>org.yaml</groupId>
+            <artifactId>snakeyaml</artifactId>
+            <scope>test</scope>
+        </dependency>
+
+        <dependency>
             <groupId>software.amazon.awssdk</groupId>
             <artifactId>auth</artifactId>
             <scope>test</scope>
@@ -470,20 +461,39 @@
                 <artifactId>maven-dependency-plugin</artifactId>
                 <executions>
                     <execution>
-                        <id>copy-iceberg-spark-runtime</id>
+                        <id>copy-test-jars</id>
                         <goals>
                             <goal>copy</goal>
                         </goals>
                         <phase>process-test-resources</phase>
                         <configuration>
                             <skip>false</skip>
+                            <outputDirectory>${project.build.directory}/downloaded-jars</outputDirectory>
+                            <overWriteReleases>true</overWriteReleases>
                             <artifactItems>
                                 <artifactItem>
                                     <groupId>org.apache.iceberg</groupId>
-                                    <artifactId>iceberg-spark-runtime-4.0_2.13</artifactId>
+                                    <artifactId>iceberg-spark-runtime-4.1_2.13</artifactId>
                                     <version>${dep.iceberg.version}</version>
-                                    <outputDirectory>${project.build.directory}</outputDirectory>
                                     <destFileName>iceberg-spark-runtime.jar</destFileName>
+                                </artifactItem>
+                                <artifactItem>
+                                    <groupId>org.apache.iceberg</groupId>
+                                    <artifactId>iceberg-aws-bundle</artifactId>
+                                    <version>${dep.iceberg.version}</version>
+                                    <destFileName>iceberg-aws-bundle.jar</destFileName>
+                                </artifactItem>
+                                <artifactItem>
+                                    <groupId>org.anarres.lzo</groupId>
+                                    <artifactId>lzo-hadoop</artifactId>
+                                    <version>${dep.lzo.version}</version>
+                                    <destFileName>lzo-hadoop.jar</destFileName>
+                                </artifactItem>
+                                <artifactItem>
+                                    <groupId>org.anarres.lzo</groupId>
+                                    <artifactId>lzo-core</artifactId>
+                                    <version>${dep.lzo.version}</version>
+                                    <destFileName>lzo-core.jar</destFileName>
                                 </artifactItem>
                             </artifactItems>
                         </configuration>

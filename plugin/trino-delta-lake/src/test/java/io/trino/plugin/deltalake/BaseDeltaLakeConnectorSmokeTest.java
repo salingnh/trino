@@ -72,6 +72,7 @@ import java.util.stream.LongStream;
 import static com.google.common.base.Verify.verify;
 import static com.google.common.collect.ImmutableList.toImmutableList;
 import static com.google.common.collect.ImmutableSet.toImmutableSet;
+import static com.google.common.collect.Iterables.getOnlyElement;
 import static com.google.common.collect.MoreCollectors.onlyElement;
 import static com.google.common.collect.Sets.union;
 import static io.trino.SystemSessionProperties.ENABLE_DYNAMIC_FILTERING;
@@ -373,7 +374,7 @@ public abstract class BaseDeltaLakeConnectorSmokeTest
                 "WITH (location = '" + getLocationForTable(bucketName, tableName) + "', partitioned_by = ARRAY['b'])");
         assertUpdate("INSERT INTO " + tableName + " VALUES (1, 'a', TIMESTAMP '2020-01-01 01:22:34.000 UTC')", 1);
         assertUpdate("INSERT INTO " + tableName + " VALUES (2, 'b', TIMESTAMP '2021-01-01 01:22:34.000 UTC')", 1);
-        assertQuery("SELECT a, b, CAST(c AS VARCHAR) FROM " + tableName, "VALUES (1, 'a', '2020-01-01 01:22:34.000 UTC'), (2, 'b', '2021-01-01 01:22:34.000 UTC')");
+        assertQuery("SELECT a, b, CAST(c AS VARCHAR) FROM " + tableName, "VALUES (1, 'a', '2020-01-01 01:22:34.000000 UTC'), (2, 'b', '2021-01-01 01:22:34.000000 UTC')");
         assertUpdate("DROP TABLE " + tableName);
     }
 
@@ -484,8 +485,7 @@ public abstract class BaseDeltaLakeConnectorSmokeTest
             for (int i = 0; i < 3; i++) {
                 computeActual("ALTER TABLE " + tableName + " EXECUTE OPTIMIZE (file_size_threshold => '1kB')");
                 Set<String> filesAfterOptimize = getActiveFiles(tableName);
-                assertThat(filesAfterOptimize)
-                        .containsExactlyInAnyOrderElementsOf(initialFiles);
+                assertEqualsIgnoreOrder(filesAfterOptimize, initialFiles);
             }
             assertQuery(
                     "SELECT * FROM " + tableName,
@@ -513,9 +513,8 @@ public abstract class BaseDeltaLakeConnectorSmokeTest
                 Set<String> initialFiles = getActiveFiles(tableName);
                 computeActual("ALTER TABLE " + tableName + " EXECUTE OPTIMIZE");
                 Set<String> filesAfterOptimize = getActiveFiles(tableName);
-                assertThat(filesAfterOptimize)
-                        .hasSizeBetween(1, workerCount)
-                        .containsExactlyInAnyOrderElementsOf(initialFiles);
+                assertThat(filesAfterOptimize).hasSizeBetween(1, workerCount);
+                assertEqualsIgnoreOrder(filesAfterOptimize, initialFiles);
             }
             assertQuery("SELECT * FROM " + tableName, "VALUES(1, 'one'), (2, 'two')");
         }
@@ -530,19 +529,21 @@ public abstract class BaseDeltaLakeConnectorSmokeTest
     {
         assertThat(computeScalar("SHOW CREATE TABLE person"))
                 .isEqualTo(format(
-                        "CREATE TABLE delta.%s.person (\n" +
-                                "   name varchar,\n" +
-                                "   age integer,\n" +
-                                "   married boolean,\n" +
-                                "   phones array(ROW(number varchar, label varchar)),\n" +
-                                "   address ROW(street varchar, city varchar, state varchar, zip varchar),\n" +
-                                "   income double,\n" +
-                                "   gender varchar\n" +
-                                ")\n" +
-                                "WITH (\n" +
-                                "   location = '%s',\n" +
-                                "   partitioned_by = ARRAY['age']\n" +
-                                ")",
+                        """
+                        CREATE TABLE delta.%s.person (
+                           name varchar,
+                           age integer,
+                           married boolean,
+                           phones array(ROW(number varchar, label varchar)),
+                           address ROW(street varchar, city varchar, state varchar, zip varchar),
+                           income double,
+                           gender varchar
+                        )
+                        WITH (
+                           location = '%s',
+                           partitioned_by = ARRAY['age']
+                        )\
+                        """,
                         SCHEMA,
                         getLocationForTable(bucketName, "person")));
     }
@@ -662,15 +663,17 @@ public abstract class BaseDeltaLakeConnectorSmokeTest
                 25);
         assertThat(computeScalar("SHOW CREATE TABLE " + tableName))
                 .isEqualTo(format(
-                        "CREATE TABLE %s.%s.%s (\n" +
-                                "   name varchar,\n" +
-                                "   regionkey bigint,\n" +
-                                "   comment varchar\n" +
-                                ")\n" +
-                                "WITH (\n" +
-                                "   location = '%s',\n" +
-                                "   partitioned_by = ARRAY['regionkey']\n" +
-                                ")",
+                        """
+                        CREATE TABLE %s.%s.%s (
+                           name varchar,
+                           regionkey bigint,
+                           comment varchar
+                        )
+                        WITH (
+                           location = '%s',
+                           partitioned_by = ARRAY['regionkey']
+                        )\
+                        """,
                         DELTA_CATALOG,
                         SCHEMA,
                         tableName,
@@ -996,9 +999,9 @@ public abstract class BaseDeltaLakeConnectorSmokeTest
                 3);
         assertQuery(
                 "SELECT CAST(ts_tz AS VARCHAR) FROM " + tableName,
-                "VALUES '2012-10-31 05:00:00.123 UTC', " +
-                        "'2012-10-31 08:00:00.123 UTC', " +
-                        "'2012-10-31 01:00:00.123 UTC'");
+                "VALUES '2012-10-31 05:00:00.123000 UTC', " +
+                        "'2012-10-31 08:00:00.123000 UTC', " +
+                        "'2012-10-31 01:00:00.123000 UTC'");
         assertUpdate("DROP TABLE " + tableName);
     }
 
@@ -1006,11 +1009,16 @@ public abstract class BaseDeltaLakeConnectorSmokeTest
     public void testTimestampWithTimeZoneMicro()
     {
         String tableName = "test_timestamp_with_time_zone_micro_" + randomNameSuffix();
-        assertQueryFails(
+        assertUpdate(
                 format("CREATE TABLE " + tableName + " (ts_tz) WITH (location = '%s') AS " +
                                 "VALUES timestamp '2012-10-31 01:00:00.123456 America/New_York', timestamp '2012-10-31 01:00:00.123456 America/Los_Angeles'",
                         getLocationForTable(bucketName, tableName)),
-                "Unsupported type:.*");
+                2);
+        assertQuery(
+                "SELECT CAST(ts_tz AS VARCHAR) FROM " + tableName,
+                "VALUES '2012-10-31 05:00:00.123456 UTC', " +
+                        "'2012-10-31 08:00:00.123456 UTC'");
+        assertUpdate("DROP TABLE " + tableName);
     }
 
     @Test
@@ -1022,7 +1030,7 @@ public abstract class BaseDeltaLakeConnectorSmokeTest
 
         String values =
                 """
-                (1, ARRAY[timestamp '2012-01-01 01:02:03.123 UTC']),
+                (1, ARRAY[timestamp '2012-01-01 01:02:03.123000 UTC']),
                 (2, ARRAY[NULL]),
                 (3, NULL)
                 """;
@@ -1030,7 +1038,7 @@ public abstract class BaseDeltaLakeConnectorSmokeTest
 
         assertThat(query("SELECT * FROM " + tableName))
                 .matches("VALUES " + values);
-        assertThat(query("SELECT id FROM " + tableName + " WHERE data = ARRAY[timestamp '2012-01-01 01:02:03.123 UTC']"))
+        assertThat(query("SELECT id FROM " + tableName + " WHERE data = ARRAY[timestamp '2012-01-01 01:02:03.123000 UTC']"))
                 .matches("VALUES 1");
 
         assertUpdate("DROP TABLE " + tableName);
@@ -1045,8 +1053,8 @@ public abstract class BaseDeltaLakeConnectorSmokeTest
 
         String values =
                 """
-                (1, MAP(ARRAY[timestamp '2012-01-01 01:02:03.123 UTC'], ARRAY[timestamp '2012-02-01 01:02:03.123 UTC'])),
-                (2, MAP(ARRAY[timestamp '2023-12-31 03:02:01.321 UTC'], ARRAY[NULL])),
+                (1, MAP(ARRAY[timestamp '2012-01-01 01:02:03.123000 UTC'], ARRAY[timestamp '2012-02-01 01:02:03.123000 UTC'])),
+                (2, MAP(ARRAY[timestamp '2023-12-31 03:02:01.321000 UTC'], ARRAY[NULL])),
                 (3, MAP(NULL, NULL)),
                 (4, NULL)
                 """;
@@ -1054,7 +1062,7 @@ public abstract class BaseDeltaLakeConnectorSmokeTest
 
         assertThat(query("SELECT * FROM " + tableName))
                 .matches("VALUES " + values);
-        assertThat(query("SELECT id FROM " + tableName + " WHERE data = MAP(ARRAY[timestamp '2012-01-01 01:02:03.123 UTC'], ARRAY[timestamp '2012-02-01 01:02:03.123 UTC'])"))
+        assertThat(query("SELECT id FROM " + tableName + " WHERE data = MAP(ARRAY[timestamp '2012-01-01 01:02:03.123000 UTC'], ARRAY[timestamp '2012-02-01 01:02:03.123000 UTC'])"))
                 .matches("VALUES 1");
 
         assertUpdate("DROP TABLE " + tableName);
@@ -1069,15 +1077,15 @@ public abstract class BaseDeltaLakeConnectorSmokeTest
 
         String values =
                 """
-                (1, CAST(ROW(timestamp '2012-01-01 01:02:03.123 UTC') AS ROW(ts_tz timestamp with time zone))),
-                (2, CAST(ROW(NULL) AS ROW(ts_tz timestamp with time zone))),
-                (3, CAST(NULL AS ROW(ts_tz timestamp with time zone)))
+                (1, CAST(ROW(timestamp '2012-01-01 01:02:03.123000 UTC') AS ROW(ts_tz timestamp(6) with time zone))),
+                (2, CAST(ROW(NULL) AS ROW(ts_tz timestamp(6) with time zone))),
+                (3, CAST(NULL AS ROW(ts_tz timestamp(6) with time zone)))
                 """;
         assertUpdate("INSERT INTO " + tableName + " VALUES " + values, 3);
 
         assertThat(query("SELECT * FROM " + tableName))
                 .matches("VALUES " + values);
-        assertThat(query("SELECT id FROM " + tableName + " WHERE data = ROW(timestamp '2012-01-01 01:02:03.123 UTC')"))
+        assertThat(query("SELECT id FROM " + tableName + " WHERE data = ROW(timestamp '2012-01-01 01:02:03.123000 UTC')"))
                 .matches("VALUES 1");
 
         assertUpdate("DROP TABLE " + tableName);
@@ -1092,36 +1100,37 @@ public abstract class BaseDeltaLakeConnectorSmokeTest
 
         String values =
                 """
-                (1, CAST(ROW(ROW(timestamp '2012-01-01 01:02:03.123 UTC')) AS ROW(child ROW(grandchild timestamp with time zone)))),
-                (2, CAST(ROW(ROW(NULL)) AS ROW(child ROW(grandchild timestamp with time zone)))),
-                (3, CAST(NULL AS ROW(child ROW(grandchild timestamp with time zone))))
+                (1, CAST(ROW(ROW(timestamp '2012-01-01 01:02:03.123000 UTC')) AS ROW(child ROW(grandchild timestamp(6) with time zone)))),
+                (2, CAST(ROW(ROW(NULL)) AS ROW(child ROW(grandchild timestamp(6) with time zone)))),
+                (3, CAST(NULL AS ROW(child ROW(grandchild timestamp(6) with time zone))))
                 """;
         assertUpdate("INSERT INTO " + tableName + " VALUES " + values, 3);
 
         assertThat(query("SELECT * FROM " + tableName))
                 .matches("VALUES " + values);
-        assertThat(query("SELECT id FROM " + tableName + " WHERE parent = ROW(ROW(timestamp '2012-01-01 01:02:03.123 UTC'))"))
+        assertThat(query("SELECT id FROM " + tableName + " WHERE parent = ROW(ROW(timestamp '2012-01-01 01:02:03.123000 UTC'))"))
                 .matches("VALUES 1");
 
         assertUpdate("DROP TABLE " + tableName);
     }
 
     @Test
-    public void testTimestampWithTimeZoneInComplexTypesFails()
+    public void testTimestampWithTimeZoneInComplexTypes()
     {
-        String location = getLocationForTable("delta", "foo");
-        assertQueryFails(
-                "CREATE TABLE should_fail (a, b) WITH (location = '" + location + "') AS VALUES (ROW(timestamp '2012-10-31 01:00:00.1234 UTC', timestamp '2012-10-31 01:00:00.4321 UTC'), 1)",
-                "Unsupported type:.*");
-        assertQueryFails(
-                "CREATE TABLE should_fail (a) WITH (location = '" + location + "') AS VALUES ARRAY[timestamp '2012-10-31 01:00:00.1234 UTC', timestamp '2012-10-31 01:00:00.4321 UTC']",
-                "Unsupported type:.*");
-        assertQueryFails(
-                "CREATE TABLE should_fail (a) WITH (location = '" + location + "') AS VALUES MAP(ARRAY[ARRAY[timestamp '2012-10-31 01:00:00.1234 UTC', timestamp '2012-10-31 01:00:00.4321 UTC']], ARRAY[42])",
-                "Unsupported type:.*");
-        assertQueryFails(
-                "CREATE TABLE should_fail (a) WITH (location = '" + location + "') AS VALUES MAP(ARRAY[42], ARRAY[ARRAY[timestamp '2012-10-31 01:00:00.1234 UTC', timestamp '2012-10-31 01:00:00.4321 UTC']])",
-                "Unsupported type:.*");
+        String tableName = "test_timestamp_with_time_zone_in_complex_types_" + randomNameSuffix();
+        assertUpdate(
+                format("CREATE TABLE " + tableName + " (r, a, m) WITH (location = '%s') AS VALUES (" +
+                                "CAST(ROW(timestamp '2012-10-31 01:00:00.1234 UTC') AS ROW(ts timestamp(4) with time zone)), " +
+                                "ARRAY[timestamp '2012-10-31 01:00:00.1234 UTC'], " +
+                                "MAP(ARRAY[timestamp '2012-10-31 01:00:00.1234 UTC'], ARRAY[42]))",
+                        getLocationForTable(bucketName, tableName)),
+                1);
+        assertThat(query("SELECT r, a, m FROM " + tableName))
+                .matches("VALUES (" +
+                        "CAST(ROW(timestamp '2012-10-31 01:00:00.123400 UTC') AS ROW(ts timestamp(6) with time zone)), " +
+                        "ARRAY[timestamp '2012-10-31 01:00:00.123400 UTC'], " +
+                        "MAP(ARRAY[timestamp '2012-10-31 01:00:00.123400 UTC'], ARRAY[42]))");
+        assertUpdate("DROP TABLE " + tableName);
     }
 
     @Test
@@ -1141,18 +1150,18 @@ public abstract class BaseDeltaLakeConnectorSmokeTest
     {
         assertQuery(
                 "SELECT CAST(ts AS VARCHAR), i FROM old_timestamps",
-                "VALUES ('0099-12-30 01:02:03.000 UTC', 1), ('1582-10-15 01:02:03.000 UTC', 2), ('1960-01-01 01:02:03.000 UTC', 3), ('2020-01-01 01:02:03.000 UTC', 4);");
-        assertQuery("SELECT CAST(ts AS VARCHAR), i FROM old_timestamps WHERE ts = TIMESTAMP '0099-12-30 01:02:03 UTC'", "VALUES ('0099-12-30 01:02:03.000 UTC', 1)");
-        assertQuery("SELECT CAST(ts AS VARCHAR), i FROM old_timestamps WHERE ts = TIMESTAMP '1582-10-15 01:02:03 UTC'", "VALUES ('1582-10-15 01:02:03.000 UTC', 2)");
-        assertQuery("SELECT CAST(ts AS VARCHAR), i FROM old_timestamps WHERE ts = TIMESTAMP '1960-01-01 01:02:03 UTC'", "VALUES ('1960-01-01 01:02:03.000 UTC', 3)");
-        assertQuery("SELECT CAST(ts AS VARCHAR), i FROM old_timestamps WHERE ts = TIMESTAMP '2020-01-01 01:02:03 UTC'", "VALUES ('2020-01-01 01:02:03.000 UTC', 4)");
+                "VALUES ('0099-12-30 01:02:03.000000 UTC', 1), ('1582-10-15 01:02:03.000000 UTC', 2), ('1960-01-01 01:02:03.000000 UTC', 3), ('2020-01-01 01:02:03.000000 UTC', 4);");
+        assertQuery("SELECT CAST(ts AS VARCHAR), i FROM old_timestamps WHERE ts = TIMESTAMP '0099-12-30 01:02:03 UTC'", "VALUES ('0099-12-30 01:02:03.000000 UTC', 1)");
+        assertQuery("SELECT CAST(ts AS VARCHAR), i FROM old_timestamps WHERE ts = TIMESTAMP '1582-10-15 01:02:03 UTC'", "VALUES ('1582-10-15 01:02:03.000000 UTC', 2)");
+        assertQuery("SELECT CAST(ts AS VARCHAR), i FROM old_timestamps WHERE ts = TIMESTAMP '1960-01-01 01:02:03 UTC'", "VALUES ('1960-01-01 01:02:03.000000 UTC', 3)");
+        assertQuery("SELECT CAST(ts AS VARCHAR), i FROM old_timestamps WHERE ts = TIMESTAMP '2020-01-01 01:02:03 UTC'", "VALUES ('2020-01-01 01:02:03.000000 UTC', 4)");
     }
 
     @Test
     public void testSelectNestedTimestamps()
     {
-        assertQuery("SELECT CAST(col1[1].ts AS VARCHAR) FROM nested_timestamps", "VALUES '2010-02-03 12:11:10.000 UTC'");
-        assertQuery("SELECT CAST(col1[1].ts AS VARCHAR) FROM nested_timestamps_parquet_stats LIMIT 1", "VALUES '2010-02-03 12:11:10.000 UTC'");
+        assertQuery("SELECT CAST(col1[1].ts AS VARCHAR) FROM nested_timestamps", "VALUES '2010-02-03 12:11:10.000000 UTC'");
+        assertQuery("SELECT CAST(col1[1].ts AS VARCHAR) FROM nested_timestamps_parquet_stats LIMIT 1", "VALUES '2010-02-03 12:11:10.000000 UTC'");
     }
 
     @Test
@@ -1882,6 +1891,119 @@ public abstract class BaseDeltaLakeConnectorSmokeTest
             assertThat(getActiveFiles(tableName)).isEqualTo(updatedFiles);
             // old files should be cleaned up
             assertThat(getAllDataFilesFromTableDirectory(tableName)).isEqualTo(updatedFiles);
+        }
+        finally {
+            assertUpdate("DROP TABLE " + tableName);
+        }
+    }
+
+    @Test
+    public void testVacuumAfterDeleteWithDeletionVectors()
+            throws Exception
+    {
+        testVacuumAfterDeleteWithDeletionVectors(false);
+        testVacuumAfterDeleteWithDeletionVectors(true);
+    }
+
+    private void testVacuumAfterDeleteWithDeletionVectors(boolean objectStoreLayoutEnabled)
+            throws Exception
+    {
+        String catalog = getSession().getCatalog().orElseThrow();
+        String tableName = "test_vacuum_dv_delete_" + randomNameSuffix();
+        Session sessionWithShortRetentionUnlocked = Session.builder(getSession())
+                .setCatalogSessionProperty(catalog, "vacuum_min_retention", "0s")
+                .build();
+        assertUpdate(
+                format("CREATE TABLE %s (x int) WITH (location = '%s', deletion_vectors_enabled = true, object_store_layout_enabled = %s)",
+                        tableName,
+                        getLocationForTable(bucketName, tableName),
+                        objectStoreLayoutEnabled));
+        try {
+            assertUpdate("INSERT INTO " + tableName + " VALUES 1, 2, 3", 3);
+            assertUpdate("DELETE FROM " + tableName + " WHERE x = 2", 1);
+            Set<String> filesAfterFirstDelete = getAllDataFilesFromTableDirectory(tableName);
+            Set<String> firstDeletionVectors = deletionVectorFiles(filesAfterFirstDelete);
+            assertThat(firstDeletionVectors).hasSize(1);
+            String deletionVectorDirectory = ".*/" + tableName + "/";
+            if (objectStoreLayoutEnabled) {
+                deletionVectorDirectory += "[A-Za-z0-9]{2}/";
+            }
+            assertThat(getOnlyElement(firstDeletionVectors)).matches(deletionVectorDirectory + "deletion_vector_[0-9a-f-]+\\.bin");
+            assertThat(query("SELECT * FROM " + tableName)).matches("VALUES 1, 3");
+
+            assertUpdate("DELETE FROM " + tableName + " WHERE x = 3", 1);
+            Stopwatch timeSinceSecondDelete = Stopwatch.createStarted();
+            Set<String> filesAfterSecondDelete = getAllDataFilesFromTableDirectory(tableName);
+            Set<String> secondDeletionVectors = deletionVectorFiles(filesAfterSecondDelete);
+            assertThat(secondDeletionVectors).hasSize(2).containsAll(firstDeletionVectors);
+            assertThat(query("SELECT * FROM " + tableName)).matches("VALUES 1");
+            assertThat(query("SELECT count(*) FROM " + tableName)).matches("VALUES BIGINT '1'");
+
+            assertUpdate(sessionWithShortRetentionUnlocked, "CALL system.vacuum(schema_name => CURRENT_SCHEMA, table_name => '" + tableName + "', retention => '10m')");
+            assertThat(getAllDataFilesFromTableDirectory(tableName)).isEqualTo(filesAfterSecondDelete);
+            assertThat(query("SELECT * FROM " + tableName)).matches("VALUES 1");
+
+            MILLISECONDS.sleep(2_000 - timeSinceSecondDelete.elapsed(MILLISECONDS) + 1);
+            assertUpdate(sessionWithShortRetentionUnlocked, "CALL system.vacuum(schema_name => CURRENT_SCHEMA, table_name => '" + tableName + "', retention => '1s')");
+
+            Set<String> filesAfterVacuum = getAllDataFilesFromTableDirectory(tableName);
+            Set<String> activeFiles = getActiveFiles(tableName);
+            assertThat(filesAfterVacuum).containsAll(activeFiles);
+            assertThat(filesAfterVacuum).doesNotContainAnyElementsOf(firstDeletionVectors);
+            assertThat(deletionVectorFiles(filesAfterVacuum)).hasSize(1);
+            assertThat(query("SELECT * FROM " + tableName)).matches("VALUES 1");
+            assertThat(query("SELECT count(*) FROM " + tableName)).matches("VALUES BIGINT '1'");
+        }
+        finally {
+            assertUpdate("DROP TABLE " + tableName);
+        }
+    }
+
+    @Test
+    public void testVacuumAfterMergeWithDeletionVectors()
+            throws Exception
+    {
+        String catalog = getSession().getCatalog().orElseThrow();
+        String tableName = "test_vacuum_dv_merge_" + randomNameSuffix();
+        Session sessionWithShortRetentionUnlocked = Session.builder(getSession())
+                .setCatalogSessionProperty(catalog, "vacuum_min_retention", "0s")
+                .build();
+        assertUpdate(
+                format("CREATE TABLE %s (id int, v varchar) WITH (location = '%s', deletion_vectors_enabled = true)",
+                        tableName,
+                        getLocationForTable(bucketName, tableName)));
+        try {
+            assertUpdate("INSERT INTO " + tableName + " VALUES (1, 'a'), (2, 'b'), (3, 'c')", 3);
+            assertUpdate(
+                    "MERGE INTO " + tableName + " t USING (VALUES 2) AS s(id) ON (t.id = s.id) WHEN MATCHED THEN DELETE",
+                    1);
+            Set<String> firstDeletionVectors = deletionVectorFiles(getAllDataFilesFromTableDirectory(tableName));
+            assertThat(firstDeletionVectors).hasSize(1);
+            assertThat(query("SELECT * FROM " + tableName)).matches("VALUES (1, VARCHAR 'a'), (3, VARCHAR 'c')");
+
+            assertUpdate(
+                    "MERGE INTO " + tableName + " t USING (VALUES 3) AS s(id) ON (t.id = s.id) WHEN MATCHED THEN DELETE",
+                    1);
+            Stopwatch timeSinceSecondMerge = Stopwatch.createStarted();
+            Set<String> filesAfterSecondMerge = getAllDataFilesFromTableDirectory(tableName);
+            assertThat(deletionVectorFiles(filesAfterSecondMerge)).hasSize(2).containsAll(firstDeletionVectors);
+            assertThat(query("SELECT * FROM " + tableName)).matches("VALUES (1, VARCHAR 'a')");
+
+            assertUpdate(sessionWithShortRetentionUnlocked, "CALL system.vacuum(schema_name => CURRENT_SCHEMA, table_name => '" + tableName + "', retention => '10m')");
+            assertThat(getAllDataFilesFromTableDirectory(tableName)).isEqualTo(filesAfterSecondMerge);
+            assertThat(query("SELECT * FROM " + tableName)).matches("VALUES (1, VARCHAR 'a')");
+
+            MILLISECONDS.sleep(2_000 - timeSinceSecondMerge.elapsed(MILLISECONDS) + 1);
+            assertUpdate(sessionWithShortRetentionUnlocked, "CALL system.vacuum(schema_name => CURRENT_SCHEMA, table_name => '" + tableName + "', retention => '1s')");
+
+            Set<String> filesAfterVacuum = getAllDataFilesFromTableDirectory(tableName);
+            Set<String> activeFiles = getActiveFiles(tableName);
+            assertThat(activeFiles).isNotEmpty();
+            assertThat(filesAfterVacuum).containsAll(activeFiles);
+            assertThat(filesAfterVacuum).doesNotContainAnyElementsOf(firstDeletionVectors);
+            assertThat(deletionVectorFiles(filesAfterVacuum)).hasSize(1);
+            assertThat(query("SELECT * FROM " + tableName)).matches("VALUES (1, VARCHAR 'a')");
+            assertThat(query("SELECT count(*) FROM " + tableName)).matches("VALUES BIGINT '1'");
         }
         finally {
             assertUpdate("DROP TABLE " + tableName);
@@ -2980,6 +3102,13 @@ public abstract class BaseDeltaLakeConnectorSmokeTest
     {
         return getTableFiles(tableName).stream()
                 .filter(path -> !path.contains("/" + TRANSACTION_LOG_DIRECTORY))
+                .collect(toImmutableSet());
+    }
+
+    private static Set<String> deletionVectorFiles(Set<String> files)
+    {
+        return files.stream()
+                .filter(path -> path.matches(".*deletion_vector_[0-9a-f-]+\\.bin"))
                 .collect(toImmutableSet());
     }
 

@@ -647,6 +647,7 @@ final class ElasticsearchArrayPredicateTranslator
     private static boolean isAnalyzedTextArray(ElasticsearchColumnHandle column)
     {
         return column != null
+                && column.predicateMappingSafe()
                 && !column.supportsPredicates()
                 && column.type() instanceof ArrayType arrayType
                 && arrayType.getElementType() instanceof VarcharType
