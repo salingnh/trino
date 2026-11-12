@@ -129,7 +129,7 @@ public class ElasticsearchPushdownDiagnostics
         }
         switch (decision.reason()) {
             case EXACT_ARRAY, APPROXIMATE_ARRAY -> arrayMembershipTranslations.increment();
-            case EXACT_ANY_MATCH, APPROXIMATE_ANY_MATCH -> anyMatchTranslations.increment();
+            case EXACT_ANY_MATCH, PREFILTER_ANY_MATCH, APPROXIMATE_ANY_MATCH -> anyMatchTranslations.increment();
             case BOOLEAN_AND -> booleanAndTranslations.increment();
             case BOOLEAN_OR -> booleanOrTranslations.increment();
             case BOOLEAN_NOT_UNPROVEN -> booleanNotTranslations.increment();

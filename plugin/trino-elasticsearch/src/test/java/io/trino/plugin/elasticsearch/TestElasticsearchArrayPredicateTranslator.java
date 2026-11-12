@@ -16,6 +16,7 @@ package io.trino.plugin.elasticsearch;
 import io.trino.plugin.elasticsearch.client.IndexMetadata.DateTimeType;
 import io.trino.plugin.elasticsearch.client.IndexMetadata.PrimitiveType;
 import io.trino.plugin.elasticsearch.decoders.BooleanDecoder;
+import io.trino.plugin.elasticsearch.decoders.DoubleDecoder;
 import io.trino.plugin.elasticsearch.decoders.IntegerDecoder;
 import io.trino.plugin.elasticsearch.decoders.TimestampDecoder;
 import io.trino.plugin.elasticsearch.decoders.VarcharDecoder;
@@ -45,11 +46,13 @@ import static io.trino.plugin.elasticsearch.ElasticsearchPredicateTranslation.Re
 import static io.trino.plugin.elasticsearch.ElasticsearchPredicateTranslation.Reason.EXACT_ANY_MATCH;
 import static io.trino.plugin.elasticsearch.ElasticsearchPredicateTranslation.Reason.EXACT_ARRAY;
 import static io.trino.plugin.elasticsearch.ElasticsearchPredicateTranslation.Reason.FULL_TEXT_UNSAFE_APPROXIMATE;
+import static io.trino.plugin.elasticsearch.ElasticsearchPredicateTranslation.Reason.PREFILTER_ANY_MATCH;
 import static io.trino.plugin.elasticsearch.ElasticsearchPredicateTranslation.Reason.UNSUPPORTED_EXPRESSION;
 import static io.trino.plugin.elasticsearch.FullTextPushdownMode.SAFE;
 import static io.trino.plugin.elasticsearch.FullTextPushdownMode.UNSAFE;
 import static io.trino.plugin.elasticsearch.expression.ElasticsearchRemotePredicate.Enforcement.APPROXIMATE;
 import static io.trino.plugin.elasticsearch.expression.ElasticsearchRemotePredicate.Enforcement.EXACT;
+import static io.trino.plugin.elasticsearch.expression.ElasticsearchRemotePredicate.Enforcement.PREFILTER;
 import static io.trino.spi.expression.StandardFunctions.AND_FUNCTION_NAME;
 import static io.trino.spi.expression.StandardFunctions.ARRAY_CONSTRUCTOR_FUNCTION_NAME;
 import static io.trino.spi.expression.StandardFunctions.EQUAL_OPERATOR_FUNCTION_NAME;
@@ -57,8 +60,11 @@ import static io.trino.spi.expression.StandardFunctions.GREATER_THAN_OPERATOR_FU
 import static io.trino.spi.expression.StandardFunctions.IN_PREDICATE_FUNCTION_NAME;
 import static io.trino.spi.expression.StandardFunctions.LESS_THAN_OPERATOR_FUNCTION_NAME;
 import static io.trino.spi.expression.StandardFunctions.LIKE_FUNCTION_NAME;
+import static io.trino.spi.expression.StandardFunctions.MODULO_FUNCTION_NAME;
+import static io.trino.spi.expression.StandardFunctions.NOT_FUNCTION_NAME;
 import static io.trino.spi.expression.StandardFunctions.OR_FUNCTION_NAME;
 import static io.trino.spi.type.BooleanType.BOOLEAN;
+import static io.trino.spi.type.DoubleType.DOUBLE;
 import static io.trino.spi.type.IntegerType.INTEGER;
 import static io.trino.spi.type.TimestampType.TIMESTAMP_MILLIS;
 import static io.trino.spi.type.VarcharType.VARCHAR;
@@ -302,7 +308,7 @@ public class TestElasticsearchArrayPredicateTranslator
     }
 
     @Test
-    public void testAnyMatchUnsafeConjunctionRemainsResidual()
+    public void testAnyMatchConjunctionUsesDocumentCandidateAndRetainsSameElementResidual()
     {
         ArrayType arrayType = new ArrayType(INTEGER);
         ElasticsearchColumnHandle column = integerArrayColumn("Numbers");
@@ -313,7 +319,188 @@ public class TestElasticsearchArrayPredicateTranslator
                         new Call(BOOLEAN, EQUAL_OPERATOR_FUNCTION_NAME, List.of(element, new Constant(1L, INTEGER))),
                         new Call(BOOLEAN, EQUAL_OPERATOR_FUNCTION_NAME, List.of(element, new Constant(2L, INTEGER))))));
 
-        assertThat(translate(anyMatch, Map.of("numbers", column))).isEmpty();
+        assertPrefilter(anyMatch, column, new ElasticsearchRemotePredicate.And(List.of(
+                new ElasticsearchRemotePredicate.Term("Numbers", 1L),
+                new ElasticsearchRemotePredicate.Term("Numbers", 2L))));
+    }
+
+    @Test
+    public void testPartialAnyMatchAndPrefiltersInEveryFullTextMode()
+    {
+        Call anyMatch = anyMatch("numbers", new ArrayType(INTEGER), element -> new Call(
+                BOOLEAN,
+                AND_FUNCTION_NAME,
+                List.of(greaterThan(element, 10), moduloIsZero(element, 2))));
+
+        for (FullTextPushdownMode mode : FullTextPushdownMode.values()) {
+            ElasticsearchPredicateTranslation<ConnectorExpression> translation = translateWithContract(
+                    anyMatch, Map.of("numbers", integerArrayColumn("Numbers")), mode).orElseThrow();
+            assertThat(translation.remotePredicate()).contains(new ElasticsearchRemotePredicate.Enforced(lowerRange(10), PREFILTER));
+            assertThat(translation.enforcement()).contains(PREFILTER);
+            assertThat(translation.reason()).isEqualTo(PREFILTER_ANY_MATCH);
+            assertThat(translation.remaining()).isEmpty();
+            assertThat(translation.residual()).contains(anyMatch);
+        }
+    }
+
+    @Test
+    public void testPartialAnyMatchOrRequiresCandidateForEveryBranch()
+    {
+        Call anyMatch = anyMatch("numbers", new ArrayType(INTEGER), element -> new Call(
+                BOOLEAN,
+                OR_FUNCTION_NAME,
+                List.of(
+                        new Call(BOOLEAN, AND_FUNCTION_NAME, List.of(greaterThan(element, 10), moduloIsZero(element, 2))),
+                        new Call(BOOLEAN, AND_FUNCTION_NAME, List.of(greaterThan(element, 20), moduloIsZero(element, 3))))));
+
+        assertPrefilter(anyMatch, integerArrayColumn("Numbers"), new ElasticsearchRemotePredicate.Or(List.of(lowerRange(10), lowerRange(20))));
+
+        Call missingBranch = anyMatch("numbers", new ArrayType(INTEGER), element -> new Call(
+                BOOLEAN, OR_FUNCTION_NAME, List.of(greaterThan(element, 10), moduloIsZero(element, 2))));
+        assertThat(translate(missingBranch, Map.of("numbers", integerArrayColumn("Numbers")))).isEmpty();
+    }
+
+    @Test
+    public void testPartialAnyMatchAndCanSkipUnrestrictedOrAndNot()
+    {
+        Call anyMatch = anyMatch("numbers", new ArrayType(INTEGER), element -> new Call(
+                BOOLEAN,
+                AND_FUNCTION_NAME,
+                List.of(
+                        greaterThan(element, 10),
+                        new Call(BOOLEAN, OR_FUNCTION_NAME, List.of(greaterThan(element, 20), moduloIsZero(element, 2))),
+                        new Call(BOOLEAN, NOT_FUNCTION_NAME, List.of(moduloIsZero(element, 3))))));
+
+        assertPrefilter(anyMatch, integerArrayColumn("Numbers"), lowerRange(10));
+
+        Call negated = anyMatch("numbers", new ArrayType(INTEGER), element -> new Call(
+                BOOLEAN, NOT_FUNCTION_NAME, List.of(greaterThan(element, 10))));
+        assertThat(translate(negated, Map.of("numbers", integerArrayColumn("Numbers")))).isEmpty();
+    }
+
+    @Test
+    public void testPartialAnyMatchPreservesFusedRangeSubtree()
+    {
+        Call anyMatch = anyMatch("numbers", new ArrayType(INTEGER), element -> new Call(
+                BOOLEAN,
+                AND_FUNCTION_NAME,
+                List.of(
+                        new Call(BOOLEAN, AND_FUNCTION_NAME, List.of(
+                                greaterThan(element, 10),
+                                new Call(BOOLEAN, LESS_THAN_OPERATOR_FUNCTION_NAME, List.of(element, new Constant(20L, INTEGER))))),
+                        moduloIsZero(element, 2))));
+
+        assertPrefilter(anyMatch, integerArrayColumn("Numbers"), new ElasticsearchRemotePredicate.Range(
+                "Numbers",
+                Optional.of(new ElasticsearchRemotePredicate.Bound(10L, false)),
+                Optional.of(new ElasticsearchRemotePredicate.Bound(20L, false))));
+    }
+
+    @Test
+    public void testPartialAnyMatchKeepsIndependentDocumentRanges()
+    {
+        Call anyMatch = anyMatch("numbers", new ArrayType(INTEGER), element -> new Call(
+                BOOLEAN,
+                AND_FUNCTION_NAME,
+                List.of(greaterThan(element, 10), greaterThan(element, 20), moduloIsZero(element, 2))));
+
+        assertPrefilter(anyMatch, integerArrayColumn("Numbers"), new ElasticsearchRemotePredicate.And(List.of(lowerRange(10), lowerRange(20))));
+    }
+
+    @Test
+    public void testPartialAnyMatchRejectsUnsafeFloatingPointCandidate()
+    {
+        ElasticsearchColumnHandle column = new ElasticsearchColumnHandle(
+                List.of("Numbers"), new ArrayType(DOUBLE), new PrimitiveType("double"), new DoubleDecoder.Descriptor("Numbers"), false);
+        for (double value : new double[] {0.0, -0.0, Double.NaN, Double.POSITIVE_INFINITY, Double.NEGATIVE_INFINITY}) {
+            Call anyMatch = anyMatch("numbers", new ArrayType(DOUBLE), element -> new Call(
+                    BOOLEAN,
+                    AND_FUNCTION_NAME,
+                    List.of(
+                            new Call(BOOLEAN, EQUAL_OPERATOR_FUNCTION_NAME, List.of(element, new Constant(value, DOUBLE))),
+                            new Call(BOOLEAN, new FunctionName("is_finite"), List.of(element)))));
+            assertThat(translate(anyMatch, Map.of("numbers", column))).isEmpty();
+        }
+
+        Call supported = anyMatch("numbers", new ArrayType(DOUBLE), element -> new Call(
+                BOOLEAN,
+                AND_FUNCTION_NAME,
+                List.of(
+                        new Call(BOOLEAN, EQUAL_OPERATOR_FUNCTION_NAME, List.of(element, new Constant(10.0, DOUBLE))),
+                        new Call(BOOLEAN, new FunctionName("is_finite"), List.of(element)))));
+        assertPrefilter(supported, column, new ElasticsearchRemotePredicate.Term("Numbers", 10.0));
+    }
+
+    @Test
+    public void testPartialAnyMatchRejectsUnsafeMapping()
+    {
+        Call anyMatch = anyMatch("numbers", new ArrayType(INTEGER), element -> new Call(
+                BOOLEAN, AND_FUNCTION_NAME, List.of(greaterThan(element, 10), moduloIsZero(element, 2))));
+        for (ElasticsearchColumnHandle column : List.of(
+                new ElasticsearchColumnHandle(List.of("Numbers"), new ArrayType(INTEGER), new PrimitiveType("integer", Optional.empty(), true, false), new IntegerDecoder.Descriptor("Numbers"), false),
+                new ElasticsearchColumnHandle(List.of("Numbers"), new ArrayType(INTEGER), new PrimitiveType("integer"), new IntegerDecoder.Descriptor("Numbers"), false, true, false))) {
+            assertThat(translate(anyMatch, Map.of("numbers", column))).isEmpty();
+        }
+    }
+
+    @Test
+    public void testPartialAnyMatchRejectsOverBudgetCandidateWithoutLosingOrBranch()
+    {
+        Call anyMatch = anyMatch("numbers", new ArrayType(INTEGER), element -> new Call(
+                BOOLEAN,
+                OR_FUNCTION_NAME,
+                List.of(
+                        new Call(BOOLEAN, AND_FUNCTION_NAME, List.of(greaterThan(element, 10), moduloIsZero(element, 2))),
+                        new Call(BOOLEAN, AND_FUNCTION_NAME, List.of(
+                                new Call(BOOLEAN, IN_PREDICATE_FUNCTION_NAME, List.of(element, new Constant(integerBlock(1, 2, 3), new ArrayType(INTEGER)))),
+                                moduloIsZero(element, 3))))));
+
+        for (ElasticsearchPredicateCompositionPolicy policy : List.of(
+                new ElasticsearchPredicateCompositionPolicy(2, 10, 10, 4_096),
+                new ElasticsearchPredicateCompositionPolicy(10, 10, 1, 4_096),
+                new ElasticsearchPredicateCompositionPolicy(10, 10, 10, 1))) {
+            ElasticsearchPredicateTranslation<ConnectorExpression> translation = translateWithContract(
+                    anyMatch, Map.of("numbers", integerArrayColumn("Numbers")), SAFE, policy).orElseThrow();
+            assertThat(translation.remotePredicate()).isEmpty();
+            assertThat(translation.remaining()).isEmpty();
+            assertThat(translation.residual()).contains(anyMatch);
+        }
+    }
+
+    @Test
+    public void testPartialAnyMatchRespectsBooleanDepthBudget()
+    {
+        Call anyMatch = anyMatch("numbers", new ArrayType(INTEGER), element -> new Call(
+                BOOLEAN,
+                AND_FUNCTION_NAME,
+                List.of(
+                        greaterThan(element, 10),
+                        new Call(BOOLEAN, OR_FUNCTION_NAME, List.of(
+                                new Call(BOOLEAN, AND_FUNCTION_NAME, List.of(greaterThan(element, 20), moduloIsZero(element, 2))),
+                                new Call(BOOLEAN, AND_FUNCTION_NAME, List.of(greaterThan(element, 30), moduloIsZero(element, 3))))))));
+
+        ElasticsearchPredicateTranslation<ConnectorExpression> translation = translateWithContract(
+                anyMatch,
+                Map.of("numbers", integerArrayColumn("Numbers")),
+                SAFE,
+                new ElasticsearchPredicateCompositionPolicy(10, 10, 10, 4_096, 1)).orElseThrow();
+        assertThat(translation.remotePredicate()).isEmpty();
+        assertThat(translation.remaining()).isEmpty();
+        assertThat(translation.residual()).contains(anyMatch);
+    }
+
+    @Test
+    public void testPartialAnyMatchDoesNotUseNullOrForeignVariableAsCandidate()
+    {
+        Call anyMatch = anyMatch("numbers", new ArrayType(INTEGER), element -> new Call(
+                BOOLEAN,
+                AND_FUNCTION_NAME,
+                List.of(
+                        greaterThan(element, 10),
+                        greaterThan(new Variable("other", INTEGER), 20),
+                        new Call(BOOLEAN, EQUAL_OPERATOR_FUNCTION_NAME, List.of(element, new Constant(null, INTEGER))))));
+
+        assertPrefilter(anyMatch, integerArrayColumn("Numbers"), lowerRange(10));
     }
 
     @Test
@@ -882,6 +1069,33 @@ public class TestElasticsearchArrayPredicateTranslator
         assertThat(translation.remotePredicate()).contains(approximatePredicate);
         assertThat(translation.remaining()).isEmpty();
         assertThat(translation.residual()).isEmpty();
+    }
+
+    private static void assertPrefilter(Call source, ElasticsearchColumnHandle column, ElasticsearchRemotePredicate candidate)
+    {
+        ElasticsearchPredicateTranslation<ConnectorExpression> translation = translateWithContract(source, Map.of("numbers", column), SAFE).orElseThrow();
+        assertThat(translation.remotePredicate()).contains(new ElasticsearchRemotePredicate.Enforced(candidate, PREFILTER));
+        assertThat(translation.enforcement()).contains(PREFILTER);
+        assertThat(translation.reason()).isEqualTo(PREFILTER_ANY_MATCH);
+        assertThat(translation.remaining()).isEmpty();
+        assertThat(translation.residual()).contains(source);
+    }
+
+    private static Call greaterThan(Variable element, long value)
+    {
+        return new Call(BOOLEAN, GREATER_THAN_OPERATOR_FUNCTION_NAME, List.of(element, new Constant(value, INTEGER)));
+    }
+
+    private static Call moduloIsZero(Variable element, long divisor)
+    {
+        return new Call(BOOLEAN, EQUAL_OPERATOR_FUNCTION_NAME, List.of(
+                new Call(INTEGER, MODULO_FUNCTION_NAME, List.of(element, new Constant(divisor, INTEGER))),
+                new Constant(0L, INTEGER)));
+    }
+
+    private static ElasticsearchRemotePredicate.Range lowerRange(long value)
+    {
+        return new ElasticsearchRemotePredicate.Range("Numbers", Optional.of(new ElasticsearchRemotePredicate.Bound(value, false)), Optional.empty());
     }
 
     private static Optional<ElasticsearchPredicateTranslation<ConnectorExpression>> translateWithContract(

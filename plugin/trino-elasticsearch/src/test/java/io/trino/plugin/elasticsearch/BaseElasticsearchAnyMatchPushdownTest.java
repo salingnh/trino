@@ -17,6 +17,8 @@ import com.fasterxml.jackson.databind.json.JsonMapper;
 import com.google.common.collect.ImmutableList;
 import com.google.common.collect.ImmutableMap;
 import io.trino.sql.planner.plan.FilterNode;
+import io.trino.testing.QueryRunner;
+import io.trino.testing.QueryRunner.MaterializedResultWithPlan;
 import org.elasticsearch.client.Request;
 import org.elasticsearch.client.RestClient;
 import org.intellij.lang.annotations.Language;
@@ -24,6 +26,8 @@ import org.junit.jupiter.api.Test;
 
 import java.io.IOException;
 import java.util.ArrayList;
+import java.util.Arrays;
+import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 
@@ -119,6 +123,77 @@ public abstract class BaseElasticsearchAnyMatchPushdownTest
             assertThat(query("SELECT id FROM " + indexName + " WHERE any_match(text_tags, x -> x = 'telegram')"))
                     .matches("VALUES VARCHAR '1'")
                     .isNotFullyPushedDown(FilterNode.class);
+        }
+        finally {
+            deleteIndex(indexName);
+        }
+    }
+
+    @Test
+    public void testAnyMatchNecessaryConditionPrefilter()
+            throws IOException
+    {
+        String indexName = "any_match_prefilter_" + randomNameSuffix();
+        @Language("JSON")
+        String properties =
+                """
+                {
+                  "_meta": { "trino": { "numbers": { "isArray": true } } },
+                  "properties": {
+                    "id": { "type": "keyword" },
+                    "numbers": { "type": "integer" }
+                  }
+                }
+                """;
+        createIndex(indexName, properties);
+        try {
+            index(indexName, ImmutableMap.of("id", "1", "numbers", List.of(2, 4)));
+            index(indexName, ImmutableMap.of("id", "2", "numbers", List.of(11, 13)));
+            index(indexName, ImmutableMap.of("id", "3", "numbers", List.of(3, 12)));
+            // The conditions hold on different elements. A modulo-only residual would admit this row.
+            index(indexName, ImmutableMap.of("id", "4", "numbers", List.of(2, 11)));
+            index(indexName, ImmutableMap.of("id", "5", "numbers", Arrays.asList(null, 12)));
+            index(indexName, ImmutableMap.of("id", "6", "numbers", Arrays.asList(null, 11)));
+            index(indexName, ImmutableMap.of("id", "7", "numbers", List.of()));
+            index(indexName, ImmutableMap.of("id", "8"));
+            index(indexName, ImmutableMap.of("id", "9", "numbers", Arrays.asList((Integer) null)));
+            index(indexName, ImmutableMap.of("id", "10", "numbers", List.of(-3)));
+            index(indexName, ImmutableMap.of("id", "11", "numbers", List.of(-2)));
+            Map<String, Object> nullArray = new HashMap<>();
+            nullArray.put("id", "12");
+            nullArray.put("numbers", null);
+            index(indexName, nullArray);
+
+            String predicate = "any_match(numbers, x -> x > 10 AND mod(x, 2) = 0)";
+            String sql = "SELECT id FROM " + indexName + " WHERE " + predicate;
+            assertThat(query(sql))
+                    .matches("VALUES VARCHAR '3', VARCHAR '5'")
+                    .isNotFullyPushedDown(FilterNode.class);
+            assertThat(query("SELECT count(*) FROM " + indexName + " WHERE " + predicate))
+                    .matches("VALUES BIGINT '2'")
+                    .isNotFullyPushedDown(FilterNode.class);
+            assertThat(query(sql + " ORDER BY id LIMIT 1"))
+                    .matches("VALUES VARCHAR '3'")
+                    .isNotFullyPushedDown(FilterNode.class);
+
+            assertThat(query("SELECT id FROM " + indexName + " WHERE any_match(numbers, x -> " +
+                    "(x > 10 AND mod(x, 2) = 0) OR (x < 0 AND mod(x, 3) = 0))"))
+                    .matches("VALUES VARCHAR '3', VARCHAR '5', VARCHAR '10'")
+                    .isNotFullyPushedDown(FilterNode.class);
+            // The unsupported OR branch must retain rows such as [2, 4], which have no value greater than 10.
+            assertThat(query("SELECT id FROM " + indexName + " WHERE any_match(numbers, x -> x > 10 OR mod(x, 2) = 0)"))
+                    .matches("VALUES VARCHAR '1', VARCHAR '2', VARCHAR '3', VARCHAR '4', VARCHAR '5', VARCHAR '6', VARCHAR '11'")
+                    .isNotFullyPushedDown(FilterNode.class);
+
+            QueryRunner runner = getQueryRunner();
+            MaterializedResultWithPlan filtered = runner.executeWithPlan(getSession(), sql);
+            MaterializedResultWithPlan unfiltered = runner.executeWithPlan(
+                    getSession(),
+                    "SELECT id FROM " + indexName + " WHERE any_match(numbers, x -> mod(x, 2) = 0)");
+            long filteredRows = runner.getCoordinator().getQueryManager().getFullQueryInfo(filtered.queryId()).getQueryStats().getPhysicalInputPositions();
+            long unfilteredRows = runner.getCoordinator().getQueryManager().getFullQueryInfo(unfiltered.queryId()).getQueryStats().getPhysicalInputPositions();
+            assertThat(filteredRows).as("documents read after the necessary-condition prefilter").isEqualTo(5);
+            assertThat(unfilteredRows).as("documents read without a native candidate").isEqualTo(12);
         }
         finally {
             deleteIndex(indexName);

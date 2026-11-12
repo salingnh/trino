@@ -570,6 +570,28 @@ following data types:
 
 No other data types are supported for predicate push down.
 
+### Array predicate prefiltering
+
+For primitive arrays with compatible exact mappings, the connector can use a
+necessary condition from an `any_match` lambda as an Elasticsearch prefilter when
+the whole lambda cannot be pushed down exactly. For example:
+
+```sql
+SELECT id
+FROM events
+WHERE any_match(numbers, x -> x > 10 AND mod(x, 2) = 0);
+```
+
+Elasticsearch filters documents to those with a `numbers` value greater than 10.
+Trino then evaluates the complete original lambda, so the same element must be
+both greater than 10 and even. The modulo expression itself is not pushed down.
+
+An `AND` can use necessary conditions from a subset of its branches. An `OR`
+requires a safe candidate for every branch; `x > 10 OR mod(x, 2) = 0` remains
+local. Prefilters always retain the original lambda for evaluation in Trino,
+and are omitted when mapping safety or query resource limits cannot be met.
+Analyzed-text array behavior is controlled separately by the full-text mode.
+
 ### Prefix predicate push down
 
 Predicates that match a string prefix are pushed down as an Elasticsearch

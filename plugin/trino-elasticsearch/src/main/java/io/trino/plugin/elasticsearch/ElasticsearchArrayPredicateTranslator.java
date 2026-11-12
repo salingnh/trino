@@ -37,6 +37,7 @@ import static io.trino.plugin.elasticsearch.ElasticsearchPredicateTranslation.Re
 import static io.trino.plugin.elasticsearch.ElasticsearchPredicateTranslation.Reason.APPROXIMATE_ARRAY;
 import static io.trino.plugin.elasticsearch.ElasticsearchPredicateTranslation.Reason.EXACT_ANY_MATCH;
 import static io.trino.plugin.elasticsearch.ElasticsearchPredicateTranslation.Reason.EXACT_ARRAY;
+import static io.trino.plugin.elasticsearch.ElasticsearchPredicateTranslation.Reason.PREFILTER_ANY_MATCH;
 import static io.trino.plugin.elasticsearch.ElasticsearchPredicateTranslation.Reason.UNSUPPORTED_EXPRESSION;
 import static io.trino.spi.expression.StandardFunctions.AND_FUNCTION_NAME;
 import static io.trino.spi.expression.StandardFunctions.ARRAY_CONSTRUCTOR_FUNCTION_NAME;
@@ -215,11 +216,88 @@ final class ElasticsearchArrayPredicateTranslator
                     policy);
         }
 
-        return exactOrUnsupported(
-                call,
-                translateAnyMatchBody(lambda.getBody(), lambdaVariable, column, elementType.orElseThrow()),
-                EXACT_ANY_MATCH,
-                policy);
+        Optional<ElasticsearchRemotePredicate> exact = translateAnyMatchBody(lambda.getBody(), lambdaVariable, column, elementType.orElseThrow());
+        if (exact.isPresent()) {
+            return exactOrUnsupported(call, exact, EXACT_ANY_MATCH, policy);
+        }
+        if (exactArrayElementType(column).isEmpty()) {
+            return ElasticsearchPredicateTranslation.unsupported(call, UNSUPPORTED_EXPRESSION);
+        }
+
+        Optional<ElasticsearchRemotePredicate> candidate = extractNecessaryCondition(lambda.getBody(), lambdaVariable, column, elementType.orElseThrow());
+        if (candidate.isEmpty()) {
+            return ElasticsearchPredicateTranslation.unsupported(call, UNSUPPORTED_EXPRESSION);
+        }
+        if (!ElasticsearchPredicateComposer.isWithinRequestBudget(candidate.orElseThrow(), policy)) {
+            return ElasticsearchPredicateTranslation.residual(call, UNSUPPORTED_EXPRESSION);
+        }
+        return ElasticsearchPredicateTranslation.prefilter(candidate.orElseThrow(), call, PREFILTER_ANY_MATCH);
+    }
+
+    /**
+     * Returns a document-level necessary condition for a positive existential lambda. An exact subtree is already a
+     * valid candidate. AND may keep candidates from any children, while OR must retain a candidate for every child.
+     * An empty result means no useful restriction, not false. These predicates may match different array elements,
+     * so the caller must keep the complete original any_match as a residual, even when every child has a candidate.
+     */
+    private static Optional<ElasticsearchRemotePredicate> extractNecessaryCondition(
+            ConnectorExpression expression,
+            Variable lambdaVariable,
+            ElasticsearchColumnHandle column,
+            Type elementType)
+    {
+        Optional<ElasticsearchRemotePredicate> exact = translateAnyMatchBody(expression, lambdaVariable, column, elementType);
+        if (exact.isPresent() && isSafeNecessaryCondition(exact.orElseThrow())) {
+            return exact;
+        }
+        if (!(expression instanceof Call call)) {
+            return Optional.empty();
+        }
+        boolean conjunction = AND_FUNCTION_NAME.equals(call.getFunctionName());
+        boolean disjunction = OR_FUNCTION_NAME.equals(call.getFunctionName());
+        if (!conjunction && !disjunction) {
+            return Optional.empty();
+        }
+
+        List<ElasticsearchRemotePredicate> candidates = new ArrayList<>();
+        for (ConnectorExpression argument : call.getArguments()) {
+            Optional<ElasticsearchRemotePredicate> candidate = extractNecessaryCondition(argument, lambdaVariable, column, elementType);
+            if (candidate.isEmpty()) {
+                if (disjunction) {
+                    return Optional.empty();
+                }
+                continue;
+            }
+            candidates.add(candidate.orElseThrow());
+        }
+        if (conjunction) {
+            return ElasticsearchRemotePredicateNormalizer.and(candidates);
+        }
+        return ElasticsearchRemotePredicateNormalizer.or(candidates);
+    }
+
+    private static boolean isSafeNecessaryCondition(ElasticsearchRemotePredicate predicate)
+    {
+        return switch (predicate) {
+            case ElasticsearchRemotePredicate.And and -> and.predicates().stream().allMatch(ElasticsearchArrayPredicateTranslator::isSafeNecessaryCondition);
+            case ElasticsearchRemotePredicate.Or or -> or.predicates().stream().allMatch(ElasticsearchArrayPredicateTranslator::isSafeNecessaryCondition);
+            case ElasticsearchRemotePredicate.Term term -> isSafePrefilterValue(term.value());
+            case ElasticsearchRemotePredicate.Terms terms -> terms.values().stream().allMatch(ElasticsearchArrayPredicateTranslator::isSafePrefilterValue);
+            case ElasticsearchRemotePredicate.Range range -> range.lower().map(bound -> isSafePrefilterValue(bound.value())).orElse(true)
+                    && range.upper().map(bound -> isSafePrefilterValue(bound.value())).orElse(true);
+            default -> false;
+        };
+    }
+
+    private static boolean isSafePrefilterValue(ElasticsearchRemotePredicate.Value value)
+    {
+        if (value.type() != ElasticsearchRemotePredicate.ValueType.DOUBLE) {
+            return true;
+        }
+        // Like scalar domain translation, do not assume SQL equality/order for signed zero or NaN. A residual cannot
+        // recover a document rejected by a non-equivalent remote bound. Non-finite constants stay local as well.
+        double number = Double.parseDouble(value.value());
+        return Double.isFinite(number) && number != 0.0;
     }
 
     private static ElasticsearchPredicateTranslation<ConnectorExpression> translateAnalyzedAnyMatch(

@@ -46,6 +46,21 @@ import static org.assertj.core.api.Assertions.assertThat;
 public class TestElasticsearchPushdownDiagnostics
 {
     @Test
+    public void testAnyMatchPrefilterDiagnostics()
+    {
+        ElasticsearchPushdownDiagnostics diagnostics = new ElasticsearchPushdownDiagnostics();
+        diagnostics.recordTranslation(new Decision(Reason.PREFILTER_ANY_MATCH, Optional.of(PREFILTER), true, false, true, List.of()));
+
+        ElasticsearchPushdownDiagnostics.Snapshot snapshot = diagnostics.snapshot();
+        assertThat(snapshot.anyMatchTranslations()).isEqualTo(1);
+        assertThat(snapshot.prefilterTranslations()).isEqualTo(1);
+        assertThat(snapshot.residualTranslations()).isEqualTo(1);
+        assertThat(snapshot.exactTranslations()).isZero();
+        assertThat(snapshot.approximateTranslations()).isZero();
+        assertThat(snapshot.translationReasonCounts()).containsEntry(Reason.PREFILTER_ANY_MATCH.name(), 1L);
+    }
+
+    @Test
     public void testJmxExportReadsLiveDiagnosticState()
             throws Exception
     {
