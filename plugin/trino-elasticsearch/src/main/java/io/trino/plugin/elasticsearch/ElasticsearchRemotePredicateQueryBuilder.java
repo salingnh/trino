@@ -38,6 +38,15 @@ final class ElasticsearchRemotePredicateQueryBuilder
                     "bool",
                     JSON.objectNode().set("must_not", JSON.arrayNode().add(build(not.predicate()))));
             case ElasticsearchRemotePredicate.Enforced enforced -> build(enforced.predicate());
+            case ElasticsearchRemotePredicate.ArrayScript script -> {
+                ObjectNode parameters = JSON.objectNode();
+                script.parameters().forEach((name, value) -> parameters.set(name, toJsonValue(value)));
+                ObjectNode body = JSON.objectNode()
+                        .put("lang", "painless")
+                        .put("source", script.source());
+                body.set("params", parameters);
+                yield JSON.objectNode().set("script", JSON.objectNode().set("script", body));
+            }
             case ElasticsearchRemotePredicate.Term term -> JSON.objectNode().set(
                     "term",
                     JSON.objectNode().set(term.field(), toJsonValue(term.value())));

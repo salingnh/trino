@@ -75,6 +75,16 @@ final class ElasticsearchPredicatePushdownPlanner
             FullTextPushdownMode fullTextMode,
             ElasticsearchPredicateCompositionPolicy policy)
     {
+        return plan(session, constraint, fullTextMode, policy, false);
+    }
+
+    static Result plan(
+            ConnectorSession session,
+            Constraint constraint,
+            FullTextPushdownMode fullTextMode,
+            ElasticsearchPredicateCompositionPolicy policy,
+            boolean arrayScriptPushdownEnabled)
+    {
         requireNonNull(session, "session is null");
         requireNonNull(constraint, "constraint is null");
         requireNonNull(fullTextMode, "fullTextMode is null");
@@ -107,7 +117,8 @@ final class ElasticsearchPredicatePushdownPlanner
                 normalizedConstraint.getExpression(),
                 normalizedConstraint.getAssignments(),
                 fullTextMode,
-                policy);
+                policy,
+                arrayScriptPushdownEnabled);
         decisions.add(expressionTranslation.decision());
         expressionTranslation.remotePredicate().ifPresent(remotePredicates::add);
 
@@ -174,7 +185,8 @@ final class ElasticsearchPredicatePushdownPlanner
             ConnectorExpression expression,
             Map<String, ColumnHandle> assignments,
             FullTextPushdownMode fullTextMode,
-            ElasticsearchPredicateCompositionPolicy policy)
+            ElasticsearchPredicateCompositionPolicy policy,
+            boolean arrayScriptPushdownEnabled)
     {
         requireNonNull(expression, "expression is null");
         if (expression.equals(TRUE)) {
@@ -187,7 +199,7 @@ final class ElasticsearchPredicatePushdownPlanner
             }
             List<ElasticsearchPredicateTranslation<ConnectorExpression>> children = call.getArguments().stream()
                     .filter(argument -> !argument.equals(TRUE))
-                    .map(argument -> translateExpression(session, argument, assignments, fullTextMode, policy))
+                    .map(argument -> translateExpression(session, argument, assignments, fullTextMode, policy, arrayScriptPushdownEnabled))
                     .toList();
             if (children.isEmpty()) {
                 return ElasticsearchPredicateTranslation.noop(Reason.BOOLEAN_AND);
@@ -206,7 +218,7 @@ final class ElasticsearchPredicatePushdownPlanner
                 return ElasticsearchPredicateTranslation.unsupported(expression, Reason.BOOLEAN_OR);
             }
             List<ElasticsearchPredicateTranslation<ConnectorExpression>> children = arguments.stream()
-                    .map(argument -> translateExpression(session, argument, assignments, fullTextMode, policy))
+                    .map(argument -> translateExpression(session, argument, assignments, fullTextMode, policy, arrayScriptPushdownEnabled))
                     .toList();
             return ElasticsearchPredicateComposer.or(expression, children, policy);
         }
@@ -220,7 +232,8 @@ final class ElasticsearchPredicatePushdownPlanner
                 expression,
                 assignments,
                 fullTextMode,
-                policy);
+                policy,
+                arrayScriptPushdownEnabled);
         if (arrayTranslation.isPresent()) {
             return arrayTranslation.orElseThrow();
         }

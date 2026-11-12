@@ -25,6 +25,7 @@ import javax.management.MBeanServerFactory;
 import javax.management.ObjectName;
 
 import java.util.List;
+import java.util.Map;
 import java.util.Optional;
 import java.util.concurrent.CopyOnWriteArrayList;
 import java.util.logging.Handler;
@@ -45,6 +46,21 @@ import static org.assertj.core.api.Assertions.assertThat;
 
 public class TestElasticsearchPushdownDiagnostics
 {
+    @Test
+    public void testArrayScriptDiagnostics()
+    {
+        ElasticsearchPushdownDiagnostics diagnostics = new ElasticsearchPushdownDiagnostics();
+        diagnostics.recordTranslation(new Decision(Reason.EXACT_ARRAY_SCRIPT, Optional.of(EXACT), true, false, false, List.of()));
+        diagnostics.recordRemotePredicate(new ElasticsearchRemotePredicate.ArrayScript(
+                "Numbers",
+                "return true;",
+                Map.of("field", ElasticsearchRemotePredicate.Value.of("Numbers"))));
+        assertThat(diagnostics.snapshot().anyMatchTranslations()).isEqualTo(1);
+        assertThat(diagnostics.snapshot().arrayScriptPredicates()).isEqualTo(1);
+        assertThat(diagnostics.getArrayScriptPredicates()).isEqualTo(1);
+        assertThat(diagnostics.getTranslationReasonCounts()).containsEntry(Reason.EXACT_ARRAY_SCRIPT.name(), 1L);
+    }
+
     @Test
     public void testAnyMatchPrefilterDiagnostics()
     {

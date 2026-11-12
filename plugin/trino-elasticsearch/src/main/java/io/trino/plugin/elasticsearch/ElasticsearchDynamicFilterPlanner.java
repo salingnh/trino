@@ -247,7 +247,8 @@ final class ElasticsearchDynamicFilterPlanner
                  ElasticsearchRemotePredicate.Regexp _,
                  ElasticsearchRemotePredicate.MatchPhrase _,
                  ElasticsearchRemotePredicate.MatchPhrasePrefix _,
-                 ElasticsearchRemotePredicate.Exists _ -> 0;
+                 ElasticsearchRemotePredicate.Exists _,
+                 ElasticsearchRemotePredicate.ArrayScript _ -> 0;
         };
     }
 
@@ -265,7 +266,8 @@ final class ElasticsearchDynamicFilterPlanner
                  ElasticsearchRemotePredicate.Regexp _,
                  ElasticsearchRemotePredicate.MatchPhrase _,
                  ElasticsearchRemotePredicate.MatchPhrasePrefix _,
-                 ElasticsearchRemotePredicate.Exists _ -> 0;
+                 ElasticsearchRemotePredicate.Exists _,
+                 ElasticsearchRemotePredicate.ArrayScript _ -> 0;
         };
     }
 }

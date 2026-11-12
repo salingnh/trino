@@ -331,6 +331,7 @@ final class ElasticsearchPredicateComposer
             case ElasticsearchRemotePredicate.Enforced enforced -> resourceUsage(enforced.predicate());
             case ElasticsearchRemotePredicate.Term _ -> new ResourceUsage(1, 1, 0);
             case ElasticsearchRemotePredicate.Terms terms -> new ResourceUsage(terms.values().size(), 1, 0);
+            case ElasticsearchRemotePredicate.ArrayScript script -> new ResourceUsage(script.parameters().size(), 1, 0);
             default -> new ResourceUsage(0, 1, 0);
         };
     }

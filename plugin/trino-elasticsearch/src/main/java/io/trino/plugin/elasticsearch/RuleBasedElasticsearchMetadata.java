@@ -82,7 +82,9 @@ public class RuleBasedElasticsearchMetadata
         ElasticsearchPredicatePushdownPlanner.Result predicatePlan = ElasticsearchPredicatePushdownPlanner.plan(
                 session,
                 constraint,
-                getFullTextPushdownMode(session));
+                getFullTextPushdownMode(session),
+                ElasticsearchPredicateCompositionPolicy.DEFAULT,
+                ElasticsearchSessionProperties.isArrayScriptPushdownEnabled(session));
         predicatePlan.decisions().forEach(diagnostics::recordTranslation);
         Constraint preparedConstraint = predicatePlan.remainingConstraint();
 

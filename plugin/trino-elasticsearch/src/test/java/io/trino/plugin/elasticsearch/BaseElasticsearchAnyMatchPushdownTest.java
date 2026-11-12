@@ -16,6 +16,7 @@ package io.trino.plugin.elasticsearch;
 import com.fasterxml.jackson.databind.json.JsonMapper;
 import com.google.common.collect.ImmutableList;
 import com.google.common.collect.ImmutableMap;
+import io.trino.Session;
 import io.trino.sql.planner.plan.FilterNode;
 import io.trino.testing.QueryRunner;
 import io.trino.testing.QueryRunner.MaterializedResultWithPlan;
@@ -32,6 +33,7 @@ import java.util.List;
 import java.util.Map;
 
 import static io.trino.testing.TestingNames.randomNameSuffix;
+import static io.trino.testing.assertions.Assert.assertEqualsIgnoreOrder;
 import static java.lang.String.format;
 import static org.assertj.core.api.Assertions.assertThat;
 
@@ -194,6 +196,157 @@ public abstract class BaseElasticsearchAnyMatchPushdownTest
             long unfilteredRows = runner.getCoordinator().getQueryManager().getFullQueryInfo(unfiltered.queryId()).getQueryStats().getPhysicalInputPositions();
             assertThat(filteredRows).as("documents read after the necessary-condition prefilter").isEqualTo(5);
             assertThat(unfilteredRows).as("documents read without a native candidate").isEqualTo(12);
+        }
+        finally {
+            deleteIndex(indexName);
+        }
+    }
+
+    @Test
+    public void testAnyMatchArithmeticScriptPushdown()
+            throws IOException
+    {
+        String indexName = "any_match_script_" + randomNameSuffix();
+        @Language("JSON")
+        String properties =
+                """
+                {
+                  "_meta": { "trino": {
+                    "numbers": { "isArray": true }, "without_doc_values": { "isArray": true }
+                  } },
+                  "properties": {
+                    "id": { "type": "keyword" },
+                    "numbers": { "type": "integer" },
+                    "without_doc_values": { "type": "integer", "doc_values": false }
+                  }
+                }
+                """;
+        createIndex(indexName, properties);
+        try {
+            List<List<Integer>> values = List.of(
+                    List.of(2),
+                    List.of(11),
+                    List.of(12),
+                    List.of(2, 11),
+                    List.of(3),
+                    List.of(-3),
+                    Arrays.asList(null, 2),
+                    Arrays.asList((Integer) null),
+                    List.of(),
+                    List.of(0),
+                    List.of(-2));
+            for (int i = 0; i < values.size(); i++) {
+                index(indexName, ImmutableMap.of("id", Integer.toString(i + 1), "numbers", values.get(i), "without_doc_values", values.get(i)));
+            }
+            index(indexName, ImmutableMap.of("id", "missing"));
+            Session enabled = Session.builder(getSession())
+                    .setCatalogSessionProperty("elasticsearch", "array_script_pushdown_enabled", "true")
+                    .build();
+            Session disabled = Session.builder(getSession())
+                    .setCatalogSessionProperty("elasticsearch", "array_script_pushdown_enabled", "false")
+                    .build();
+
+            for (String predicate : List.of(
+                    "x > 10 OR mod(x, 2) = 0",
+                    "x > 10 AND mod(x, 2) = 0",
+                    "NOT (mod(x, 2) <> 0)",
+                    "(x % 2 >= 0 AND x % 3 <= 1) OR x < 0",
+                    "mod(x, -2) = -1",
+                    "x / 2 = 1 OR x / 2 > 5")) {
+                String sql = "SELECT id FROM " + indexName + " WHERE any_match(numbers, x -> " + predicate + ")";
+                assertEqualsIgnoreOrder(
+                        computeActual(enabled, sql).getMaterializedRows(),
+                        computeActual(disabled, sql).getMaterializedRows(),
+                        predicate);
+                assertThat(query(enabled, sql)).isFullyPushedDown();
+            }
+            for (String predicate : List.of(
+                    "x + 5 > 10 OR x * 2 < 0",
+                    "x - 1 > 0 AND -x < 10",
+                    "(x + 1) * (x - 1) >= 0 OR mod(x, 2) = 0")) {
+                String sql = "SELECT id FROM " + indexName + " WHERE any_match(numbers, x -> " + predicate + ")";
+                assertEqualsIgnoreOrder(
+                        computeActual(enabled, sql).getMaterializedRows(),
+                        computeActual(disabled, sql).getMaterializedRows(),
+                        predicate);
+                assertThat(query(enabled, sql)).isNotFullyPushedDown(FilterNode.class);
+            }
+
+            String sql = "SELECT id FROM " + indexName + " WHERE any_match(numbers, x -> x > 10 OR mod(x, 2) = 0)";
+            assertThat(query(disabled, sql)).isNotFullyPushedDown(FilterNode.class);
+            assertThat(query(enabled, "SELECT count(*) FROM " + indexName + " WHERE any_match(numbers, x -> x > 10 OR mod(x, 2) = 0)"))
+                    .matches("VALUES BIGINT '7'")
+                    .isFullyPushedDown();
+            assertThat(computeActual(enabled, sql + " ORDER BY id LIMIT 2").getMaterializedRows())
+                    .containsExactlyElementsOf(computeActual(disabled, sql + " ORDER BY id LIMIT 2").getMaterializedRows());
+            String noDocValues = sql.replace("any_match(numbers,", "any_match(without_doc_values,");
+            assertEqualsIgnoreOrder(
+                    computeActual(enabled, noDocValues).getMaterializedRows(),
+                    computeActual(disabled, noDocValues).getMaterializedRows(),
+                    noDocValues);
+            assertThat(query(enabled, noDocValues)).isNotFullyPushedDown(FilterNode.class);
+            String nonStrict = "SELECT id FROM " + indexName + " WHERE any_match(numbers, x -> TRUE OR x > 0)";
+            assertEqualsIgnoreOrder(
+                    computeActual(enabled, nonStrict).getMaterializedRows(),
+                    computeActual(disabled, nonStrict).getMaterializedRows(),
+                    nonStrict);
+
+            QueryRunner runner = getQueryRunner();
+            MaterializedResultWithPlan remote = runner.executeWithPlan(enabled, sql);
+            MaterializedResultWithPlan local = runner.executeWithPlan(disabled, sql);
+            assertThat(runner.getCoordinator().getQueryManager().getFullQueryInfo(remote.queryId()).getQueryStats().getPhysicalInputPositions()).isEqualTo(7);
+            assertThat(runner.getCoordinator().getQueryManager().getFullQueryInfo(local.queryId()).getQueryStats().getPhysicalInputPositions()).isEqualTo(12);
+            MaterializedResultWithPlan prefilter = runner.executeWithPlan(
+                    enabled,
+                    "SELECT id FROM " + indexName + " WHERE any_match(numbers, x -> x + 5 > 10 OR x * 2 < 0)");
+            assertThat(runner.getCoordinator().getQueryManager().getFullQueryInfo(prefilter.queryId()).getQueryStats().getPhysicalInputPositions()).isEqualTo(5);
+        }
+        finally {
+            deleteIndex(indexName);
+        }
+    }
+
+    @Test
+    public void testArrayScriptPreservesSqlArithmeticErrors()
+            throws IOException
+    {
+        String indexName = "array_script_errors_" + randomNameSuffix();
+        @Language("JSON")
+        String properties =
+                """
+                {
+                  "_meta": { "trino": {
+                    "numbers": { "isArray": true }, "bigints": { "isArray": true },
+                    "tinyints": { "isArray": true }, "smallints": { "isArray": true }
+                  } },
+                  "properties": {
+                    "numbers": { "type": "integer" }, "bigints": { "type": "long" },
+                    "tinyints": { "type": "byte" }, "smallints": { "type": "short" }
+                  }
+                }
+                """;
+        createIndex(indexName, properties);
+        try {
+            index(indexName, ImmutableMap.of(
+                    "numbers", List.of(Integer.MAX_VALUE),
+                    "bigints", List.of(Long.MIN_VALUE),
+                    "tinyints", List.of(Byte.MAX_VALUE),
+                    "smallints", List.of(Short.MAX_VALUE)));
+            Session enabled = Session.builder(getSession())
+                    .setCatalogSessionProperty("elasticsearch", "array_script_pushdown_enabled", "true")
+                    .build();
+            assertQueryFails(enabled, "SELECT numbers FROM " + indexName + " WHERE any_match(numbers, x -> x + 1 > 0)", ".*integer addition overflow.*");
+            assertQueryFails(enabled, "SELECT bigints FROM " + indexName + " WHERE any_match(bigints, x -> x / BIGINT '-1' > 0)", ".*bigint division overflow.*");
+            assertQueryFails(enabled, "SELECT bigints FROM " + indexName + " WHERE any_match(bigints, x -> x + BIGINT '-1' < 0)", ".*bigint addition overflow.*");
+            assertQueryFails(enabled, "SELECT bigints FROM " + indexName + " WHERE any_match(bigints, x -> x - BIGINT '1' < 0)", ".*bigint subtraction overflow.*");
+            assertQueryFails(enabled, "SELECT bigints FROM " + indexName + " WHERE any_match(bigints, x -> x * BIGINT '-1' > 0)", ".*bigint multiplication overflow.*");
+            assertQueryFails(enabled, "SELECT bigints FROM " + indexName + " WHERE any_match(bigints, x -> -x > 0)", ".*bigint negation overflow.*");
+            assertQueryFails(enabled, "SELECT tinyints FROM " + indexName + " WHERE any_match(tinyints, x -> x + TINYINT '1' > 0)", ".*tinyint addition overflow.*");
+            assertQueryFails(enabled, "SELECT smallints FROM " + indexName + " WHERE any_match(smallints, x -> x + SMALLINT '1' > 0)", ".*smallint addition overflow.*");
+            assertQueryFails(enabled, "SELECT numbers FROM " + indexName + " WHERE any_match(numbers, x -> x / (x - x) = 1)", ".*Division by zero.*");
+            assertThat(query(enabled, "SELECT bigints FROM " + indexName + " WHERE any_match(bigints, x -> mod(x, BIGINT '-1') = BIGINT '0')"))
+                    .matches("SELECT ARRAY[BIGINT '-9223372036854775808']")
+                    .isFullyPushedDown();
         }
         finally {
             deleteIndex(indexName);

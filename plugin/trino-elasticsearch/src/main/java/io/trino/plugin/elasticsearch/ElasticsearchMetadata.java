@@ -654,6 +654,7 @@ public class ElasticsearchMetadata
             case ElasticsearchRemotePredicate.MatchPhrase match -> fields.add(match.field());
             case ElasticsearchRemotePredicate.MatchPhrasePrefix match -> fields.add(match.field());
             case ElasticsearchRemotePredicate.Exists exists -> fields.add(exists.field());
+            case ElasticsearchRemotePredicate.ArrayScript script -> fields.add(script.field());
         }
     }
 

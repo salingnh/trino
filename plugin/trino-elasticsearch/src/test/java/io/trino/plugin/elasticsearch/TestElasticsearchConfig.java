@@ -75,6 +75,7 @@ public class TestElasticsearchConfig
                 .setDynamicFilteringMaxQueryBytes(1_048_576)
                 .setKeywordSubfieldPushdownWithIgnoreAbove(false)
                 .setAggregationPushdownEnabled(true)
+                .setArrayScriptPushdownEnabled(false)
                 .setAggregationPageSize(10_000)
                 .setFullTextPushdownMode(FullTextPushdownMode.DISABLED));
     }
@@ -120,6 +121,7 @@ public class TestElasticsearchConfig
                 .put("elasticsearch.dynamic-filtering.max-query-bytes", "262144")
                 .put("elasticsearch.keyword-subfield-pushdown-with-ignore-above", "true")
                 .put("elasticsearch.aggregation-pushdown.enabled", "false")
+                .put("elasticsearch.array-script-pushdown.enabled", "true")
                 .put("elasticsearch.aggregation-page-size", "2")
                 .put("elasticsearch.full-text-pushdown", "SAFE")
                 .buildOrThrow();
@@ -158,6 +160,7 @@ public class TestElasticsearchConfig
                 .setDynamicFilteringMaxQueryBytes(262_144)
                 .setKeywordSubfieldPushdownWithIgnoreAbove(true)
                 .setAggregationPushdownEnabled(false)
+                .setArrayScriptPushdownEnabled(true)
                 .setAggregationPageSize(2)
                 .setFullTextPushdownMode(FullTextPushdownMode.SAFE);
 

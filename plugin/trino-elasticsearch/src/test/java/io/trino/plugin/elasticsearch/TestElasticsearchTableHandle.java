@@ -52,6 +52,9 @@ public class TestElasticsearchTableHandle
     public void testRemotePredicateJsonRoundTrip()
     {
         ElasticsearchRemotePredicate predicate = new ElasticsearchRemotePredicate.And(ImmutableList.of(
+                new ElasticsearchRemotePredicate.ArrayScript("Numbers", "return params.value > 0;", ImmutableMap.of(
+                        "field", ElasticsearchRemotePredicate.Value.of("Numbers"),
+                        "value", ElasticsearchRemotePredicate.Value.of(2L))),
                 new ElasticsearchRemotePredicate.Term("status.keyword", "active"),
                 new ElasticsearchRemotePredicate.Terms("id", ImmutableList.of(1L, 2L, 3L)),
                 new ElasticsearchRemotePredicate.Range(

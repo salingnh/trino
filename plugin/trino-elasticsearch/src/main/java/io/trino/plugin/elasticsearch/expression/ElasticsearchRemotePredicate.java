@@ -18,8 +18,10 @@ import com.fasterxml.jackson.annotation.JsonProperty;
 import com.fasterxml.jackson.annotation.JsonSubTypes;
 import com.fasterxml.jackson.annotation.JsonTypeInfo;
 import com.google.common.collect.ImmutableList;
+import com.google.common.collect.ImmutableMap;
 
 import java.util.List;
+import java.util.Map;
 import java.util.Objects;
 import java.util.Optional;
 
@@ -50,9 +52,11 @@ import static java.util.Objects.requireNonNull;
         @JsonSubTypes.Type(value = ElasticsearchRemotePredicate.MatchPhrase.class, name = "matchPhrase"),
         @JsonSubTypes.Type(value = ElasticsearchRemotePredicate.MatchPhrasePrefix.class, name = "matchPhrasePrefix"),
         @JsonSubTypes.Type(value = ElasticsearchRemotePredicate.Exists.class, name = "exists"),
+        @JsonSubTypes.Type(value = ElasticsearchRemotePredicate.ArrayScript.class, name = "arrayScript"),
 })
 public sealed interface ElasticsearchRemotePredicate
         permits ElasticsearchRemotePredicate.And,
+                ElasticsearchRemotePredicate.ArrayScript,
                 ElasticsearchRemotePredicate.Enforced,
                 ElasticsearchRemotePredicate.Exists,
                 ElasticsearchRemotePredicate.MatchPhrase,
@@ -85,7 +89,7 @@ public sealed interface ElasticsearchRemotePredicate
             case Or or -> or.predicates().stream().allMatch(ElasticsearchRemotePredicate::isExact);
             case Not not -> not.predicate().isExact();
             case Enforced _ -> false;
-            case Term _, Terms _, Range _, Prefix _, Regexp _, MatchPhrase _, MatchPhrasePrefix _, Exists _ -> true;
+            case Term _, Terms _, Range _, Prefix _, Regexp _, MatchPhrase _, MatchPhrasePrefix _, Exists _, ArrayScript _ -> true;
         };
     }
 
@@ -105,6 +109,7 @@ public sealed interface ElasticsearchRemotePredicate
             case MatchPhrase _ -> "matchPhrase";
             case MatchPhrasePrefix _ -> "matchPhrasePrefix";
             case Exists _ -> "exists";
+            case ArrayScript _ -> "arrayScript";
         };
     }
 
@@ -140,6 +145,23 @@ public sealed interface ElasticsearchRemotePredicate
                 return new Value(ValueType.STRING, stringValue);
             }
             throw new IllegalArgumentException("Unsupported remote predicate value type: " + value.getClass().getSimpleName());
+        }
+    }
+
+    /**
+     * A connector-generated positive existential filter. Parameter values never become Painless source text.
+     * Fallible arithmetic must be wrapped with PREFILTER enforcement and retain the original SQL lambda.
+     */
+    record ArrayScript(String field, String source, Map<String, Value> parameters)
+            implements ElasticsearchRemotePredicate
+    {
+        public ArrayScript
+        {
+            field = requireField(field);
+            requireNonNull(source, "source is null");
+            checkArgument(!source.isEmpty(), "script source is empty");
+            parameters = ImmutableMap.copyOf(requireNonNull(parameters, "parameters is null"));
+            checkArgument(new Value(ValueType.STRING, field).equals(parameters.get("field")), "script field parameter does not match field");
         }
     }
 

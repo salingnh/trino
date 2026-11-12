@@ -102,6 +102,7 @@ public class ElasticsearchConfig
     private int dynamicFilteringMaxQueryBytes = 1_048_576;
     private boolean keywordSubfieldPushdownWithIgnoreAbove;
     private boolean aggregationPushdownEnabled = true;
+    private boolean arrayScriptPushdownEnabled;
     private int aggregationPageSize = 10_000;
     private FullTextPushdownMode fullTextPushdownMode = FullTextPushdownMode.DISABLED;
 
@@ -559,6 +560,19 @@ public class ElasticsearchConfig
     public ElasticsearchConfig setAggregationPushdownEnabled(boolean aggregationPushdownEnabled)
     {
         this.aggregationPushdownEnabled = aggregationPushdownEnabled;
+        return this;
+    }
+
+    public boolean isArrayScriptPushdownEnabled()
+    {
+        return arrayScriptPushdownEnabled;
+    }
+
+    @Config("elasticsearch.array-script-pushdown.enabled")
+    @ConfigDescription("Enable Painless pushdown for integral array arithmetic, comparisons, and logic")
+    public ElasticsearchConfig setArrayScriptPushdownEnabled(boolean arrayScriptPushdownEnabled)
+    {
+        this.arrayScriptPushdownEnabled = arrayScriptPushdownEnabled;
         return this;
     }
 

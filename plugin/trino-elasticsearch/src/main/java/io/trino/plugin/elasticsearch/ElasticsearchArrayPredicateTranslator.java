@@ -82,6 +82,17 @@ final class ElasticsearchArrayPredicateTranslator
             FullTextPushdownMode fullTextMode,
             ElasticsearchPredicateCompositionPolicy policy)
     {
+        return translate(session, expression, assignments, fullTextMode, policy, false);
+    }
+
+    static Optional<ElasticsearchPredicateTranslation<ConnectorExpression>> translate(
+            ConnectorSession session,
+            ConnectorExpression expression,
+            Map<String, ColumnHandle> assignments,
+            FullTextPushdownMode fullTextMode,
+            ElasticsearchPredicateCompositionPolicy policy,
+            boolean arrayScriptPushdownEnabled)
+    {
         requireNonNull(session, "session is null");
         requireNonNull(expression, "expression is null");
         requireNonNull(assignments, "assignments is null");
@@ -95,7 +106,7 @@ final class ElasticsearchArrayPredicateTranslator
         return switch (call.getFunctionName().getName()) {
             case "contains" -> Optional.of(translateContains(call, assignments, fullTextMode, policy));
             case "arrays_overlap" -> Optional.of(translateArraysOverlap(call, assignments, fullTextMode, policy));
-            case "any_match" -> Optional.of(translateAnyMatch(session, call, assignments, fullTextMode, policy));
+            case "any_match" -> Optional.of(translateAnyMatch(session, call, assignments, fullTextMode, policy, arrayScriptPushdownEnabled));
             default -> Optional.empty();
         };
     }
@@ -181,7 +192,8 @@ final class ElasticsearchArrayPredicateTranslator
             Call call,
             Map<String, ColumnHandle> assignments,
             FullTextPushdownMode fullTextMode,
-            ElasticsearchPredicateCompositionPolicy policy)
+            ElasticsearchPredicateCompositionPolicy policy,
+            boolean arrayScriptPushdownEnabled)
     {
         if (call.getArguments().size() != 2
                 || !(call.getArguments().get(0) instanceof Variable arrayVariable)
@@ -220,13 +232,20 @@ final class ElasticsearchArrayPredicateTranslator
         if (exact.isPresent()) {
             return exactOrUnsupported(call, exact, EXACT_ANY_MATCH, policy);
         }
+        Optional<ElasticsearchPredicateTranslation<ConnectorExpression>> script = Optional.empty();
+        if (arrayScriptPushdownEnabled) {
+            script = ElasticsearchArrayScriptTranslator.translate(call, lambda, column, policy);
+            if (script.flatMap(ElasticsearchPredicateTranslation::remotePredicate).isPresent()) {
+                return script.orElseThrow();
+            }
+        }
         if (exactArrayElementType(column).isEmpty()) {
             return ElasticsearchPredicateTranslation.unsupported(call, UNSUPPORTED_EXPRESSION);
         }
 
         Optional<ElasticsearchRemotePredicate> candidate = extractNecessaryCondition(lambda.getBody(), lambdaVariable, column, elementType.orElseThrow());
         if (candidate.isEmpty()) {
-            return ElasticsearchPredicateTranslation.unsupported(call, UNSUPPORTED_EXPRESSION);
+            return script.orElseGet(() -> ElasticsearchPredicateTranslation.unsupported(call, UNSUPPORTED_EXPRESSION));
         }
         if (!ElasticsearchPredicateComposer.isWithinRequestBudget(candidate.orElseThrow(), policy)) {
             return ElasticsearchPredicateTranslation.residual(call, UNSUPPORTED_EXPRESSION);
