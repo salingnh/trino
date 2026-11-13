@@ -371,6 +371,7 @@ public abstract class BaseElasticsearchAnyMatchPushdownTest
                     List.of("abz", "z"),
                     List.of("a😀b", "abc\n"),
                     List.of("a_b", "a%b", "a\\b"),
+                    List.of("😀", "\uE000"),
                     List.of("", "ABc"),
                     Arrays.asList(null, "abc"),
                     Arrays.asList((String) null),
@@ -389,6 +390,7 @@ public abstract class BaseElasticsearchAnyMatchPushdownTest
                     .setCatalogSessionProperty("elasticsearch", "array_script_pushdown_enabled", "false")
                     .build();
             Session localOnly = Session.builder(nativeOnly).setSystemProperty("allow_pushdown_into_connectors", "false").build();
+            Session scripted = Session.builder(nativeOnly).setCatalogSessionProperty("elasticsearch", "array_script_pushdown_enabled", "true").build();
             for (String predicate : List.of(
                     "starts_with(x, 'ab')",
                     "x LIKE 'ab%'",
@@ -420,11 +422,305 @@ public abstract class BaseElasticsearchAnyMatchPushdownTest
                     assertThat(query(nativeOnly, sql)).isFullyPushedDown();
                 }
             }
+            for (String predicate : List.of(
+                    "length(x) > 2 AND starts_with(x, 'a')",
+                    "x > '\uE000'",
+                    "ends_with(x, 'b') OR strpos(x, '😀') > 0",
+                    "replace(x, '_', '😀') LIKE '%😀%'",
+                    "replace(x, '', '!') LIKE '%!😀!%'",
+                    "substr(x, -2, 1) = 'b'",
+                    "substring(x, 2) = 'bc'",
+                    "trim(x) = 'abc'",
+                    "ltrim(x) = 'abc' OR rtrim(x) = 'abc'",
+                    "concat(substr(x, 1, 1), 'Z') = 'aZ'",
+                    "lower(x) = 'abc' OR upper(x) = 'Z'",
+                    "coalesce(x, '') = 'abc'",
+                    "CASE WHEN x IS NULL THEN false ELSE length(x) > 2 END")) {
+                String sql = "SELECT id FROM " + indexName + " WHERE any_match(words, x -> " + predicate + ")";
+                assertEqualsIgnoreOrder(computeActual(scripted, sql).getMaterializedRows(), computeActual(localOnly, sql).getMaterializedRows(), predicate);
+            }
+            assertThat(query(scripted, "SELECT id FROM " + indexName + " WHERE any_match(words, x -> length(x) > 2 AND starts_with(x, 'a'))"))
+                    .isFullyPushedDown();
             for (String expression : List.of("any_match(ignored_words, x -> starts_with(x, 'abc'))", "any_match(unindexed, x -> x IS NOT NULL)")) {
                 String sql = "SELECT id FROM " + indexName + " WHERE " + expression;
                 assertEqualsIgnoreOrder(computeActual(nativeOnly, sql).getMaterializedRows(), computeActual(localOnly, sql).getMaterializedRows(), expression);
                 assertThat(query(nativeOnly, sql)).isNotFullyPushedDown(FilterNode.class);
             }
+        }
+        finally {
+            deleteIndex(indexName);
+        }
+    }
+
+    @Test
+    public void testAnyMatchExtendedNumericExpressions()
+            throws IOException
+    {
+        String indexName = "array_typed_numbers_" + randomNameSuffix();
+        createIndex(indexName,
+                """
+                {"_meta":{"trino":{"numbers":{"isArray":true},"reals":{"isArray":true},"doubles":{"isArray":true},"flags":{"isArray":true}}},
+                 "properties":{"id":{"type":"keyword"},"numbers":{"type":"integer"},"reals":{"type":"float"},"doubles":{"type":"double"},"flags":{"type":"boolean"}}}
+                """);
+        try {
+            List<List<Integer>> integers = List.of(List.of(-12), List.of(-1), List.of(0), List.of(1), List.of(2, 11), List.of(12), List.of(128), Arrays.asList(null, 12), Arrays.asList((Integer) null), List.of());
+            List<List<Double>> doubles = List.of(List.of(-2.5), List.of(-0.0), List.of(0.0), List.of(1.25), List.of(Double.MAX_VALUE), List.of(Double.MIN_NORMAL, (double) Float.MIN_VALUE), List.of(Double.MIN_VALUE), Arrays.asList(null, 2.5), Arrays.asList((Double) null), List.of());
+            for (int index = 0; index < integers.size(); index++) {
+                List<Float> reals = new ArrayList<>();
+                for (Double value : doubles.get(index)) {
+                    reals.add(value == null ? null : (float) Math.max(-Float.MAX_VALUE, Math.min(Float.MAX_VALUE, value)));
+                }
+                index(indexName, ImmutableMap.of("id", Integer.toString(index), "numbers", integers.get(index), "reals", reals, "doubles", doubles.get(index), "flags", index % 2 == 0 ? Arrays.asList(null, true) : List.of(false)));
+            }
+            index(indexName, ImmutableMap.of("id", "missing"));
+            Session enabled = Session.builder(getSession()).setCatalogSessionProperty("elasticsearch", "array_script_pushdown_enabled", "true").build();
+            Session local = Session.builder(enabled).setSystemProperty("allow_pushdown_into_connectors", "false").build();
+            for (String predicate : List.of(
+                    "abs(x) > 10 OR x = 2",
+                    "round(x, -1) = 10",
+                    "mod(abs(x), 3) = 0",
+                    "CASE WHEN x < 0 THEN -x ELSE x END > 10",
+                    "CASE WHEN x IS NULL THEN false ELSE x > 10 END",
+                    "coalesce(x, 0) > 10",
+                    "coalesce(nullif(x, 0), 1) > 10",
+                    "CAST(x AS SMALLINT) > 10",
+                    "TRY_CAST(x AS TINYINT) > 10",
+                    "x IS NOT DISTINCT FROM 12",
+                    "x IS DISTINCT FROM NULL",
+                    "x IS DISTINCT FROM 12",
+                    "CAST(x AS DECIMAL(12, 2)) + DECIMAL '1.25' > DECIMAL '10.00'",
+                    "CAST(x AS DECIMAL(12, 2)) / DECIMAL '3.00' > DECIMAL '1.00'",
+                    "mod(CAST(x AS DECIMAL(12, 2)), DECIMAL '3.00') = DECIMAL '0.00'",
+                    "round(CAST(x AS DECIMAL(12, 2)), 1) >= DECIMAL '1.00'",
+                    "CAST(x AS DECIMAL(30, 10)) + DECIMAL '0.1234567890' > DECIMAL '10.1234567890'",
+                    "round(CAST(x AS DECIMAL(12, 2)) + DECIMAL '0.25', 1) = DECIMAL '2.30'")) {
+                String sql = "SELECT id FROM " + indexName + " WHERE any_match(numbers, x -> " + predicate + ")";
+                assertEqualsIgnoreOrder(computeActual(enabled, sql).getMaterializedRows(), computeActual(local, sql).getMaterializedRows(), predicate);
+            }
+            for (String predicate : List.of("coalesce(x, 0) > 10", "coalesce(nullif(x, 0), 1) > 10", "TRY_CAST(x AS TINYINT) > 10", "CASE WHEN x IS NULL THEN false ELSE x > 10 END", "x IS NOT DISTINCT FROM 12", "x IS DISTINCT FROM NULL")) {
+                assertThat(query(enabled, "SELECT id FROM " + indexName + " WHERE any_match(numbers, x -> " + predicate + ")")).isFullyPushedDown();
+            }
+            var filtered = getQueryRunner().executeWithPlan(enabled, "SELECT id FROM " + indexName + " WHERE any_match(numbers, x -> abs(x) > 10)");
+            assertThat(getQueryRunner().getCoordinator().getQueryManager().getFullQueryInfo(filtered.queryId()).getQueryStats().getPhysicalInputPositions()).isEqualTo(5);
+            for (String kind : List.of("REAL", "DOUBLE")) {
+                String field = kind.equals("REAL") ? "reals" : "doubles";
+                for (String predicate : List.of(
+                        "x = CAST(0 AS " + kind + ")",
+                        "x < CAST(0 AS " + kind + ")",
+                        "x >= CAST(0 AS " + kind + ")",
+                        "x IN (CAST(0 AS " + kind + "), CAST(1 AS " + kind + "))",
+                        "x / x = CAST(nan() AS " + kind + ")",
+                        "x / x <> CAST(nan() AS " + kind + ")",
+                        "x / x IN (CAST(nan() AS " + kind + "), CAST(2 AS " + kind + "))",
+                        "x / x < CAST(nan() AS " + kind + ")",
+                        "x / x >= CAST(nan() AS " + kind + ")",
+                        "x / x IS NOT DISTINCT FROM CAST(nan() AS " + kind + ")",
+                        "x / CAST(0 AS " + kind + ") > CAST(0 AS " + kind + ")",
+                        "x + CAST(1.5 AS " + kind + ") > CAST(2 AS " + kind + ") OR mod(x, CAST(2 AS " + kind + ")) = CAST(0 AS " + kind + ")",
+                        "round(x, 1) >= CAST(1 AS " + kind + ")",
+                        "ceil(x) = floor(x)",
+                        "sqrt(abs(x)) > DOUBLE '1'",
+                        "pow(x, DOUBLE '2') > DOUBLE '10'")) {
+                    String sql = "SELECT id FROM " + indexName + " WHERE any_match(" + field + ", x -> " + predicate + ")";
+                    assertEqualsIgnoreOrder(computeActual(enabled, sql).getMaterializedRows(), computeActual(local, sql).getMaterializedRows(), predicate);
+                    assertThat(query(enabled, sql)).isFullyPushedDown();
+                }
+            }
+            Session nativeOnly = Session.builder(getSession()).setCatalogSessionProperty("elasticsearch", "array_script_pushdown_enabled", "false").build();
+            for (String field : List.of("reals", "doubles")) {
+                for (String predicate : List.of("any_match(" + field + ", x -> x = 0)", "contains(" + field + ", 0)", "arrays_overlap(" + field + ", ARRAY[0])")) {
+                    String sql = "SELECT id FROM " + indexName + " WHERE " + predicate;
+                    assertEqualsIgnoreOrder(computeActual(nativeOnly, sql).getMaterializedRows(), computeActual(local, sql).getMaterializedRows(), predicate);
+                    assertThat(query(nativeOnly, sql)).isNotFullyPushedDown(FilterNode.class);
+                }
+            }
+            for (String predicate : List.of("x OR NOT x", "coalesce(x, false)")) {
+                String sql = "SELECT id FROM " + indexName + " WHERE any_match(flags, x -> " + predicate + ")";
+                assertEqualsIgnoreOrder(computeActual(enabled, sql).getMaterializedRows(), computeActual(local, sql).getMaterializedRows(), predicate);
+                assertThat(query(enabled, sql)).isFullyPushedDown();
+            }
+            assertThat(query(enabled, "SELECT id FROM " + indexName + " WHERE any_match(flags, x -> coalesce(x, true))"))
+                    .isNotFullyPushedDown(FilterNode.class);
+        }
+        finally {
+            deleteIndex(indexName);
+        }
+    }
+
+    @Test
+    public void testAnyMatchUtcTemporalExpressions()
+            throws IOException
+    {
+        String indexName = "array_typed_dates_" + randomNameSuffix();
+        createIndex(indexName,
+                """
+                {"_meta":{"trino":{"dates":{"isArray":true}}},"properties":{"id":{"type":"keyword"},"dates":{"type":"date"}}}
+                """);
+        try {
+            List<List<String>> values = List.of(
+                    List.of("2024-02-29T12:34:56.123Z"),
+                    List.of("1969-12-31T23:59:59.999Z"),
+                    List.of("2025-01-01T00:00:00Z", "2023-12-31T00:00:00Z"),
+                    List.of("1582-10-10T00:00:00Z"),
+                    List.of("2024-01-31T00:00:00Z"),
+                    Arrays.asList(null, "2024-02-29T00:00:00Z"),
+                    Arrays.asList((String) null),
+                    List.of());
+            for (int index = 0; index < values.size(); index++) {
+                index(indexName, ImmutableMap.of("id", Integer.toString(index), "dates", values.get(index)));
+            }
+            index(indexName, ImmutableMap.of("id", "missing"));
+            Session enabled = Session.builder(getSession()).setCatalogSessionProperty("elasticsearch", "array_script_pushdown_enabled", "true").build();
+            Session local = Session.builder(enabled).setSystemProperty("allow_pushdown_into_connectors", "false").build();
+            for (String predicate : List.of(
+                    "year(x) = 2024",
+                    "month(x) = 2 AND day(x) = 29",
+                    "hour(x) = 12 OR minute(x) = 59",
+                    "second(x) = 56",
+                    "day_of_week(x) BETWEEN 1 AND 5",
+                    "day_of_year(x) = 60",
+                    "date_trunc('day', x) = TIMESTAMP '2024-02-29 00:00:00.000'",
+                    "date_add('month', 1, x) > TIMESTAMP '2024-03-01 00:00:00.000'",
+                    "date_diff('day', x, TIMESTAMP '2025-01-01 00:00:00.000') >= 0",
+                    "day_of_week(date_trunc('week', x)) = 1",
+                    "coalesce(year(x), 0) > 2000")) {
+                String sql = "SELECT id FROM " + indexName + " WHERE any_match(dates, x -> " + predicate + ")";
+                assertEqualsIgnoreOrder(computeActual(enabled, sql).getMaterializedRows(), computeActual(local, sql).getMaterializedRows(), predicate);
+            }
+            var filtered = getQueryRunner().executeWithPlan(enabled, "SELECT id FROM " + indexName + " WHERE any_match(dates, x -> year(x) = 2024)");
+            assertThat(getQueryRunner().getCoordinator().getQueryManager().getFullQueryInfo(filtered.queryId()).getQueryStats().getPhysicalInputPositions()).isEqualTo(3);
+        }
+        finally {
+            deleteIndex(indexName);
+        }
+    }
+
+    @Test
+    public void testScalarExpressionPushdown()
+            throws IOException
+    {
+        String indexName = "scalar_expressions_" + randomNameSuffix();
+        createIndex(indexName,
+                """
+                {"properties":{
+                  "id":{"type":"keyword"},"word":{"type":"keyword"},
+                  "number":{"type":"integer"},"double_value":{"type":"double"},"real_value":{"type":"float"},
+                  "date_value":{"type":"date"},"flag":{"type":"boolean"},
+                  "unsafe_word":{"type":"keyword","ignore_above":3},"text_only":{"type":"text"}
+                }}
+                """);
+        try {
+            List<String> words = List.of("nice", "SÁCH đẹp", "sá", "đóng gói", "abc", "", "SÁCH khác");
+            List<Integer> numbers = List.of(-12, 12, 2, 0, 128, -1, 1);
+            List<Double> doubles = List.of(-2.5, -0.0, 0.0, 1.25, Double.MAX_VALUE, Double.MIN_NORMAL, Double.MIN_VALUE);
+            List<String> dates = List.of(
+                    "2024-02-29T12:34:56.123Z",
+                    "1969-12-31T23:59:59.999Z",
+                    "2025-01-01T00:00:00Z",
+                    "2023-12-31T00:00:00Z",
+                    "2024-01-31T00:00:00Z",
+                    "1582-10-10T00:00:00Z",
+                    "2024-03-01T00:00:00Z");
+            for (int row = 0; row < words.size(); row++) {
+                index(indexName, ImmutableMap.<String, Object>builder()
+                        .put("id", Integer.toString(row)).put("word", words.get(row)).put("number", numbers.get(row))
+                        .put("double_value", doubles.get(row)).put("real_value", (float) Math.min(doubles.get(row), Float.MAX_VALUE))
+                        .put("date_value", dates.get(row)).put("flag", row % 2 == 0).put("unsafe_word", words.get(row)).put("text_only", words.get(row))
+                        .buildOrThrow());
+            }
+            index(indexName, ImmutableMap.of("id", "missing"));
+            Map<String, Object> nulls = new HashMap<>();
+            nulls.put("id", "null");
+            for (String field : List.of("word", "number", "double_value", "real_value", "date_value", "flag")) {
+                nulls.put(field, null);
+            }
+            index(indexName, nulls);
+            Session enabled = Session.builder(getSession())
+                    .setCatalogSessionProperty("elasticsearch", "scalar_script_pushdown_enabled", "true")
+                    .setCatalogSessionProperty("elasticsearch", "array_script_pushdown_enabled", "false").build();
+            Session local = Session.builder(enabled).setSystemProperty("allow_pushdown_into_connectors", "false").build();
+            Session disabled = Session.builder(enabled).setCatalogSessionProperty("elasticsearch", "scalar_script_pushdown_enabled", "false").build();
+            for (String predicate : List.of(
+                    "lower(word) LIKE '%sá%'",
+                    "upper(word) LIKE '%SÁ%'",
+                    "lower(word) LIKE '%abc%'",
+                    "length(word) > 2 AND starts_with(word, 'a')",
+                    "ends_with(word, 'đẹp') OR strpos(word, 'sá') > 0",
+                    "replace(word, '', '!') LIKE '%!s!á!%'",
+                    "concat(substr(word, 1, 1), 'Z') = 'aZ'",
+                    "trim(word) = 'abc'",
+                    "number > 10 OR mod(number, 2) = 0",
+                    "number > 10 AND mod(number, 2) = 0",
+                    "NOT (number BETWEEN 0 AND 10)",
+                    "abs(number) > 10",
+                    "round(number, -1) = 10",
+                    "coalesce(number, 100) > 10",
+                    "coalesce(nullif(number, 0), 100) > 10",
+                    "TRY_CAST(number AS TINYINT) IS NULL",
+                    "CASE WHEN number IS NULL THEN true ELSE number > 10 END",
+                    "CAST(number AS DECIMAL(12,2)) / DECIMAL '3.00' > DECIMAL '1.00'",
+                    "coalesce(flag, true)",
+                    "flag OR NOT flag",
+                    "year(date_value) = 2024",
+                    "day_of_week(date_trunc('week', date_value)) = 1",
+                    "date_add('month', 1, date_value) > TIMESTAMP '2024-03-01 00:00:00.000'",
+                    "date_diff('day', date_value, TIMESTAMP '2025-01-01 00:00:00.000') >= 0")) {
+                String sql = "SELECT id FROM " + indexName + " WHERE " + predicate;
+                assertEqualsIgnoreOrder(computeActual(enabled, sql).getMaterializedRows(), computeActual(local, sql).getMaterializedRows(), predicate);
+            }
+            for (String kind : List.of("REAL", "DOUBLE")) {
+                String field = kind.equals("REAL") ? "real_value" : "double_value";
+                for (String body : List.of(
+                        "x = CAST(0 AS " + kind + ")",
+                        "x / x = CAST(nan() AS " + kind + ")",
+                        "x / x IS NOT DISTINCT FROM CAST(nan() AS " + kind + ")",
+                        "round(x, 1) >= CAST(1 AS " + kind + ")",
+                        "x + CAST(1.5 AS " + kind + ") > CAST(2 AS " + kind + ") OR mod(x, CAST(2 AS " + kind + ")) = CAST(0 AS " + kind + ")")) {
+                    String sql = "SELECT id FROM " + indexName + " WHERE " + body.replace("x", field);
+                    assertEqualsIgnoreOrder(computeActual(enabled, sql).getMaterializedRows(), computeActual(local, sql).getMaterializedRows(), body);
+                    assertThat(query(enabled, sql)).isFullyPushedDown();
+                }
+            }
+            for (String predicate : List.of(
+                    "length(word) > 2",
+                    "number > 10 OR mod(number, 2) = 0",
+                    "coalesce(number, 100) > 10",
+                    "TRY_CAST(number AS TINYINT) IS NULL",
+                    "CASE WHEN number IS NULL THEN true ELSE number > 10 END")) {
+                assertThat(query(enabled, "SELECT id FROM " + indexName + " WHERE " + predicate)).isFullyPushedDown();
+            }
+            String unicode = "SELECT id FROM " + indexName + " WHERE lower(word) LIKE '%sá%'";
+            assertThat(query(enabled, unicode)).matches("VALUES VARCHAR '1', VARCHAR '2', VARCHAR '6'").isNotFullyPushedDown(FilterNode.class);
+            assertThat(query(disabled, unicode)).isNotFullyPushedDown(FilterNode.class);
+            var filtered = getQueryRunner().executeWithPlan(enabled, unicode);
+            assertThat(getQueryRunner().getCoordinator().getQueryManager().getFullQueryInfo(filtered.queryId()).getQueryStats().getPhysicalInputPositions()).isEqualTo(4);
+            assertThat(query(enabled, "SELECT count(*) FROM (" + unicode + " LIMIT 2)")).matches("VALUES BIGINT '2'");
+            // Four remote candidates contain one non-matching Unicode string. LIMIT must count the three SQL matches.
+            assertThat(query(enabled, "SELECT count(*) FROM (" + unicode + " LIMIT 3)")).matches("VALUES BIGINT '3'");
+            for (String field : List.of("unsafe_word", "text_only")) {
+                String sql = "SELECT id FROM " + indexName + " WHERE lower(" + field + ") LIKE '%sá%'";
+                assertEqualsIgnoreOrder(computeActual(enabled, sql).getMaterializedRows(), computeActual(local, sql).getMaterializedRows(), field);
+                assertThat(query(enabled, sql)).isNotFullyPushedDown(FilterNode.class);
+            }
+        }
+        finally {
+            deleteIndex(indexName);
+        }
+    }
+
+    @Test
+    public void testScalarScriptPreservesSqlErrors()
+            throws IOException
+    {
+        String indexName = "scalar_errors_" + randomNameSuffix();
+        createIndex(indexName, "{\"properties\":{\"number\":{\"type\":\"integer\"},\"big\":{\"type\":\"long\"}}}");
+        try {
+            index(indexName, ImmutableMap.of("number", Integer.MAX_VALUE, "big", Long.MIN_VALUE));
+            Session enabled = Session.builder(getSession()).setCatalogSessionProperty("elasticsearch", "scalar_script_pushdown_enabled", "true").build();
+            assertQueryFails(enabled, "SELECT number FROM " + indexName + " WHERE number + 1 > 0", ".*integer addition overflow.*");
+            assertQueryFails(enabled, "SELECT number FROM " + indexName + " WHERE number / (number - number) = 1", ".*Division by zero.*");
+            assertQueryFails(enabled, "SELECT number FROM " + indexName + " WHERE CAST(number AS TINYINT) > 0", ".*Out of range for tinyint.*");
+            assertQueryFails(enabled, "SELECT big FROM " + indexName + " WHERE abs(big) > 0", ".*out of range for abs.*");
         }
         finally {
             deleteIndex(indexName);
@@ -591,6 +887,10 @@ public abstract class BaseElasticsearchAnyMatchPushdownTest
             assertQueryFails(enabled, "SELECT tinyints FROM " + indexName + " WHERE any_match(tinyints, x -> x + TINYINT '1' > 0)", ".*tinyint addition overflow.*");
             assertQueryFails(enabled, "SELECT smallints FROM " + indexName + " WHERE any_match(smallints, x -> x + SMALLINT '1' > 0)", ".*smallint addition overflow.*");
             assertQueryFails(enabled, "SELECT numbers FROM " + indexName + " WHERE any_match(numbers, x -> x / (x - x) = 1)", ".*Division by zero.*");
+            assertQueryFails(enabled, "SELECT numbers FROM " + indexName + " WHERE any_match(numbers, x -> x / 0 > 0)", ".*Division by zero.*");
+            assertQueryFails(enabled, "SELECT numbers FROM " + indexName + " WHERE any_match(numbers, x -> CAST(x AS TINYINT) > 0)", ".*Out of range for tinyint.*");
+            assertQueryFails(enabled, "SELECT numbers FROM " + indexName + " WHERE any_match(numbers, x -> round(x, -19) > 0)", ".*numerical overflow.*");
+            assertQueryFails(enabled, "SELECT bigints FROM " + indexName + " WHERE any_match(bigints, x -> abs(x) > 0)", ".*out of range for abs.*");
             assertThat(query(enabled, "SELECT bigints FROM " + indexName + " WHERE any_match(bigints, x -> mod(x, BIGINT '-1') = BIGINT '0')"))
                     .matches("SELECT ARRAY[BIGINT '-9223372036854775808']")
                     .isFullyPushedDown();

@@ -132,6 +132,11 @@ The following table details all general configuration properties:
   - Enable pushing down aggregations to Elasticsearch. Can be overridden per
     query with the `aggregation_pushdown_enabled` session property.
   - `true`
+* - `elasticsearch.scalar-script-pushdown.enabled`
+  - Enable Painless pushdown for supported scalar expressions on source-equivalent
+    fields with doc values. Can be overridden with the
+    `scalar_script_pushdown_enabled` session property.
+  - `false`
 * - `elasticsearch.full-text-pushdown`
   - Push predicates and dynamic filters on analyzed `text` fields to
     Elasticsearch as full-text queries. One of `DISABLED`, `SAFE`, or `UNSAFE`.
@@ -627,8 +632,9 @@ flags, remain local. Prefix conjunctions can be reduced to the stronger prefix
 or an empty match; other unproven conjunctions retain the original lambda after
 prefiltering. Normalized, truncated, and otherwise source-incompatible mappings
 are not eligible. Fields with neither an index nor doc values remain local.
-Doc-values-only keyword fields keep these new string predicates local for
-compatibility with Elasticsearch 7.
+These native string queries are not generated for doc-values-only keyword
+fields, for compatibility with Elasticsearch 7. Script support described below
+can still apply to eligible keyword doc values.
 
 Native translation is independent of `array_script_pushdown_enabled`. When
 scripts are enabled, an OR can combine exact native branches with non-throwing
@@ -639,19 +645,38 @@ cannot hide an arithmetic error. If a combined query exceeds resource limits,
 the connector tries the whole script or the existing native prefilter/local
 fallback. Expression depth, size, value counts, and final query size are bounded.
 
-### Integral array expression scripts
+### Array expression scripts
 
 Enable `elasticsearch.array-script-pushdown.enabled=true` in the catalog, or set
-the `array_script_pushdown_enabled` catalog session property to `true`, to push
-supported integral `any_match` expressions as Painless script queries. This
-option is disabled by default and is independent of full-text pushdown mode.
+its `array_script_pushdown_enabled` session property to `true`, to push supported
+`any_match` expressions as Painless script queries. This option is disabled by
+default and is independent of full-text pushdown mode. Native exact queries are
+preferred; eligible mixed expressions can use native queries and scripts together.
 
-The supported element types are `TINYINT`, `SMALLINT`, `INTEGER`, and `BIGINT`.
-The compiler supports addition, subtraction, multiplication, integer division,
-modulo (`%` and `mod`), unary minus, the six ordinary comparisons, and `AND`,
-`OR`, and `NOT` within the lambda. Lossless integral widening casts are supported
-for the implicit coercions used by these expressions. Native exact queries are
-preferred whenever the whole predicate already has a native translation.
+Supported source-equivalent array mappings include integral types, `REAL` on
+`float`, `DOUBLE` on `double`, `BOOLEAN`, direct `keyword` strings, and
+`TIMESTAMP(3)` on eligible date fields. Doc values are required in every backing
+index. `half_float`, `scaled_float`, normalized or truncated strings, and mappings
+that can lose source values are not eligible for exact script evaluation.
+
+The typed compiler supports the following expressions when it can preserve their
+NULL, type, and error semantics:
+
+- Arithmetic `+`, `-`, `*`, `/`, `%`, `mod`, and unary minus; comparisons,
+  `IS NOT DISTINCT FROM`, `IN`, `BETWEEN`, `AND`, `OR`, and `NOT`.
+- Numeric casts and `TRY_CAST`, `COALESCE`, `NULLIF`, and searched `CASE`.
+  Floating-point to integral or decimal casts remain local. Decimal arithmetic
+  is supported on decimal expressions derived from eligible array elements;
+  this does not add a decimal Elasticsearch array mapping.
+- `abs`, `ceil`/`ceiling`, `floor`, `round`, `truncate`, `sign`, `sqrt`, and
+  `pow`/`power`, for supported signatures. Decimal rounding places must be constant.
+- String `length`, `starts_with`, `ends_with`, `strpos`, `replace`, `concat`,
+  `substr`/`substring`, `trim`, `ltrim`, `rtrim`, `lower`, `upper`, and constant
+  SQL `LIKE` patterns with optional escape. Character positions use Unicode code
+  points. Case conversion admits non-ASCII strings for checking by Trino.
+- UTC timestamp `year`, `month`, `day`/`day_of_month`, `hour`, `minute`, `second`,
+  `day_of_week`/`dow`, `day_of_year`/`doy`, `date_trunc`, `date_add`, and fixed-unit
+  `date_diff`. Calendar month, quarter, and year differences remain local.
 
 For example, both branches of this `OR` can be evaluated by Elasticsearch:
 
@@ -661,27 +686,79 @@ FROM events
 WHERE any_match(numbers, x -> x > 10 OR mod(x, 2) = 0);
 ```
 
-Comparisons and non-throwing arithmetic, such as modulo by a nonzero constant,
-can be pushed exactly. Arithmetic that may overflow or divide by zero is pushed
-as a prefilter with the original SQL lambda retained. The script admits a
-document on an arithmetic error so Trino can preserve SQL overflow and division
-errors. Every expression in a lambda is evaluated on the same array element.
+A supported non-throwing expression can be pushed exactly. Fallible arithmetic,
+Unicode case conversion, guarded string expansion, three-argument substring,
+and temporal expressions retain the original SQL lambda as a residual. A script
+admits the document when a supported operation errors or reaches its guard, so
+Trino can preserve SQL errors and finish evaluation. Every expression is evaluated
+on the same array element. Floating comparisons preserve Trino's NaN semantics,
+including the difference between equality and `IS NOT DISTINCT FROM`. Native
+array predicates with floating zero or non-finite constants are declined; typed
+scripts preserve SQL equality of positive and negative zero when enabled.
 
-Script pushdown requires compatible source-equivalent numeric mappings and doc
-values in every backing index. NULL constants, captured columns, narrowing
-casts, unsupported functions, and boolean branches independent of the element
-remain local when their NULL or error semantics cannot be preserved. A NULL
-element cannot make a supported lambda true; missing, empty, and only-NULL
-arrays are therefore excluded correctly for positive `any_match` filters.
+The compiler proves that a NULL element cannot make the lambda true or introduce
+an error that would be lost by skipping it. Expressions such as
+`coalesce(x, 0) > 10` are eligible; `coalesce(x, 100) > 10` and `x IS NULL` remain
+local. Missing, empty, and only-NULL arrays are excluded correctly for eligible
+positive `any_match` filters. Captured columns, unsupported signatures, and failed
+NULL proofs remain local or use an available necessary native prefilter.
 
 Scripts are generated by the connector with parameterized values. Expression
 size and depth, parameter counts, and rendered request bytes are bounded.
 Dynamic filters do not use this script compiler. Script queries require the
 Elasticsearch cluster to allow them, including `search.allow_expensive_queries`.
-Runtime script failures fail the query rather than silently omitting a filter.
-Scripts can increase Elasticsearch CPU usage, especially for large arrays; test
-the workload before enabling the option. Disabling it restores native queries
-and array prefiltering without scripts.
+Unexpected runtime script failures fail the query. Scripts can increase
+Elasticsearch CPU usage, especially for large arrays; test the workload before
+enabling the option. Disabling it restores native queries and array prefiltering
+without scripts.
+
+### Scalar expression scripts
+
+Scalar `WHERE` expressions use the same typed expression compiler as array
+lambdas. Enable `elasticsearch.scalar-script-pushdown.enabled=true` in the catalog,
+or set the `scalar_script_pushdown_enabled` catalog session property to `true`.
+It is disabled by default and independent of `array_script_pushdown_enabled`.
+Native predicates are preferred and do not require either script option.
+
+```sql
+SET SESSION elasticsearch.scalar_script_pushdown_enabled = true;
+
+SELECT id
+FROM events
+WHERE lower(raw_review_comment) LIKE '%sá%'
+LIMIT 20;
+
+SELECT id
+FROM events
+WHERE number > 10 OR mod(number, 2) = 0;
+```
+
+The supported arithmetic, casts, nullable expressions, math functions, strings,
+and UTC timestamps follow the array expression allowlist above. Each compiled
+scalar expression refers to one column, with any number of references to that
+column. Separate predicates on different columns can be composed; an arithmetic
+expression combining two different columns remains local. Native scalar regexp
+predicates keep their existing full-text mode and residual policy.
+
+Scalar NULL semantics are evaluated directly, including a missing field. For
+example, `coalesce(number, 100) > 10` can be exact and include NULL rows; the
+corresponding array lambda is ineligible because NULL array elements are absent
+from doc values. Floating-point domains extracted by Trino can also use scripts
+to preserve signed-zero and explicit NaN membership semantics.
+
+Scripts require the same source-equivalent mapping proof and doc values as the
+array compiler: direct exact `keyword` strings and eligible numeric, boolean,
+and date mappings. An analyzed text field alone, a lossy keyword sub-field,
+`ignore_above`, or a normalizer does not become eligible by enabling scripts.
+The field is read as one scalar value; unexpected multiple doc values fail the
+query rather than selecting an arbitrary element.
+
+Non-throwing expressions can be exact. Fallible operations and Unicode case
+conversion remain prefilters with the original SQL predicate retained. Thus
+`lower(raw_review_comment) LIKE '%sá%'` can filter documents in Elasticsearch
+when the column is eligible, but non-ASCII strings still require Trino's Unicode
+case conversion and LIKE check. LIMIT remains above this residual filter; a
+remote candidate count must not be mistaken for the requested SQL result count.
 
 ### Prefix predicate push down
 

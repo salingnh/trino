@@ -36,6 +36,7 @@ import io.trino.spi.type.Type;
 import io.trino.spi.type.VarcharType;
 import io.trino.sql.ir.Bind;
 import io.trino.sql.ir.Call;
+import io.trino.sql.ir.Case;
 import io.trino.sql.ir.Cast;
 import io.trino.sql.ir.Coalesce;
 import io.trino.sql.ir.ComparisonOperator;
@@ -47,6 +48,7 @@ import io.trino.sql.ir.IsNull;
 import io.trino.sql.ir.Lambda;
 import io.trino.sql.ir.Logical;
 import io.trino.sql.ir.Reference;
+import io.trino.sql.ir.WhenClause;
 import io.trino.testing.TestingSession;
 import io.trino.transaction.TestingTransactionManager;
 import io.trino.transaction.TransactionManager;
@@ -72,6 +74,7 @@ import static io.trino.spi.expression.StandardFunctions.ADD_FUNCTION_NAME;
 import static io.trino.spi.expression.StandardFunctions.AND_FUNCTION_NAME;
 import static io.trino.spi.expression.StandardFunctions.ARRAY_CONSTRUCTOR_FUNCTION_NAME;
 import static io.trino.spi.expression.StandardFunctions.BETWEEN_FUNCTION_NAME;
+import static io.trino.spi.expression.StandardFunctions.CASE_FUNCTION_NAME;
 import static io.trino.spi.expression.StandardFunctions.CAST_FUNCTION_NAME;
 import static io.trino.spi.expression.StandardFunctions.COALESCE_FUNCTION_NAME;
 import static io.trino.spi.expression.StandardFunctions.DIVIDE_FUNCTION_NAME;
@@ -138,6 +141,7 @@ public class TestConnectorExpressionTranslator
     private static final ResolvedFunction TRANSFORM_BIGINT = FUNCTIONS.resolveFunction(ARRAY_TRANSFORM_NAME, fromTypes(BIGINT_ARRAY_TYPE, BIGINT_TO_BIGINT));
 
     private static final Map<Symbol, Type> symbols = ImmutableMap.<Symbol, Type>builder()
+            .put(new Symbol(INTEGER, "int_symbol_1"), INTEGER)
             .put(new Symbol(BIGINT, "bigint_symbol"), BIGINT)
             .put(new Symbol(BIGINT_ARRAY_TYPE, "array_bigint_symbol"), BIGINT_ARRAY_TYPE)
             .put(new Symbol(DOUBLE, "double_symbol_1"), DOUBLE)
@@ -602,6 +606,22 @@ public class TestConnectorExpressionTranslator
                                 new Variable("varchar_symbol_1", VARCHAR_TYPE),
                                 new io.trino.spi.expression.Constant(null, VARCHAR_TYPE),
                                 new io.trino.spi.expression.Constant(utf8Slice("fallback"), VARCHAR_TYPE))));
+    }
+
+    @Test
+    public void testTranslateSearchedCase()
+    {
+        assertTranslationRoundTrips(
+                new Case(List.of(
+                        new WhenClause(new IsNull(new Reference(INTEGER, "int_symbol_1")), new Constant(INTEGER, 0L)),
+                        new WhenClause(comparison(ComparisonOperator.GREATER_THAN, new Reference(INTEGER, "int_symbol_1"), new Constant(INTEGER, 10L)), new Constant(INTEGER, 1L))),
+                        new Constant(INTEGER, 2L)),
+                new io.trino.spi.expression.Call(INTEGER, CASE_FUNCTION_NAME, List.of(
+                        new io.trino.spi.expression.Call(BOOLEAN, IS_NULL_FUNCTION_NAME, List.of(new Variable("int_symbol_1", INTEGER))),
+                        new io.trino.spi.expression.Constant(0L, INTEGER),
+                        new io.trino.spi.expression.Call(BOOLEAN, StandardFunctions.LESS_THAN_OPERATOR_FUNCTION_NAME, List.of(new io.trino.spi.expression.Constant(10L, INTEGER), new Variable("int_symbol_1", INTEGER))),
+                        new io.trino.spi.expression.Constant(1L, INTEGER),
+                        new io.trino.spi.expression.Constant(2L, INTEGER))));
     }
 
     @Test

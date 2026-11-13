@@ -159,16 +159,26 @@ class TestElasticsearchArrayScriptTranslator
     }
 
     @Test
-    void testRejectsNullNonStrictAndForeignExpressions()
+    void testRejectsNonStrictAndForeignExpressions()
     {
         for (Function<Variable, ConnectorExpression> body : List.<Function<Variable, ConnectorExpression>>of(
-                element -> new Call(BOOLEAN, EQUAL_OPERATOR_FUNCTION_NAME, List.of(element, new Constant(null, INTEGER))),
                 element -> new Call(BOOLEAN, OR_FUNCTION_NAME, List.of(Constant.TRUE, compare(EQUAL_OPERATOR_FUNCTION_NAME, element, 0))),
                 _ -> compare(EQUAL_OPERATOR_FUNCTION_NAME, new Variable("captured", INTEGER), 0),
-                element -> compare(EQUAL_OPERATOR_FUNCTION_NAME, new Call(INTEGER, new FunctionName("abs"), List.of(element)), 0),
-                element -> compare(EQUAL_OPERATOR_FUNCTION_NAME, arithmetic(DIVIDE_FUNCTION_NAME, element, 0), 0),
-                element -> compare(EQUAL_OPERATOR_FUNCTION_NAME, arithmetic(MODULO_FUNCTION_NAME, element, 0), 0))) {
+                element -> compare(EQUAL_OPERATOR_FUNCTION_NAME, new Call(INTEGER, new FunctionName("unregistered"), List.of(element)), 0))) {
             assertThat(translate(anyMatch(INTEGER, body), column(INTEGER), ElasticsearchPredicateCompositionPolicy.DEFAULT)).isEmpty();
+        }
+    }
+
+    @Test
+    void testNullableComparisonAndLiteralZeroDivisor()
+    {
+        Call nullable = anyMatch(INTEGER, element -> new Call(BOOLEAN, EQUAL_OPERATOR_FUNCTION_NAME, List.of(element, new Constant(null, INTEGER))));
+        assertThat(translate(nullable, column(INTEGER), ElasticsearchPredicateCompositionPolicy.DEFAULT).orElseThrow().enforcement()).contains(EXACT);
+        for (FunctionName operation : List.of(DIVIDE_FUNCTION_NAME, MODULO_FUNCTION_NAME)) {
+            Call source = anyMatch(INTEGER, element -> compare(EQUAL_OPERATOR_FUNCTION_NAME, arithmetic(operation, element, 0), 0));
+            var translated = translate(source, column(INTEGER), ElasticsearchPredicateCompositionPolicy.DEFAULT).orElseThrow();
+            assertThat(translated.enforcement()).contains(PREFILTER);
+            assertThat(translated.residual()).contains(source);
         }
     }
 

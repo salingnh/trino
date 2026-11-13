@@ -47,6 +47,17 @@ public class TestElasticsearchRemotePredicateQueryBuilder
     }
 
     @Test
+    public void testScalarScriptParameters()
+    {
+        var script = new ElasticsearchRemotePredicate.ScalarScript("Review.Comment", "return params.value == 1;", Map.of(
+                "field", ElasticsearchRemotePredicate.Value.of("Review.Comment"), "value", ElasticsearchRemotePredicate.Value.of(1L)));
+        assertThat(build(script).at("/script/script/params/field").asText()).isEqualTo("Review.Comment");
+        assertThat(build(script).at("/script/script/params/value").asLong()).isEqualTo(1);
+        assertThatThrownBy(() -> new ElasticsearchRemotePredicate.ScalarScript("Other", script.source(), script.parameters()))
+                .isInstanceOf(IllegalArgumentException.class);
+    }
+
+    @Test
     public void testTermAndTerms()
     {
         assertThat(build(new ElasticsearchRemotePredicate.Term("status", "active")).toString())

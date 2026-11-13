@@ -57,8 +57,9 @@ import static io.trino.spi.type.SmallintType.SMALLINT;
 import static io.trino.spi.type.TinyintType.TINYINT;
 
 /**
- * Compiles a positive any_match WHERE predicate over integral doc values. Every comparison must depend on the
- * lambda element, so the body is NULL on a NULL element; ignoring unindexed NULL elements preserves its TRUE set.
+ * Compiles a positive any_match WHERE predicate, preferring the compact integral compiler before the typed fallback.
+ * The compact compiler requires element-dependent comparisons. The fallback proves the result at a NULL element;
+ * both preserve the TRUE set when doc values omit NULL elements.
  * Fallible arithmetic admits the document on an arithmetic error and retains the entire SQL residual. It must
  * never silently wrap an overflow, skip a failing element, or turn an error into a false remote restriction.
  */
@@ -130,6 +131,16 @@ final class ElasticsearchArrayScriptTranslator
     private ElasticsearchArrayScriptTranslator() {}
 
     static Optional<ElasticsearchPredicateTranslation<ConnectorExpression>> translate(
+            Call source,
+            Lambda lambda,
+            ElasticsearchColumnHandle column,
+            ElasticsearchPredicateCompositionPolicy policy)
+    {
+        return translateIntegral(source, lambda, column, policy)
+                .or(() -> ElasticsearchExpressionScriptTranslator.translate(source, lambda, column, policy));
+    }
+
+    private static Optional<ElasticsearchPredicateTranslation<ConnectorExpression>> translateIntegral(
             Call source,
             Lambda lambda,
             ElasticsearchColumnHandle column,

@@ -103,6 +103,7 @@ public class ElasticsearchConfig
     private boolean keywordSubfieldPushdownWithIgnoreAbove;
     private boolean aggregationPushdownEnabled = true;
     private boolean arrayScriptPushdownEnabled;
+    private boolean scalarScriptPushdownEnabled;
     private int aggregationPageSize = 10_000;
     private FullTextPushdownMode fullTextPushdownMode = FullTextPushdownMode.DISABLED;
 
@@ -563,13 +564,26 @@ public class ElasticsearchConfig
         return this;
     }
 
+    public boolean isScalarScriptPushdownEnabled()
+    {
+        return scalarScriptPushdownEnabled;
+    }
+
+    @Config("elasticsearch.scalar-script-pushdown.enabled")
+    @ConfigDescription("Enable Painless pushdown for typed scalar expressions with source-equivalent mappings")
+    public ElasticsearchConfig setScalarScriptPushdownEnabled(boolean scalarScriptPushdownEnabled)
+    {
+        this.scalarScriptPushdownEnabled = scalarScriptPushdownEnabled;
+        return this;
+    }
+
     public boolean isArrayScriptPushdownEnabled()
     {
         return arrayScriptPushdownEnabled;
     }
 
     @Config("elasticsearch.array-script-pushdown.enabled")
-    @ConfigDescription("Enable Painless pushdown for integral array arithmetic, comparisons, and logic")
+    @ConfigDescription("Enable Painless pushdown for typed array expressions with source-equivalent mappings")
     public ElasticsearchConfig setArrayScriptPushdownEnabled(boolean arrayScriptPushdownEnabled)
     {
         this.arrayScriptPushdownEnabled = arrayScriptPushdownEnabled;

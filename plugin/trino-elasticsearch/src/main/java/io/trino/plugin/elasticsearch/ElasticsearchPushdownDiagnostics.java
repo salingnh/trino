@@ -72,6 +72,7 @@ public class ElasticsearchPushdownDiagnostics
     private final LongAdder matchPhrasePrefixPredicates = new LongAdder();
     private final LongAdder existsPredicates = new LongAdder();
     private final LongAdder arrayScriptPredicates = new LongAdder();
+    private final LongAdder scalarScriptPredicates = new LongAdder();
 
     private final LongAdder dynamicFilterPlans = new LongAdder();
     private final EnumMap<DynamicFilterOutcome, LongAdder> dynamicFilterOutcomes = new EnumMap<>(DynamicFilterOutcome.class);
@@ -205,6 +206,7 @@ public class ElasticsearchPushdownDiagnostics
             case ElasticsearchRemotePredicate.MatchPhrasePrefix _ -> matchPhrasePrefixPredicates.increment();
             case ElasticsearchRemotePredicate.Exists _ -> existsPredicates.increment();
             case ElasticsearchRemotePredicate.ArrayScript _ -> arrayScriptPredicates.increment();
+            case ElasticsearchRemotePredicate.ScalarScript _ -> scalarScriptPredicates.increment();
             case ElasticsearchRemotePredicate.MatchNone _ -> {}
         }
     }
@@ -336,6 +338,7 @@ public class ElasticsearchPushdownDiagnostics
                 matchPhrasePrefixPredicates.sum(),
                 existsPredicates.sum(),
                 arrayScriptPredicates.sum(),
+                scalarScriptPredicates.sum(),
                 dynamicFilterPlans.sum(),
                 getDynamicFilterOutcomes(),
                 dynamicFilterDomainsReceived.sum(),
@@ -536,6 +539,12 @@ public class ElasticsearchPushdownDiagnostics
     public long getArrayScriptPredicates()
     {
         return arrayScriptPredicates.sum();
+    }
+
+    @Managed
+    public long getScalarScriptPredicates()
+    {
+        return scalarScriptPredicates.sum();
     }
 
     @Managed
@@ -773,6 +782,7 @@ public class ElasticsearchPushdownDiagnostics
             long matchPhrasePrefixPredicates,
             long existsPredicates,
             long arrayScriptPredicates,
+            long scalarScriptPredicates,
             long dynamicFilterPlans,
             Map<String, Long> dynamicFilterOutcomes,
             long dynamicFilterDomainsReceived,

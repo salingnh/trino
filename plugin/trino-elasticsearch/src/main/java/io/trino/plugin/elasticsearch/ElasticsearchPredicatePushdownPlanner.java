@@ -85,6 +85,17 @@ final class ElasticsearchPredicatePushdownPlanner
             ElasticsearchPredicateCompositionPolicy policy,
             boolean arrayScriptPushdownEnabled)
     {
+        return plan(session, constraint, fullTextMode, policy, arrayScriptPushdownEnabled, false);
+    }
+
+    static Result plan(
+            ConnectorSession session,
+            Constraint constraint,
+            FullTextPushdownMode fullTextMode,
+            ElasticsearchPredicateCompositionPolicy policy,
+            boolean arrayScriptPushdownEnabled,
+            boolean scalarScriptPushdownEnabled)
+    {
         requireNonNull(session, "session is null");
         requireNonNull(constraint, "constraint is null");
         requireNonNull(fullTextMode, "fullTextMode is null");
@@ -103,6 +114,9 @@ final class ElasticsearchPredicatePushdownPlanner
             ElasticsearchColumnHandle column = (ElasticsearchColumnHandle) entry.getKey();
             Domain domain = entry.getValue();
             ElasticsearchPredicateTranslation<Domain> translation = translateDomainPredicate(column, domain, fullTextMode, policy);
+            if (scalarScriptPushdownEnabled && translation.remotePredicate().isEmpty()) {
+                translation = ElasticsearchScalarPredicateTranslator.translateFloatingDomain(column, domain, policy).orElse(translation);
+            }
 
             decisions.add(translation.decision());
             translation.remotePredicate().ifPresent(remotePredicates::add);
@@ -118,7 +132,8 @@ final class ElasticsearchPredicatePushdownPlanner
                 normalizedConstraint.getAssignments(),
                 fullTextMode,
                 policy,
-                arrayScriptPushdownEnabled);
+                arrayScriptPushdownEnabled,
+                scalarScriptPushdownEnabled);
         decisions.add(expressionTranslation.decision());
         expressionTranslation.remotePredicate().ifPresent(remotePredicates::add);
 
@@ -186,11 +201,18 @@ final class ElasticsearchPredicatePushdownPlanner
             Map<String, ColumnHandle> assignments,
             FullTextPushdownMode fullTextMode,
             ElasticsearchPredicateCompositionPolicy policy,
-            boolean arrayScriptPushdownEnabled)
+            boolean arrayScriptPushdownEnabled,
+            boolean scalarScriptPushdownEnabled)
     {
         requireNonNull(expression, "expression is null");
         if (expression.equals(TRUE)) {
             return ElasticsearchPredicateTranslation.noop(Reason.NOOP);
+        }
+
+        Optional<ElasticsearchPredicateTranslation<ConnectorExpression>> scalar = ElasticsearchScalarPredicateTranslator.translate(
+                session, expression, assignments, policy, scalarScriptPushdownEnabled);
+        if (scalar.isPresent()) {
+            return scalar.orElseThrow();
         }
 
         if (expression instanceof Call call && AND_FUNCTION_NAME.equals(call.getFunctionName())) {
@@ -199,7 +221,7 @@ final class ElasticsearchPredicatePushdownPlanner
             }
             List<ElasticsearchPredicateTranslation<ConnectorExpression>> children = call.getArguments().stream()
                     .filter(argument -> !argument.equals(TRUE))
-                    .map(argument -> translateExpression(session, argument, assignments, fullTextMode, policy, arrayScriptPushdownEnabled))
+                    .map(argument -> translateExpression(session, argument, assignments, fullTextMode, policy, arrayScriptPushdownEnabled, scalarScriptPushdownEnabled))
                     .toList();
             if (children.isEmpty()) {
                 return ElasticsearchPredicateTranslation.noop(Reason.BOOLEAN_AND);
@@ -218,7 +240,7 @@ final class ElasticsearchPredicatePushdownPlanner
                 return ElasticsearchPredicateTranslation.unsupported(expression, Reason.BOOLEAN_OR);
             }
             List<ElasticsearchPredicateTranslation<ConnectorExpression>> children = arguments.stream()
-                    .map(argument -> translateExpression(session, argument, assignments, fullTextMode, policy, arrayScriptPushdownEnabled))
+                    .map(argument -> translateExpression(session, argument, assignments, fullTextMode, policy, arrayScriptPushdownEnabled, scalarScriptPushdownEnabled))
                     .toList();
             return ElasticsearchPredicateComposer.or(expression, children, policy);
         }

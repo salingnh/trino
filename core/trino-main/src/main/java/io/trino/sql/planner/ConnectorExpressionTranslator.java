@@ -57,6 +57,7 @@ import io.trino.sql.ir.Lambda;
 import io.trino.sql.ir.Let;
 import io.trino.sql.ir.Logical;
 import io.trino.sql.ir.Reference;
+import io.trino.sql.ir.WhenClause;
 import io.trino.sql.tree.QualifiedName;
 import io.trino.type.JoniRegexp;
 import io.trino.type.JsonPathType;
@@ -86,6 +87,7 @@ import static io.trino.spi.expression.StandardFunctions.ADD_FUNCTION_NAME;
 import static io.trino.spi.expression.StandardFunctions.AND_FUNCTION_NAME;
 import static io.trino.spi.expression.StandardFunctions.ARRAY_CONSTRUCTOR_FUNCTION_NAME;
 import static io.trino.spi.expression.StandardFunctions.BETWEEN_FUNCTION_NAME;
+import static io.trino.spi.expression.StandardFunctions.CASE_FUNCTION_NAME;
 import static io.trino.spi.expression.StandardFunctions.CAST_FUNCTION_NAME;
 import static io.trino.spi.expression.StandardFunctions.COALESCE_FUNCTION_NAME;
 import static io.trino.spi.expression.StandardFunctions.DIVIDE_FUNCTION_NAME;
@@ -337,6 +339,24 @@ public final class ConnectorExpressionTranslator
             }
             if (COALESCE_FUNCTION_NAME.equals(call.getFunctionName()) && call.getArguments().size() >= 2) {
                 return translateCoalesce(call.getArguments(), lambdaArguments);
+            }
+            if (CASE_FUNCTION_NAME.equals(call.getFunctionName()) && call.getArguments().size() >= 3 && call.getArguments().size() % 2 == 1) {
+                Optional<List<Expression>> translated = translateExpressions(call.getArguments(), lambdaArguments);
+                if (translated.isEmpty()) {
+                    return Optional.empty();
+                }
+                List<Expression> arguments = translated.orElseThrow();
+                ImmutableList.Builder<WhenClause> clauses = ImmutableList.builder();
+                for (int index = 0; index < arguments.size() - 1; index += 2) {
+                    if (!arguments.get(index).type().equals(BOOLEAN) || !arguments.get(index + 1).type().equals(call.getType())) {
+                        return Optional.empty();
+                    }
+                    clauses.add(new WhenClause(arguments.get(index), arguments.get(index + 1)));
+                }
+                if (!arguments.getLast().type().equals(call.getType())) {
+                    return Optional.empty();
+                }
+                return Optional.of(new Case(clauses.build(), arguments.getLast()));
             }
             if (CAST_FUNCTION_NAME.equals(call.getFunctionName()) && call.getArguments().size() == 1) {
                 return translateCast(call.getType(), call.getArguments().get(0), lambdaArguments);
@@ -977,14 +997,25 @@ public final class ConnectorExpressionTranslator
             if (!isComplexExpressionPushdown(session)) {
                 return Optional.empty();
             }
-            // Generic Case isn't translated; only the trivial NULLIF shape
-            // (`if(first = second) then null else first`) is recognized so it can be pushed as
-            // `$nullif`. The Let-wrapped NULLIF is handled by `visitLet`.
             IrExpressions.NullIf nullIf = matchNullIf(node);
-            if (nullIf == null) {
+            if (nullIf != null) {
+                return translateNullIfPattern(nullIf, node.type(), context);
+            }
+            ImmutableList.Builder<ConnectorExpression> arguments = ImmutableList.builder();
+            for (WhenClause clause : node.whenClauses()) {
+                Optional<ConnectorExpression> condition = process(clause.operand(), context);
+                Optional<ConnectorExpression> result = process(clause.result(), context);
+                if (condition.isEmpty() || result.isEmpty()) {
+                    return Optional.empty();
+                }
+                arguments.add(condition.orElseThrow()).add(result.orElseThrow());
+            }
+            Optional<ConnectorExpression> otherwise = process(node.defaultValue(), context);
+            if (otherwise.isEmpty()) {
                 return Optional.empty();
             }
-            return translateNullIfPattern(nullIf, node.type(), context);
+            arguments.add(otherwise.orElseThrow());
+            return Optional.of(new io.trino.spi.expression.Call(node.type(), CASE_FUNCTION_NAME, arguments.build()));
         }
 
         private Optional<ConnectorExpression> translateNullIfPattern(IrExpressions.NullIf pattern, Type type, Context context)

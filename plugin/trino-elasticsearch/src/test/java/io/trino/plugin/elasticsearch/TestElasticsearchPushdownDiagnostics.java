@@ -62,6 +62,18 @@ public class TestElasticsearchPushdownDiagnostics
     }
 
     @Test
+    public void testScalarScriptDiagnostics()
+    {
+        var diagnostics = new ElasticsearchPushdownDiagnostics();
+        diagnostics.recordTranslation(new Decision(Reason.EXACT_SCALAR_SCRIPT, Optional.of(EXACT), true, false, false, List.of()));
+        diagnostics.recordRemotePredicate(new ElasticsearchRemotePredicate.ScalarScript("Word", "return true;", Map.of("field", ElasticsearchRemotePredicate.Value.of("Word"))));
+        assertThat(diagnostics.snapshot().scalarScriptPredicates()).isEqualTo(1);
+        assertThat(diagnostics.snapshot().arrayScriptPredicates()).isZero();
+        assertThat(diagnostics.snapshot().anyMatchTranslations()).isZero();
+        assertThat(diagnostics.getScalarScriptPredicates()).isEqualTo(1);
+    }
+
+    @Test
     public void testAnyMatchPrefilterDiagnostics()
     {
         ElasticsearchPushdownDiagnostics diagnostics = new ElasticsearchPushdownDiagnostics();

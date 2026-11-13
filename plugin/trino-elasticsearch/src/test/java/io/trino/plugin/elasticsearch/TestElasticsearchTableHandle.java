@@ -65,6 +65,7 @@ public class TestElasticsearchTableHandle
                 new ElasticsearchRemotePredicate.ArrayScript("Numbers", "return params.value > 0;", ImmutableMap.of(
                         "field", ElasticsearchRemotePredicate.Value.of("Numbers"),
                         "value", ElasticsearchRemotePredicate.Value.of(2L))),
+                new ElasticsearchRemotePredicate.ScalarScript("Word", "return params.field != null;", ImmutableMap.of("field", ElasticsearchRemotePredicate.Value.of("Word"))),
                 new ElasticsearchRemotePredicate.Term("status.keyword", "active"),
                 new ElasticsearchRemotePredicate.MatchNone(),
                 new ElasticsearchRemotePredicate.Terms("id", ImmutableList.of(1L, 2L, 3L)),
@@ -105,6 +106,7 @@ public class TestElasticsearchTableHandle
     public void testRemotePredicateJsonRoundTripThroughConnectorHandleCodec()
     {
         ElasticsearchRemotePredicate predicate = new ElasticsearchRemotePredicate.And(ImmutableList.of(
+                new ElasticsearchRemotePredicate.ScalarScript("Word", "return params.field != null;", ImmutableMap.of("field", ElasticsearchRemotePredicate.Value.of("Word"))),
                 new ElasticsearchRemotePredicate.Term("status.keyword", "active"),
                 new ElasticsearchRemotePredicate.Enforced(
                         new ElasticsearchRemotePredicate.MatchPhrase("description", "apache trino"),

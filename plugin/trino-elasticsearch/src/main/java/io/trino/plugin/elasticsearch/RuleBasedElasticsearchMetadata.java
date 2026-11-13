@@ -84,7 +84,8 @@ public class RuleBasedElasticsearchMetadata
                 constraint,
                 getFullTextPushdownMode(session),
                 ElasticsearchPredicateCompositionPolicy.DEFAULT,
-                ElasticsearchSessionProperties.isArrayScriptPushdownEnabled(session));
+                ElasticsearchSessionProperties.isArrayScriptPushdownEnabled(session),
+                ElasticsearchSessionProperties.isScalarScriptPushdownEnabled(session));
         predicatePlan.decisions().forEach(diagnostics::recordTranslation);
         Constraint preparedConstraint = predicatePlan.remainingConstraint();
 

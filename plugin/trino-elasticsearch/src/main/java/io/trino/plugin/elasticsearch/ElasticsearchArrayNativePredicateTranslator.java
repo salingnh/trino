@@ -43,6 +43,7 @@ import static io.trino.spi.expression.StandardFunctions.CAST_FUNCTION_NAME;
 import static io.trino.spi.expression.StandardFunctions.EQUAL_OPERATOR_FUNCTION_NAME;
 import static io.trino.spi.expression.StandardFunctions.GREATER_THAN_OPERATOR_FUNCTION_NAME;
 import static io.trino.spi.expression.StandardFunctions.GREATER_THAN_OR_EQUAL_OPERATOR_FUNCTION_NAME;
+import static io.trino.spi.expression.StandardFunctions.IDENTICAL_OPERATOR_FUNCTION_NAME;
 import static io.trino.spi.expression.StandardFunctions.IN_PREDICATE_FUNCTION_NAME;
 import static io.trino.spi.expression.StandardFunctions.IS_NULL_FUNCTION_NAME;
 import static io.trino.spi.expression.StandardFunctions.LESS_THAN_OPERATOR_FUNCTION_NAME;
@@ -389,12 +390,13 @@ final class ElasticsearchArrayNativePredicateTranslator
         private Optional<TruthSets> comparison(FunctionName name, ConnectorExpression left, ConnectorExpression right)
         {
             boolean equal = EQUAL_OPERATOR_FUNCTION_NAME.equals(name);
+            boolean identical = IDENTICAL_OPERATOR_FUNCTION_NAME.equals(name);
             boolean notEqual = NOT_EQUAL_OPERATOR_FUNCTION_NAME.equals(name);
             boolean less = LESS_THAN_OPERATOR_FUNCTION_NAME.equals(name);
             boolean lessEqual = LESS_THAN_OR_EQUAL_OPERATOR_FUNCTION_NAME.equals(name);
             boolean greater = GREATER_THAN_OPERATOR_FUNCTION_NAME.equals(name);
             boolean greaterEqual = GREATER_THAN_OR_EQUAL_OPERATOR_FUNCTION_NAME.equals(name);
-            if (!(equal || notEqual || less || lessEqual || greater || greaterEqual)) {
+            if (!(equal || identical || notEqual || less || lessEqual || greater || greaterEqual)) {
                 return Optional.empty();
             }
             boolean reversed = isElement(right);
@@ -403,13 +405,16 @@ final class ElasticsearchArrayNativePredicateTranslator
                 return Optional.empty();
             }
             if (constant.getValue() == null) {
+                if (identical) {
+                    return Optional.of(new TruthSets(empty, universe, Truth.TRUE));
+                }
                 return Optional.of(new TruthSets(empty, empty, Truth.UNKNOWN));
             }
             if (!(constant.getValue() instanceof Long number) || number < minimum(constant.getType()) || number > maximum(constant.getType())) {
                 return Optional.empty();
             }
             ValueSet values;
-            if (equal || notEqual) {
+            if (equal || identical || notEqual) {
                 values = ValueSet.of(BIGINT, number).intersect(universe);
                 if (notEqual) {
                     values = universe.subtract(values);
@@ -427,7 +432,7 @@ final class ElasticsearchArrayNativePredicateTranslator
                 }
                 values = ValueSet.ofRanges(range).intersect(universe);
             }
-            return Optional.of(new TruthSets(values, universe.subtract(values), Truth.UNKNOWN));
+            return Optional.of(new TruthSets(values, universe.subtract(values), identical ? Truth.FALSE : Truth.UNKNOWN));
         }
 
         private Optional<TruthSets> membership(ConnectorExpression expression)
