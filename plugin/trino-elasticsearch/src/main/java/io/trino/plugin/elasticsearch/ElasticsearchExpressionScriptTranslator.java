@@ -673,7 +673,7 @@ final class ElasticsearchExpressionScriptTranslator
                 if (factor == null) {
                     throw new UnsupportedExpression();
                 }
-                Known onNull = arguments.get(1).onNull().known() && arguments.get(1).onNull().value() == null ? Known.of(null) : Known.unknown();
+                Known onNull = strictNull(List.of(arguments.get(1), arguments.get(2)));
                 return new Compiled("sqlDateDiff(" + arguments.get(1).code() + ", " + arguments.get(2).code() + ", " + factor + "L)", type, dependent, true, onNull);
             }
             else {
@@ -682,7 +682,7 @@ final class ElasticsearchExpressionScriptTranslator
             if (!value.type().equals(TIMESTAMP_MILLIS)) {
                 throw new UnsupportedExpression();
             }
-            Known onNull = value.onNull().known() && value.onNull().value() == null ? Known.of(null) : Known.unknown();
+            Known onNull = strictNull(List.of(value, amount));
             return new Compiled("sqlTemporal(" + value.code() + ", " + amount.code() + ", " + operation + ", " + unit + ")", type, dependent, true, onNull);
         }
     }
@@ -775,6 +775,15 @@ final class ElasticsearchExpressionScriptTranslator
     private static Known strict(List<Compiled> arguments, Function<List<Object>, Object> function)
     {
         return evaluate(arguments, values -> values.stream().anyMatch(value -> value == null) ? null : function.apply(values));
+    }
+
+    private static Known strictNull(List<Compiled> arguments)
+    {
+        // An unindexed NULL element may still evaluate a failing argument before the strict function returns NULL.
+        if (arguments.stream().allMatch(argument -> argument.onNull().known()) && arguments.stream().anyMatch(argument -> argument.onNull().value() == null)) {
+            return Known.of(null);
+        }
+        return Known.unknown();
     }
 
     private static Known logical(Known left, Known right, boolean and)

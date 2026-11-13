@@ -582,6 +582,7 @@ public abstract class BaseElasticsearchAnyMatchPushdownTest
                     "date_trunc('day', x) = TIMESTAMP '2024-02-29 00:00:00.000'",
                     "date_add('month', 1, x) > TIMESTAMP '2024-03-01 00:00:00.000'",
                     "date_diff('day', x, TIMESTAMP '2025-01-01 00:00:00.000') >= 0",
+                    "date_diff('day', TIMESTAMP '2025-01-01 00:00:00.000', x) <= 0",
                     "day_of_week(date_trunc('week', x)) = 1",
                     "coalesce(year(x), 0) > 2000")) {
                 String sql = "SELECT id FROM " + indexName + " WHERE any_match(dates, x -> " + predicate + ")";
@@ -589,6 +590,7 @@ public abstract class BaseElasticsearchAnyMatchPushdownTest
             }
             var filtered = getQueryRunner().executeWithPlan(enabled, "SELECT id FROM " + indexName + " WHERE any_match(dates, x -> year(x) = 2024)");
             assertThat(getQueryRunner().getCoordinator().getQueryManager().getFullQueryInfo(filtered.queryId()).getQueryStats().getPhysicalInputPositions()).isEqualTo(3);
+            assertQueryFails(enabled, "SELECT id FROM " + indexName + " WHERE any_match(dates, x -> date_add('day', coalesce(year(x), BIGINT '9223372036854775807') + BIGINT '1', x) < TIMESTAMP '0001-01-01 00:00:00.000')", ".*bigint addition overflow.*");
         }
         finally {
             deleteIndex(indexName);
@@ -610,7 +612,7 @@ public abstract class BaseElasticsearchAnyMatchPushdownTest
                 }}
                 """);
         try {
-            List<String> words = List.of("nice", "SÁCH đẹp", "sá", "đóng gói", "abc", "", "SÁCH khác");
+            List<String> words = List.of("abc\n", "SÁCH đẹp", "sá", "đóng gói", "abc", "", "SÁCH khác");
             List<Integer> numbers = List.of(-12, 12, 2, 0, 128, -1, 1);
             List<Double> doubles = List.of(-2.5, -0.0, 0.0, 1.25, Double.MAX_VALUE, Double.MIN_NORMAL, Double.MIN_VALUE);
             List<String> dates = List.of(
@@ -649,6 +651,7 @@ public abstract class BaseElasticsearchAnyMatchPushdownTest
                     "replace(word, '', '!') LIKE '%!s!á!%'",
                     "concat(substr(word, 1, 1), 'Z') = 'aZ'",
                     "trim(word) = 'abc'",
+                    "regexp_like(word, '^abc$')",
                     "number > 10 OR mod(number, 2) = 0",
                     "number > 10 AND mod(number, 2) = 0",
                     "NOT (number BETWEEN 0 AND 10)",

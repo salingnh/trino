@@ -1,6 +1,6 @@
 # Hỗ trợ pushdown biểu thức array và scalar sang Elasticsearch
 
-Tài liệu mô tả code trên branch `Feat/elasticsearch-array-necessary-prefilter`, gồm Plan 1, Plan 2, A và B. A đã commit tại `ae4380b3687`; B và tài liệu này được để lại chưa commit để review.
+Tài liệu mô tả code trên branch `Feat/elasticsearch-array-necessary-prefilter`, gồm Plan 1, Plan 2, A và B. A đã commit tại `ae4380b3687`; B và đường scalar đã commit tại `a2af4b7203e`.
 
 Phạm vi gồm điều kiện `WHERE any_match(array_column, x -> biểu_thức)` và cây biểu thức scalar trên một cột. Một hàm nằm trong bảng không có nghĩa mọi kiểu dữ liệu, overload hoặc cách kết hợp của hàm đều được pushdown. Connector phải dịch được cây biểu thức, kiểm tra mapping, NULL, lỗi và giới hạn tài nguyên trước khi chọn plan.
 
@@ -80,6 +80,8 @@ Thiết lập áp dụng cho session hiện tại. Có thể bật mặc định
 | `x LIKE pattern [ESCAPE e]` | `prefix`, `regexp` hoặc query exact tương đương do translator chọn | Pattern hằng được hỗ trợ; có kiểm tra escape và ngữ nghĩa ký tự |
 | Hình dạng `substr`/`substring` kiểm tra prefix được nhận diện | `prefix` | Chỉ hình dạng được native translator nhận diện, không phải mọi substring |
 | `regexp_like(x, constant_pattern)` | `regexp` | Chỉ tập regex có bản dịch chính xác dùng chung với Lucene; không coi toàn bộ regex SQL là Lucene regex |
+
+Ở đường scalar full-text SAFE, end anchor `$` của regex cần giữ cả chuỗi có newline cuối. Candidate Lucene được nới suffix và giữ residual SQL, ví dụ `regexp_like(word, '^abc$')` dùng `(abc).*` để prefilter. Đường array vẫn giữ local cho end anchor chưa được chứng minh.
 
 Giá trị hằng REAL/DOUBLE là `0`, NaN hoặc Infinity không dùng native term/terms/range ở đường array này. Đặc biệt Elasticsearch phân biệt `-0.0` và `+0.0`, còn SQL coi chúng bằng nhau. `any_match` có thể chuyển sang typed script khi bật tính năng; membership không có script fallback sẽ giữ local.
 
@@ -193,6 +195,8 @@ Tất cả biểu thức ngày giờ dưới đây dùng phần tử `TIMESTAMP(
 | `date_add(unit,n,x)` | `sqlTemporal`, phép cộng thời gian/lịch | Cùng tập unit; kiểm tra giới hạn `n`, quarter và timestamp; lỗi nhận document về Trino |
 | `date_diff(unit,a,b)` | `sqlDateDiff`, chênh lệch epoch / hệ số đơn vị, chia về 0 | unit hằng: millisecond, second, minute, hour, day, week |
 | `date_diff('month'/'quarter'/'year',...)` | Chưa dịch | Local vì chưa chứng minh tương đương cách tính lịch của Trino |
+
+Null proof của các hàm thời gian kiểm tra mọi đối số, kể cả lượng cộng của `date_add` và cả hai timestamp của `date_diff`. Nếu một đối số có thể gây lỗi khi phần tử array là NULL, connector giữ local để không che lỗi SQL trên phần tử không có trong doc values.
 
 ## 9. Ví dụ SQL và hình dạng query
 

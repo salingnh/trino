@@ -13,6 +13,7 @@
  */
 package io.trino.plugin.elasticsearch;
 
+import io.trino.plugin.elasticsearch.client.IndexMetadata.DateTimeType;
 import io.trino.plugin.elasticsearch.client.IndexMetadata.PrimitiveType;
 import io.trino.plugin.elasticsearch.decoders.IntegerDecoder;
 import io.trino.plugin.elasticsearch.expression.ElasticsearchRemotePredicate;
@@ -41,6 +42,7 @@ import static io.trino.spi.type.DecimalType.createDecimalType;
 import static io.trino.spi.type.DoubleType.DOUBLE;
 import static io.trino.spi.type.IntegerType.INTEGER;
 import static io.trino.spi.type.RealType.REAL;
+import static io.trino.spi.type.TimestampType.TIMESTAMP_MILLIS;
 import static io.trino.spi.type.TinyintType.TINYINT;
 import static io.trino.spi.type.VarcharType.VARCHAR;
 import static org.assertj.core.api.Assertions.assertThat;
@@ -146,6 +148,24 @@ class TestElasticsearchExpressionScriptTranslator
     }
 
     @Test
+    void testTemporalNullProofChecksEveryArgument()
+    {
+        Constant epoch = new Constant(0L, TIMESTAMP_MILLIS);
+        Call reverseDiff = anyMatch(TIMESTAMP_MILLIS, value -> call(BOOLEAN, "$less_than_or_equal", call(BIGINT, "date_diff", text("day"), epoch, value), new Constant(0L, BIGINT)));
+        assertThat(translate(reverseDiff).orElseThrow().enforcement()).contains(PREFILTER);
+        Call failingAmount = anyMatch(TIMESTAMP_MILLIS, value -> call(
+                BOOLEAN,
+                "$less_than",
+                call(TIMESTAMP_MILLIS,
+                        "date_add",
+                        text("day"),
+                        call(BIGINT, "$add", call(BIGINT, "$coalesce", call(BIGINT, "year", value), new Constant(Long.MAX_VALUE, BIGINT)), new Constant(1L, BIGINT)),
+                        value),
+                epoch));
+        assertThat(translate(failingAmount)).isEmpty();
+    }
+
+    @Test
     void testUnknownFunctionsCapturedVariablesAndBudget()
     {
         assertThat(translate(anyMatch(INTEGER, value -> call(BOOLEAN, "$equal", new Variable("captured", INTEGER), value)))).isEmpty();
@@ -183,8 +203,8 @@ class TestElasticsearchExpressionScriptTranslator
 
     private static ElasticsearchColumnHandle column(Type type)
     {
-        String mapping = Map.of(INTEGER, "integer", BIGINT, "long", TINYINT, "byte", REAL, "float", DOUBLE, "double", VARCHAR, "keyword", BOOLEAN, "boolean").get(type);
-        return new ElasticsearchColumnHandle(List.of("Values"), new ArrayType(type), new PrimitiveType(mapping), new IntegerDecoder.Descriptor("Values"), false);
+        String mapping = Map.of(INTEGER, "integer", BIGINT, "long", TINYINT, "byte", REAL, "float", DOUBLE, "double", VARCHAR, "keyword", BOOLEAN, "boolean", TIMESTAMP_MILLIS, "date").get(type);
+        return new ElasticsearchColumnHandle(List.of("Values"), new ArrayType(type), type.equals(TIMESTAMP_MILLIS) ? new DateTimeType(List.of()) : new PrimitiveType(mapping), new IntegerDecoder.Descriptor("Values"), false);
     }
 
     private static Call call(Type type, String name, ConnectorExpression... arguments)
