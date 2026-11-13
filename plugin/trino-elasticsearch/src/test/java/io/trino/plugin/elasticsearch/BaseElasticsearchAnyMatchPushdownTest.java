@@ -16,14 +16,19 @@ package io.trino.plugin.elasticsearch;
 import com.fasterxml.jackson.databind.json.JsonMapper;
 import com.google.common.collect.ImmutableList;
 import com.google.common.collect.ImmutableMap;
+import io.airlift.log.Logger;
 import io.trino.Session;
+import io.trino.plugin.elasticsearch.expression.ElasticsearchRemotePredicate;
+import io.trino.sql.planner.optimizations.PlanNodeSearcher;
 import io.trino.sql.planner.plan.FilterNode;
+import io.trino.sql.planner.plan.TableScanNode;
 import io.trino.testing.QueryRunner;
 import io.trino.testing.QueryRunner.MaterializedResultWithPlan;
 import org.elasticsearch.client.Request;
 import org.elasticsearch.client.RestClient;
 import org.intellij.lang.annotations.Language;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.condition.EnabledIfSystemProperty;
 
 import java.io.IOException;
 import java.util.ArrayList;
@@ -43,6 +48,7 @@ import static org.assertj.core.api.Assertions.assertThat;
 public abstract class BaseElasticsearchAnyMatchPushdownTest
         extends BaseElasticsearchP0PredicatePushdownTest
 {
+    private static final Logger LOG = Logger.get(BaseElasticsearchAnyMatchPushdownTest.class);
     private final RestClient client;
 
     protected BaseElasticsearchAnyMatchPushdownTest(ElasticsearchServer server)
@@ -245,6 +251,26 @@ public abstract class BaseElasticsearchAnyMatchPushdownTest
             Session disabled = Session.builder(getSession())
                     .setCatalogSessionProperty("elasticsearch", "array_script_pushdown_enabled", "false")
                     .build();
+            Session localOnly = Session.builder(disabled)
+                    .setSystemProperty("allow_pushdown_into_connectors", "false")
+                    .build();
+
+            for (String predicate : List.of(
+                    "x > 5 AND x > 10 AND x < 20",
+                    "x IN (2, 12) AND x > 10",
+                    "(x < 0 OR x > 10) AND x < 12",
+                    "NOT (x > 10)",
+                    "x <> 2",
+                    "x NOT IN (2, 11)",
+                    "x IN (2, NULL)",
+                    "x NOT IN (2, NULL)",
+                    "x BETWEEN 2 AND 11",
+                    "x > 20 AND x < 10",
+                    "x IS NOT NULL")) {
+                String sql = "SELECT id FROM " + indexName + " WHERE any_match(numbers, x -> " + predicate + ")";
+                assertEqualsIgnoreOrder(computeActual(disabled, sql).getMaterializedRows(), computeActual(localOnly, sql).getMaterializedRows(), predicate);
+                assertThat(query(disabled, sql)).isFullyPushedDown();
+            }
 
             for (String predicate : List.of(
                     "x > 10 OR mod(x, 2) = 0",
@@ -260,6 +286,9 @@ public abstract class BaseElasticsearchAnyMatchPushdownTest
                         predicate);
                 assertThat(query(enabled, sql)).isFullyPushedDown();
             }
+            String nativeAndScript = "SELECT id FROM " + indexName + " WHERE any_match(numbers, x -> x IN (3, 11) OR mod(x, 2) = 0)";
+            assertEqualsIgnoreOrder(computeActual(enabled, nativeAndScript).getMaterializedRows(), computeActual(localOnly, nativeAndScript).getMaterializedRows(), nativeAndScript);
+            assertThat(query(enabled, nativeAndScript)).isFullyPushedDown();
             for (String predicate : List.of(
                     "x + 5 > 10 OR x * 2 < 0",
                     "x - 1 > 0 AND -x < 10",
@@ -300,9 +329,227 @@ public abstract class BaseElasticsearchAnyMatchPushdownTest
                     enabled,
                     "SELECT id FROM " + indexName + " WHERE any_match(numbers, x -> x + 5 > 10 OR x * 2 < 0)");
             assertThat(runner.getCoordinator().getQueryManager().getFullQueryInfo(prefilter.queryId()).getQueryStats().getPhysicalInputPositions()).isEqualTo(5);
+            MaterializedResultWithPlan nativeIntersection = runner.executeWithPlan(
+                    disabled,
+                    "SELECT id FROM " + indexName + " WHERE any_match(numbers, x -> x IN (2, 12) AND x > 10)");
+            assertThat(runner.getCoordinator().getQueryManager().getFullQueryInfo(nativeIntersection.queryId()).getQueryStats().getPhysicalInputPositions()).isEqualTo(1);
         }
         finally {
             deleteIndex(indexName);
+        }
+    }
+
+    @Test
+    public void testAnyMatchKeywordNativePredicates()
+            throws IOException
+    {
+        String indexName = "array_native_keyword_" + randomNameSuffix();
+        @Language("JSON")
+        String properties =
+                """
+                {
+                  "_meta": { "trino": {
+                    "words": { "isArray": true }, "ignored_words": { "isArray": true },
+                    "doc_value_words": { "isArray": true }, "indexed_words": { "isArray": true },
+                    "unindexed": { "isArray": true }
+                  } },
+                  "properties": {
+                    "id": { "type": "keyword" },
+                    "words": { "type": "keyword" },
+                    "doc_value_words": { "type": "keyword", "index": false },
+                    "indexed_words": { "type": "keyword", "doc_values": false },
+                    "ignored_words": { "type": "keyword", "ignore_above": 2 },
+                    "unindexed": { "type": "integer", "index": false, "doc_values": false }
+                  }
+                }
+                """;
+        createIndex(indexName, properties);
+        try {
+            List<List<String>> values = List.of(
+                    List.of("ab", "cd"),
+                    List.of("abc"),
+                    List.of("abz", "z"),
+                    List.of("a😀b", "abc\n"),
+                    List.of("a_b", "a%b", "a\\b"),
+                    List.of("", "ABc"),
+                    Arrays.asList(null, "abc"),
+                    Arrays.asList((String) null),
+                    List.of());
+            for (int index = 0; index < values.size(); index++) {
+                index(indexName, ImmutableMap.of(
+                        "id", Integer.toString(index),
+                        "words", values.get(index),
+                        "ignored_words", values.get(index),
+                        "doc_value_words", values.get(index),
+                        "indexed_words", values.get(index),
+                        "unindexed", List.of(1)));
+            }
+            index(indexName, ImmutableMap.of("id", "missing"));
+            Session nativeOnly = Session.builder(getSession())
+                    .setCatalogSessionProperty("elasticsearch", "array_script_pushdown_enabled", "false")
+                    .build();
+            Session localOnly = Session.builder(nativeOnly).setSystemProperty("allow_pushdown_into_connectors", "false").build();
+            for (String predicate : List.of(
+                    "starts_with(x, 'ab')",
+                    "x LIKE 'ab%'",
+                    "x LIKE 'a_b%'",
+                    "x LIKE 'a!_%' ESCAPE '!'",
+                    "starts_with(x, 'ab') AND starts_with(x, 'abc')",
+                    "starts_with(x, 'ab') AND starts_with(x, 'cd')",
+                    "starts_with(x, 'ab') OR x = 'z'",
+                    "x LIKE '%😀%' OR x = 'z'",
+                    "regexp_like(x, 'abc')",
+                    "regexp_like(x, '^ab')",
+                    "x IS NOT NULL")) {
+                String sql = "SELECT id FROM " + indexName + " WHERE any_match(words, x -> " + predicate + ")";
+                assertEqualsIgnoreOrder(computeActual(nativeOnly, sql).getMaterializedRows(), computeActual(localOnly, sql).getMaterializedRows(), predicate);
+                assertThat(query(nativeOnly, sql)).isFullyPushedDown();
+            }
+            for (String predicate : List.of("x IS NULL", "NOT starts_with(x, 'ab')", "regexp_like(x, '(?i)abc')", "regexp_like(x, '^abc$')")) {
+                String sql = "SELECT id FROM " + indexName + " WHERE any_match(words, x -> " + predicate + ")";
+                assertEqualsIgnoreOrder(computeActual(nativeOnly, sql).getMaterializedRows(), computeActual(localOnly, sql).getMaterializedRows(), predicate);
+                assertThat(query(nativeOnly, sql)).isNotFullyPushedDown(FilterNode.class);
+            }
+            for (String field : List.of("doc_value_words", "indexed_words")) {
+                String sql = "SELECT id FROM " + indexName + " WHERE any_match(" + field + ", x -> starts_with(x, 'abc'))";
+                assertEqualsIgnoreOrder(computeActual(nativeOnly, sql).getMaterializedRows(), computeActual(localOnly, sql).getMaterializedRows(), sql);
+                if (field.equals("doc_value_words")) {
+                    assertThat(query(nativeOnly, sql)).isNotFullyPushedDown(FilterNode.class);
+                }
+                else {
+                    assertThat(query(nativeOnly, sql)).isFullyPushedDown();
+                }
+            }
+            for (String expression : List.of("any_match(ignored_words, x -> starts_with(x, 'abc'))", "any_match(unindexed, x -> x IS NOT NULL)")) {
+                String sql = "SELECT id FROM " + indexName + " WHERE " + expression;
+                assertEqualsIgnoreOrder(computeActual(nativeOnly, sql).getMaterializedRows(), computeActual(localOnly, sql).getMaterializedRows(), expression);
+                assertThat(query(nativeOnly, sql)).isNotFullyPushedDown(FilterNode.class);
+            }
+        }
+        finally {
+            deleteIndex(indexName);
+        }
+    }
+
+    @Test
+    @EnabledIfSystemProperty(named = "elasticsearch.array-benchmark", matches = "true")
+    public void benchmarkArrayPredicateStrategies()
+            throws IOException
+    {
+        int documents = Integer.getInteger("elasticsearch.array-benchmark.documents", 10_000);
+        assertThat(documents).isGreaterThanOrEqualTo(1000);
+        assertThat(documents % 20).isZero();
+        String indexName = "array_predicate_benchmark_" + randomNameSuffix();
+        createIndex(indexName,
+                """
+                {"_meta":{"trino":{"numbers":{"isArray":true}}},
+                 "properties":{"id":{"type":"keyword"},"numbers":{"type":"integer"}}}
+                """);
+        try {
+            for (int batch = 0; batch < documents; batch += 1000) {
+                StringBuilder bulk = new StringBuilder();
+                for (int id = batch; id < Math.min(batch + 1000, documents); id++) {
+                    bulk.append("{\"index\":{\"_id\":\"").append(id).append("\"}}\n");
+                    bulk.append("{\"id\":\"").append(id).append("\",\"numbers\":[");
+                    for (int position = 0; position < 63; position++) {
+                        bulk.append(position * 2 + 1).append(',');
+                    }
+                    int last = 127;
+                    if (id % 10 == 0) {
+                        last = 2001;
+                    }
+                    if (id % 20 == 0) {
+                        last = 2000;
+                    }
+                    bulk.append(last).append("]}\n");
+                }
+                Request load = new Request("POST", "/" + indexName + "/_bulk");
+                load.setJsonEntity(bulk.toString());
+                try (var input = client.performRequest(load).getEntity().getContent()) {
+                    assertThat(new JsonMapper().readTree(input).path("errors").asBoolean()).isFalse();
+                }
+            }
+            client.performRequest(new Request("POST", "/" + indexName + "/_refresh"));
+            Session enabled = Session.builder(getSession()).setCatalogSessionProperty("elasticsearch", "array_script_pushdown_enabled", "true").build();
+            Session local = Session.builder(enabled).setSystemProperty("allow_pushdown_into_connectors", "false").build();
+            Map<String, String> predicates = Map.of(
+                    "NATIVE", "x = 2000",
+                    "HYBRID", "x > 1000 AND mod(x, 2) = 0",
+                    "SCRIPT", "x / 2 > 500 AND mod(x, 2) = 0",
+                    "LOCAL", "x > 1000 AND mod(x, 2) = 0");
+            List<String> strategies = List.of("NATIVE", "HYBRID", "SCRIPT", "LOCAL");
+            Map<String, List<Long>> elapsed = new HashMap<>();
+            Map<String, List<Long>> cpu = new HashMap<>();
+            for (String strategy : strategies) {
+                elapsed.put(strategy, new ArrayList<>());
+                cpu.put(strategy, new ArrayList<>());
+            }
+            for (int round = 0; round < 7; round++) {
+                for (String strategy : round % 2 == 0 ? strategies : strategies.reversed()) {
+                    long cpuBefore = elasticsearchCpuMillis();
+                    long start = System.nanoTime();
+                    MaterializedResultWithPlan result = getQueryRunner().executeWithPlan(
+                            strategy.equals("LOCAL") ? local : enabled,
+                            "SELECT id FROM " + indexName + " WHERE any_match(numbers, x -> " + predicates.get(strategy) + ")");
+                    long nanos = System.nanoTime() - start;
+                    long cpuMillis = elasticsearchCpuMillis() - cpuBefore;
+                    assertThat(result.result().getRowCount()).isEqualTo(documents / 20);
+                    if (round == 0) {
+                        var scans = PlanNodeSearcher.searchFrom(result.queryPlan().orElseThrow().getRoot()).whereIsInstanceOfAny(TableScanNode.class).findAll();
+                        assertThat(scans).hasSize(1);
+                        var handle = (ElasticsearchTableHandle) ((TableScanNode) scans.getFirst()).getTable().connectorHandle();
+                        switch (strategy) {
+                            case "NATIVE" -> assertThat(handle.remotePredicate().orElseThrow()).isInstanceOf(ElasticsearchRemotePredicate.Term.class);
+                            case "HYBRID" -> assertThat(handle.remotePredicate().orElseThrow()).isInstanceOf(ElasticsearchRemotePredicate.And.class);
+                            case "SCRIPT" -> assertThat(handle.remotePredicate().orElseThrow()).isInstanceOf(ElasticsearchRemotePredicate.ArrayScript.class);
+                            case "LOCAL" -> assertThat(handle.remotePredicate()).isEmpty();
+                            default -> throw new IllegalArgumentException("Unexpected strategy " + strategy);
+                        }
+                    }
+                    var statistics = getQueryRunner().getCoordinator().getQueryManager().getFullQueryInfo(result.queryId()).getQueryStats();
+                    assertThat(statistics.getPhysicalInputPositions()).isEqualTo(strategy.equals("LOCAL") ? documents : documents / 20);
+                    if (round >= 2) {
+                        elapsed.get(strategy).add(nanos);
+                        cpu.get(strategy).add(cpuMillis);
+                        LOG.info("arrayBenchmark engine=%s strategy=%s round=%s documents=%s arrayLength=64 elapsedMs=%s esProcessCpuSampleDeltaMs=%s trinoCpuMs=%s trinoInputRows=%s trinoInputBytes=%s",
+                                getClass().getSimpleName(),
+                                strategy,
+                                round,
+                                documents,
+                                nanos / 1_000_000,
+                                cpuMillis,
+                                statistics.getTotalCpuTime().toMillis(),
+                                statistics.getPhysicalInputPositions(),
+                                statistics.getPhysicalInputDataSize().toBytes());
+                    }
+                }
+            }
+            for (String strategy : strategies) {
+                LOG.info("arrayBenchmarkMedian engine=%s strategy=%s documents=%s arrayLength=64 measuredRounds=5 elapsedMs=%s esProcessCpuSampleDeltaMs=%s",
+                        getClass().getSimpleName(),
+                        strategy,
+                        documents,
+                        elapsed.get(strategy).stream().sorted().toList().get(2) / 1_000_000,
+                        cpu.get(strategy).stream().sorted().toList().get(2));
+            }
+        }
+        finally {
+            deleteIndex(indexName);
+        }
+    }
+
+    private long elasticsearchCpuMillis()
+            throws IOException
+    {
+        // Elasticsearch caches process samples. A zero delta on a subsecond query is not evidence of zero CPU use;
+        // these coarse samples accompany, rather than replace, the elapsed time and Trino query-stat measurements.
+        Request request = new Request("GET", "/_nodes/stats/process?filter_path=nodes.*.process.cpu.total_in_millis");
+        try (var input = client.performRequest(request).getEntity().getContent()) {
+            long total = 0;
+            for (var node : new JsonMapper().readTree(input).path("nodes")) {
+                total += node.path("process").path("cpu").path("total_in_millis").asLong();
+            }
+            return total;
         }
     }
 

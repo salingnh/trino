@@ -142,7 +142,10 @@ class TestElasticsearchArrayScriptTranslator
         assertThat(ElasticsearchPredicatePushdownPlanner.plan(TestingConnectorSession.SESSION, constraint, SAFE).remotePredicate()).isEmpty();
         ElasticsearchPredicatePushdownPlanner.Result enabled = ElasticsearchPredicatePushdownPlanner.plan(
                 TestingConnectorSession.SESSION, constraint, SAFE, ElasticsearchPredicateCompositionPolicy.DEFAULT, true);
-        assertThat(enabled.remotePredicate().orElseThrow()).isInstanceOf(ElasticsearchRemotePredicate.ArrayScript.class);
+        assertThat(enabled.remotePredicate().orElseThrow()).isInstanceOf(ElasticsearchRemotePredicate.Or.class);
+        assertThat(((ElasticsearchRemotePredicate.Or) enabled.remotePredicate().orElseThrow()).predicates())
+                .anyMatch(ElasticsearchRemotePredicate.Range.class::isInstance)
+                .anyMatch(ElasticsearchRemotePredicate.ArrayScript.class::isInstance);
         assertThat(enabled.residualExpressions()).isEmpty();
 
         Call nativeSource = anyMatch(INTEGER, element -> compare(GREATER_THAN_OPERATOR_FUNCTION_NAME, element, 10));
@@ -219,6 +222,31 @@ class TestElasticsearchArrayScriptTranslator
         assertThat(result.residual()).contains(source);
         assertThat(((ElasticsearchRemotePredicate.Enforced) result.remotePredicate().orElseThrow()).predicate())
                 .isInstanceOf(ElasticsearchRemotePredicate.Range.class);
+    }
+
+    @Test
+    void testHybridUsesWholeAndScriptAndKeepsFallibleArithmeticSeparate()
+    {
+        Call conjunction = anyMatch(INTEGER, element -> new Call(BOOLEAN, AND_FUNCTION_NAME, List.of(
+                compare(GREATER_THAN_OPERATOR_FUNCTION_NAME, element, 10),
+                compare(EQUAL_OPERATOR_FUNCTION_NAME, arithmetic(MODULO_FUNCTION_NAME, element, 2), 0))));
+        ElasticsearchPredicateTranslation<ConnectorExpression> hybrid = ElasticsearchArrayPredicateTranslator.translate(
+                TestingConnectorSession.SESSION, conjunction, Map.of("numbers", column(INTEGER)), SAFE, ElasticsearchPredicateCompositionPolicy.DEFAULT, true).orElseThrow();
+        assertThat(hybrid.reason()).isEqualTo(ElasticsearchPredicateTranslation.Reason.EXACT_ARRAY_HYBRID);
+        assertThat(hybrid.residual()).isEmpty();
+        assertThat(hybrid.remotePredicate().orElseThrow()).isInstanceOf(ElasticsearchRemotePredicate.And.class);
+        ElasticsearchRemotePredicate.And and = (ElasticsearchRemotePredicate.And) hybrid.remotePredicate().orElseThrow();
+        assertThat(and.predicates()).hasSize(2);
+        assertThat(((ElasticsearchRemotePredicate.ArrayScript) and.predicates().getLast()).source()).contains(" && ", " % ");
+
+        Call fallible = anyMatch(INTEGER, element -> new Call(BOOLEAN, AND_FUNCTION_NAME, List.of(
+                compare(GREATER_THAN_OPERATOR_FUNCTION_NAME, element, 10),
+                compare(GREATER_THAN_OPERATOR_FUNCTION_NAME, arithmetic(ADD_FUNCTION_NAME, element, 1), 0))));
+        ElasticsearchPredicateTranslation<ConnectorExpression> prefilter = ElasticsearchArrayPredicateTranslator.translate(
+                TestingConnectorSession.SESSION, fallible, Map.of("numbers", column(INTEGER)), SAFE, ElasticsearchPredicateCompositionPolicy.DEFAULT, true).orElseThrow();
+        assertThat(prefilter.reason()).isEqualTo(PREFILTER_ARRAY_SCRIPT);
+        assertThat(prefilter.residual()).contains(fallible);
+        assertThat(((ElasticsearchRemotePredicate.Enforced) prefilter.remotePredicate().orElseThrow()).predicate()).isInstanceOf(ElasticsearchRemotePredicate.ArrayScript.class);
     }
 
     private static Optional<ElasticsearchPredicateTranslation<ConnectorExpression>> translate(Call source, ElasticsearchColumnHandle column, ElasticsearchPredicateCompositionPolicy policy)

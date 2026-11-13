@@ -37,6 +37,7 @@ import static io.trino.plugin.elasticsearch.ElasticsearchPredicateTranslation.Re
 import static io.trino.plugin.elasticsearch.ElasticsearchPredicateTranslation.Reason.APPROXIMATE_ARRAY;
 import static io.trino.plugin.elasticsearch.ElasticsearchPredicateTranslation.Reason.EXACT_ANY_MATCH;
 import static io.trino.plugin.elasticsearch.ElasticsearchPredicateTranslation.Reason.EXACT_ARRAY;
+import static io.trino.plugin.elasticsearch.ElasticsearchPredicateTranslation.Reason.EXACT_ARRAY_HYBRID;
 import static io.trino.plugin.elasticsearch.ElasticsearchPredicateTranslation.Reason.PREFILTER_ANY_MATCH;
 import static io.trino.plugin.elasticsearch.ElasticsearchPredicateTranslation.Reason.UNSUPPORTED_EXPRESSION;
 import static io.trino.spi.expression.StandardFunctions.AND_FUNCTION_NAME;
@@ -228,13 +229,21 @@ final class ElasticsearchArrayPredicateTranslator
                     policy);
         }
 
-        Optional<ElasticsearchRemotePredicate> exact = translateAnyMatchBody(lambda.getBody(), lambdaVariable, column, elementType.orElseThrow());
+        Optional<ElasticsearchRemotePredicate> exact = translateNativeAnyMatchBody(session, lambda.getBody(), lambdaVariable, column, elementType.orElseThrow(), policy);
         if (exact.isPresent()) {
             return exactOrUnsupported(call, exact, EXACT_ANY_MATCH, policy);
         }
         Optional<ElasticsearchPredicateTranslation<ConnectorExpression>> script = Optional.empty();
         if (arrayScriptPushdownEnabled) {
             script = ElasticsearchArrayScriptTranslator.translate(call, lambda, column, policy);
+            // A fallible script deliberately admits arithmetic errors and keeps the original residual. Adding an
+            // independent native restriction could hide an error before the script/residual has a chance to see it.
+            if (script.flatMap(ElasticsearchPredicateTranslation::enforcement).filter(value -> value == ElasticsearchRemotePredicate.Enforcement.PREFILTER).isEmpty()) {
+                Optional<ElasticsearchRemotePredicate> hybrid = translateHybridAnyMatch(session, call, lambda, column, elementType.orElseThrow(), policy, 0);
+                if (hybrid.isPresent() && ElasticsearchPredicateComposer.isWithinRequestBudget(hybrid.orElseThrow(), policy)) {
+                    return ElasticsearchPredicateTranslation.exact(hybrid.orElseThrow(), EXACT_ARRAY_HYBRID);
+                }
+            }
             if (script.flatMap(ElasticsearchPredicateTranslation::remotePredicate).isPresent()) {
                 return script.orElseThrow();
             }
@@ -243,7 +252,7 @@ final class ElasticsearchArrayPredicateTranslator
             return ElasticsearchPredicateTranslation.unsupported(call, UNSUPPORTED_EXPRESSION);
         }
 
-        Optional<ElasticsearchRemotePredicate> candidate = extractNecessaryCondition(lambda.getBody(), lambdaVariable, column, elementType.orElseThrow());
+        Optional<ElasticsearchRemotePredicate> candidate = extractNecessaryCondition(session, lambda.getBody(), lambdaVariable, column, elementType.orElseThrow(), policy);
         if (candidate.isEmpty()) {
             return script.orElseGet(() -> ElasticsearchPredicateTranslation.unsupported(call, UNSUPPORTED_EXPRESSION));
         }
@@ -260,12 +269,15 @@ final class ElasticsearchArrayPredicateTranslator
      * so the caller must keep the complete original any_match as a residual, even when every child has a candidate.
      */
     private static Optional<ElasticsearchRemotePredicate> extractNecessaryCondition(
+            ConnectorSession session,
             ConnectorExpression expression,
             Variable lambdaVariable,
             ElasticsearchColumnHandle column,
-            Type elementType)
+            Type elementType,
+            ElasticsearchPredicateCompositionPolicy policy)
     {
-        Optional<ElasticsearchRemotePredicate> exact = translateAnyMatchBody(expression, lambdaVariable, column, elementType);
+        Optional<ElasticsearchRemotePredicate> exact = ElasticsearchArrayNativePredicateTranslator.translateNecessaryCondition(session, expression, lambdaVariable, column, policy)
+                .or(() -> translateAnyMatchBody(expression, lambdaVariable, column, elementType));
         if (exact.isPresent() && isSafeNecessaryCondition(exact.orElseThrow())) {
             return exact;
         }
@@ -280,7 +292,7 @@ final class ElasticsearchArrayPredicateTranslator
 
         List<ElasticsearchRemotePredicate> candidates = new ArrayList<>();
         for (ConnectorExpression argument : call.getArguments()) {
-            Optional<ElasticsearchRemotePredicate> candidate = extractNecessaryCondition(argument, lambdaVariable, column, elementType);
+            Optional<ElasticsearchRemotePredicate> candidate = extractNecessaryCondition(session, argument, lambdaVariable, column, elementType, policy);
             if (candidate.isEmpty()) {
                 if (disjunction) {
                     return Optional.empty();
@@ -304,6 +316,7 @@ final class ElasticsearchArrayPredicateTranslator
             case ElasticsearchRemotePredicate.Terms terms -> terms.values().stream().allMatch(ElasticsearchArrayPredicateTranslator::isSafePrefilterValue);
             case ElasticsearchRemotePredicate.Range range -> range.lower().map(bound -> isSafePrefilterValue(bound.value())).orElse(true)
                     && range.upper().map(bound -> isSafePrefilterValue(bound.value())).orElse(true);
+            case ElasticsearchRemotePredicate.Prefix _, ElasticsearchRemotePredicate.Regexp _, ElasticsearchRemotePredicate.Exists _, ElasticsearchRemotePredicate.MatchNone _ -> true;
             default -> false;
         };
     }
@@ -473,7 +486,70 @@ final class ElasticsearchArrayPredicateTranslator
         return ElasticsearchPredicateTranslation.unsupported(source, UNSUPPORTED_EXPRESSION);
     }
 
-    private static Optional<ElasticsearchRemotePredicate> translateAnyMatchBody(
+    private static Optional<ElasticsearchRemotePredicate> translateNativeAnyMatchBody(
+            ConnectorSession session,
+            ConnectorExpression expression,
+            Variable element,
+            ElasticsearchColumnHandle column,
+            Type elementType,
+            ElasticsearchPredicateCompositionPolicy policy)
+    {
+        return ElasticsearchArrayNativePredicateTranslator.translate(session, expression, element, column, policy)
+                .or(() -> translateAnyMatchBody(expression, element, column, elementType));
+    }
+
+    private static Optional<ElasticsearchRemotePredicate> translateHybridAnyMatch(
+            ConnectorSession session,
+            Call source,
+            Lambda lambda,
+            ElasticsearchColumnHandle column,
+            Type elementType,
+            ElasticsearchPredicateCompositionPolicy policy,
+            int depth)
+    {
+        if (!(lambda.getBody() instanceof Call body) || depth > policy.maxBooleanDepth()
+                || body.getArguments().isEmpty() || body.getArguments().size() > policy.maxBooleanClauses()) {
+            return Optional.empty();
+        }
+        Variable element = lambda.getArguments().getFirst();
+        if (OR_FUNCTION_NAME.equals(body.getFunctionName())) {
+            List<ElasticsearchRemotePredicate> children = new ArrayList<>();
+            boolean hasScript = false;
+            for (ConnectorExpression argument : body.getArguments()) {
+                Optional<ElasticsearchRemotePredicate> nativeChild = translateNativeAnyMatchBody(session, argument, element, column, elementType, policy);
+                if (nativeChild.isPresent()) {
+                    children.add(nativeChild.orElseThrow());
+                    continue;
+                }
+                Lambda branchLambda = new Lambda(lambda.getType(), lambda.getArguments(), argument);
+                Call branch = new Call(source.getType(), source.getFunctionName(), List.of(source.getArguments().getFirst(), branchLambda));
+                Optional<ElasticsearchRemotePredicate> hybrid = translateHybridAnyMatch(session, branch, branchLambda, column, elementType, policy, depth + 1);
+                Optional<ElasticsearchPredicateTranslation<ConnectorExpression>> script = ElasticsearchArrayScriptTranslator.translate(branch, branchLambda, column, policy);
+                Optional<ElasticsearchRemotePredicate> translated = hybrid.or(() -> script
+                        .filter(value -> value.enforcement().filter(enforcement -> enforcement == ElasticsearchRemotePredicate.Enforcement.EXACT).isPresent())
+                        .flatMap(ElasticsearchPredicateTranslation::remotePredicate));
+                if (translated.isEmpty()) {
+                    return Optional.empty();
+                }
+                children.add(translated.orElseThrow());
+                hasScript = true;
+            }
+            return hasScript ? ElasticsearchRemotePredicateNormalizer.or(children) : Optional.empty();
+        }
+        if (AND_FUNCTION_NAME.equals(body.getFunctionName())) {
+            Optional<ElasticsearchPredicateTranslation<ConnectorExpression>> script = ElasticsearchArrayScriptTranslator.translate(source, lambda, column, policy);
+            if (script.flatMap(ElasticsearchPredicateTranslation::enforcement).filter(value -> value == ElasticsearchRemotePredicate.Enforcement.EXACT).isEmpty()) {
+                return Optional.empty();
+            }
+            Optional<ElasticsearchRemotePredicate> candidate = extractNecessaryCondition(session, body, element, column, elementType, policy);
+            if (candidate.isPresent()) {
+                return ElasticsearchRemotePredicateNormalizer.and(List.of(candidate.orElseThrow(), script.orElseThrow().remotePredicate().orElseThrow()));
+            }
+        }
+        return Optional.empty();
+    }
+
+    static Optional<ElasticsearchRemotePredicate> translateAnyMatchBody(
             ConnectorExpression expression,
             Variable lambdaVariable,
             ElasticsearchColumnHandle column,

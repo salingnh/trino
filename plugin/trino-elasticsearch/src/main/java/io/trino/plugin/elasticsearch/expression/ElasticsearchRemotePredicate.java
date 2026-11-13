@@ -53,12 +53,14 @@ import static java.util.Objects.requireNonNull;
         @JsonSubTypes.Type(value = ElasticsearchRemotePredicate.MatchPhrasePrefix.class, name = "matchPhrasePrefix"),
         @JsonSubTypes.Type(value = ElasticsearchRemotePredicate.Exists.class, name = "exists"),
         @JsonSubTypes.Type(value = ElasticsearchRemotePredicate.ArrayScript.class, name = "arrayScript"),
+        @JsonSubTypes.Type(value = ElasticsearchRemotePredicate.MatchNone.class, name = "matchNone"),
 })
 public sealed interface ElasticsearchRemotePredicate
         permits ElasticsearchRemotePredicate.And,
                 ElasticsearchRemotePredicate.ArrayScript,
                 ElasticsearchRemotePredicate.Enforced,
                 ElasticsearchRemotePredicate.Exists,
+                ElasticsearchRemotePredicate.MatchNone,
                 ElasticsearchRemotePredicate.MatchPhrase,
                 ElasticsearchRemotePredicate.MatchPhrasePrefix,
                 ElasticsearchRemotePredicate.Not,
@@ -89,7 +91,7 @@ public sealed interface ElasticsearchRemotePredicate
             case Or or -> or.predicates().stream().allMatch(ElasticsearchRemotePredicate::isExact);
             case Not not -> not.predicate().isExact();
             case Enforced _ -> false;
-            case Term _, Terms _, Range _, Prefix _, Regexp _, MatchPhrase _, MatchPhrasePrefix _, Exists _, ArrayScript _ -> true;
+            case Term _, Terms _, Range _, Prefix _, Regexp _, MatchPhrase _, MatchPhrasePrefix _, Exists _, ArrayScript _, MatchNone _ -> true;
         };
     }
 
@@ -110,6 +112,7 @@ public sealed interface ElasticsearchRemotePredicate
             case MatchPhrasePrefix _ -> "matchPhrasePrefix";
             case Exists _ -> "exists";
             case ArrayScript _ -> "arrayScript";
+            case MatchNone _ -> "matchNone";
         };
     }
 
@@ -147,6 +150,9 @@ public sealed interface ElasticsearchRemotePredicate
             throw new IllegalArgumentException("Unsupported remote predicate value type: " + value.getClass().getSimpleName());
         }
     }
+
+    record MatchNone()
+            implements ElasticsearchRemotePredicate {}
 
     /**
      * A connector-generated positive existential filter. Parameter values never become Painless source text.

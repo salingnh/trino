@@ -57,6 +57,7 @@ record ElasticsearchPredicateTranslation<R>(
         EXACT_ANY_MATCH,
         PREFILTER_ANY_MATCH,
         EXACT_ARRAY_SCRIPT,
+        EXACT_ARRAY_HYBRID,
         PREFILTER_ARRAY_SCRIPT,
         APPROXIMATE_ARRAY,
         APPROXIMATE_ANY_MATCH,

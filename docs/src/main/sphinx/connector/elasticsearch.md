@@ -594,6 +594,51 @@ evaluation in Trino, and are omitted when mapping safety or query resource limit
 cannot be met.
 Analyzed-text array behavior is controlled separately by the full-text mode.
 
+### Native array expression logic
+
+For source-equivalent integral array mappings, `any_match` can combine
+comparisons, `IN`, `BETWEEN`, `AND`, `OR`, and `NOT` without Painless. The
+connector computes the allowed values of one element before generating queries.
+For example:
+
+```sql
+-- term query for 12, rather than independent document conditions
+SELECT id FROM events
+WHERE any_match(numbers, x -> x IN (5, 12) AND x > 10);
+
+-- ranges below and above 12; a document containing [12, 13] still matches
+SELECT id FROM events
+WHERE any_match(numbers, x -> x <> 12);
+```
+
+Intersections, unions, repeated bounds, and contradictions become `term`,
+`terms`, `range`, `bool.should`, or `match_none` queries. `IS NOT NULL` may use
+`exists` when indexed values preserve source semantics. TRUE and FALSE value
+sets are tracked separately: NULL in an `IN` list cannot become TRUE through
+negation. Predicates that can be TRUE for a NULL element remain local because
+NULL array elements are not indexed. These rules apply to a positive `any_match`
+filter, not to negating the enclosing `any_match`.
+
+Exact indexed keyword arrays additionally support `starts_with`, SQL `LIKE` with its
+optional escape, the supported substring-prefix form, and a conservative subset
+of `regexp_like`. LIKE patterns use native prefix or regexp queries. Regex
+constructs without an exact shared translation, including end anchors and inline
+flags, remain local. Prefix conjunctions can be reduced to the stronger prefix
+or an empty match; other unproven conjunctions retain the original lambda after
+prefiltering. Normalized, truncated, and otherwise source-incompatible mappings
+are not eligible. Fields with neither an index nor doc values remain local.
+Doc-values-only keyword fields keep these new string predicates local for
+compatibility with Elasticsearch 7.
+
+Native translation is independent of `array_script_pushdown_enabled`. When
+scripts are enabled, an OR can combine exact native branches with non-throwing
+script branches. An AND can combine a native necessary condition with a script
+for the complete lambda, preserving same-element evaluation. Fallible arithmetic
+keeps the whole-script prefilter strategy and SQL residual, so a native guard
+cannot hide an arithmetic error. If a combined query exceeds resource limits,
+the connector tries the whole script or the existing native prefilter/local
+fallback. Expression depth, size, value counts, and final query size are bounded.
+
 ### Integral array expression scripts
 
 Enable `elasticsearch.array-script-pushdown.enabled=true` in the catalog, or set

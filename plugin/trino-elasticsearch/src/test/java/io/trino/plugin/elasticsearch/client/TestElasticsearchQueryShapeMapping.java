@@ -68,6 +68,17 @@ class TestElasticsearchQueryShapeMapping
     }
 
     @Test
+    void testUnindexedValuesNeedDocValuesForPredicateSafety()
+            throws Exception
+    {
+        var indices = JSON.readTree(
+                """
+                {"a":{"settings":{},"mappings":{"properties":{"value":{"type":"long","index":false,"doc_values":false}}}}}
+                """);
+        assertThat(ElasticsearchQueryShapeMapping.apply(SCHEMA, indices).fields().getFirst().predicateMappingSafe()).isFalse();
+    }
+
+    @Test
     void testAllIndicesMustAgree()
             throws Exception
     {

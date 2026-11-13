@@ -110,6 +110,7 @@ final class ElasticsearchQueryShapeMapping
             if ((!source.path("includes").isMissingNode() && !source.path("includes").isEmpty() && !matches(source.path("includes"), path))
                     || matches(source.path("excludes"), path)
                     || node.has("script") || node.has("null_value") || node.has("normalizer") || node.has("ignore_above")
+                    || (!node.path("index").asBoolean(true) && !node.path("doc_values").asBoolean(true))
                     || ignoresMalformed(entry, node, path)) {
                 return false;
             }

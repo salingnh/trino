@@ -73,6 +73,7 @@ public class TestElasticsearchRemotePredicateQueryBuilder
     @Test
     public void testRange()
     {
+        assertThat(build(new ElasticsearchRemotePredicate.MatchNone()).toString()).isEqualTo("{\"match_none\":{}}");
         ElasticsearchRemotePredicate.Range range = new ElasticsearchRemotePredicate.Range(
                 "age",
                 Optional.of(new ElasticsearchRemotePredicate.Bound(18L, true)),

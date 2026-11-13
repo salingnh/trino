@@ -32,6 +32,7 @@ final class ElasticsearchRemotePredicateQueryBuilder
         requireNonNull(predicate, "predicate is null");
 
         return switch (predicate) {
+            case ElasticsearchRemotePredicate.MatchNone _ -> JSON.objectNode().set("match_none", JSON.objectNode());
             case ElasticsearchRemotePredicate.And and -> booleanQuery("filter", and.predicates(), false);
             case ElasticsearchRemotePredicate.Or or -> booleanQuery("should", or.predicates(), true);
             case ElasticsearchRemotePredicate.Not not -> JSON.objectNode().set(

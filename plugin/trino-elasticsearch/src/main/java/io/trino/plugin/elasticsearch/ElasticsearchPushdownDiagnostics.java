@@ -130,7 +130,7 @@ public class ElasticsearchPushdownDiagnostics
         }
         switch (decision.reason()) {
             case EXACT_ARRAY, APPROXIMATE_ARRAY -> arrayMembershipTranslations.increment();
-            case EXACT_ANY_MATCH, PREFILTER_ANY_MATCH, APPROXIMATE_ANY_MATCH, EXACT_ARRAY_SCRIPT, PREFILTER_ARRAY_SCRIPT -> anyMatchTranslations.increment();
+            case EXACT_ANY_MATCH, PREFILTER_ANY_MATCH, APPROXIMATE_ANY_MATCH, EXACT_ARRAY_SCRIPT, EXACT_ARRAY_HYBRID, PREFILTER_ARRAY_SCRIPT -> anyMatchTranslations.increment();
             case BOOLEAN_AND -> booleanAndTranslations.increment();
             case BOOLEAN_OR -> booleanOrTranslations.increment();
             case BOOLEAN_NOT_UNPROVEN -> booleanNotTranslations.increment();
@@ -205,6 +205,7 @@ public class ElasticsearchPushdownDiagnostics
             case ElasticsearchRemotePredicate.MatchPhrasePrefix _ -> matchPhrasePrefixPredicates.increment();
             case ElasticsearchRemotePredicate.Exists _ -> existsPredicates.increment();
             case ElasticsearchRemotePredicate.ArrayScript _ -> arrayScriptPredicates.increment();
+            case ElasticsearchRemotePredicate.MatchNone _ -> {}
         }
     }
 

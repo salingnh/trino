@@ -638,19 +638,21 @@ public class ElasticsearchClient
                                 type,
                                 keyword,
                                 keywordAggregatable && predicateSemanticsExact,
-                                predicateSemanticsExact);
+                                predicateSemanticsExact,
+                                keyword.isPresent() || value.path("index").asBoolean(true));
                     }
                     else if (type.equals("keyword") && !sourceValueSemanticsExact) {
                         // A normalizer or null_value rewrites the indexed value while _source remains unchanged. Treat the
                         // field as analyzed text so exact predicate/sort/aggregation paths cannot claim source semantics.
-                        primitiveType = new IndexMetadata.PrimitiveType("text", Optional.empty(), false, false);
+                        primitiveType = new IndexMetadata.PrimitiveType("text", Optional.empty(), false, false, value.path("index").asBoolean(true));
                     }
                     else {
                         primitiveType = new IndexMetadata.PrimitiveType(
                                 type,
                                 Optional.empty(),
                                 aggregatable && IndexMetadata.PrimitiveType.isDocValueType(type),
-                                sourceValueSemanticsExact);
+                                sourceValueSemanticsExact,
+                                value.path("index").asBoolean(true));
                     }
                     result.add(new IndexMetadata.Field(asRawJson, isArray, name, primitiveType));
                 }

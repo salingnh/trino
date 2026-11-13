@@ -302,13 +302,11 @@ public class TestElasticsearchArrayPredicateTranslator
                         new Call(BOOLEAN, EQUAL_OPERATOR_FUNCTION_NAME, List.of(element, new Constant(2L, INTEGER))))));
 
         assertThat(translate(anyMatch, Map.of("numbers", column)))
-                .contains(new ElasticsearchRemotePredicate.Or(List.of(
-                        new ElasticsearchRemotePredicate.Term("Numbers", 1L),
-                        new ElasticsearchRemotePredicate.Term("Numbers", 2L))));
+                .contains(new ElasticsearchRemotePredicate.Terms("Numbers", List.of(1L, 2L)));
     }
 
     @Test
-    public void testAnyMatchConjunctionUsesDocumentCandidateAndRetainsSameElementResidual()
+    public void testAnyMatchContradictionIsExactlyMatchNone()
     {
         ArrayType arrayType = new ArrayType(INTEGER);
         ElasticsearchColumnHandle column = integerArrayColumn("Numbers");
@@ -319,9 +317,7 @@ public class TestElasticsearchArrayPredicateTranslator
                         new Call(BOOLEAN, EQUAL_OPERATOR_FUNCTION_NAME, List.of(element, new Constant(1L, INTEGER))),
                         new Call(BOOLEAN, EQUAL_OPERATOR_FUNCTION_NAME, List.of(element, new Constant(2L, INTEGER))))));
 
-        assertPrefilter(anyMatch, column, new ElasticsearchRemotePredicate.And(List.of(
-                new ElasticsearchRemotePredicate.Term("Numbers", 1L),
-                new ElasticsearchRemotePredicate.Term("Numbers", 2L))));
+        assertThat(translate(anyMatch, Map.of("numbers", column))).contains(new ElasticsearchRemotePredicate.MatchNone());
     }
 
     @Test
@@ -375,7 +371,8 @@ public class TestElasticsearchArrayPredicateTranslator
 
         Call negated = anyMatch("numbers", new ArrayType(INTEGER), element -> new Call(
                 BOOLEAN, NOT_FUNCTION_NAME, List.of(greaterThan(element, 10))));
-        assertThat(translate(negated, Map.of("numbers", integerArrayColumn("Numbers")))).isEmpty();
+        assertThat(translate(negated, Map.of("numbers", integerArrayColumn("Numbers"))))
+                .contains(new ElasticsearchRemotePredicate.Range("Numbers", Optional.empty(), Optional.of(new ElasticsearchRemotePredicate.Bound(10L, true))));
     }
 
     @Test
@@ -973,7 +970,7 @@ public class TestElasticsearchArrayPredicateTranslator
     }
 
     @Test
-    public void testAnyMatchInWithNullConstantRemainsResidual()
+    public void testAnyMatchInWithNullConstantPreservesTrueSet()
     {
         ArrayType arrayType = new ArrayType(INTEGER);
         ElasticsearchColumnHandle column = integerArrayColumn("Numbers");
@@ -985,7 +982,7 @@ public class TestElasticsearchArrayPredicateTranslator
                 IN_PREDICATE_FUNCTION_NAME,
                 List.of(element, new Constant(builder.build(), arrayType))));
 
-        assertThat(translate(anyMatch, Map.of("numbers", column))).isEmpty();
+        assertThat(translate(anyMatch, Map.of("numbers", column))).contains(new ElasticsearchRemotePredicate.Term("Numbers", 1L));
     }
 
     @Test
