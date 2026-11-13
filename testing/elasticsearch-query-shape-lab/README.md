@@ -106,3 +106,11 @@ Add `--file testing/elasticsearch-query-shape-lab/manual-tests.sql` to run the
 manual query collection in batch. Change catalogs to exercise ES7 and PIT.
 The SQL collection resets the session switches after comparing enabled/disabled
 pushdown; it does not recreate fixtures or inject failures.
+
+## Array and scalar expression comparison
+
+The later three-revision expression comparison has its own
+[deployment and replay instructions](EXPRESSION-LAB.md) and
+[SQL results table](EXPRESSION-COMPARISON.md). It keeps master,
+internal/production and the candidate on separate loopback ports and records
+actual Elasticsearch Query DSL for each query on Elasticsearch 7 and 8.
