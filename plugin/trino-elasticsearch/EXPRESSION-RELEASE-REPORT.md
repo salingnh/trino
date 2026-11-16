@@ -149,3 +149,21 @@ EXACT nghĩa là Trino không cần đánh giá lại điều kiện đã offloa
 - [Raw result, full plan, Query DSL và artifact provenance](../../testing/elasticsearch-query-shape-lab/expression-comparison.json.gz).
 - [Danh sách toán tử, hàm, kiểu và giới hạn chi tiết](ARRAY-PUSHDOWN-SUPPORT.md).
 - [Hướng dẫn chạy lại bộ test và kết nối bản deploy](../../testing/elasticsearch-query-shape-lab/EXPRESSION-LAB.md).
+
+## 7. Cập nhật text ngày 16/11/2026
+
+Các bảng ở phần 1–6 mô tả snapshot `ffcf7b85a3b` ngày 13/11. Bản mở rộng `e10be840714` bổ sung các khả năng sau; ma trận SQL được liên kết bên dưới đã chuyển sang kết quả mới.
+
+| Phần bổ sung | Hành vi bản mới | Ca kiểm chứng |
+| --- | --- | --- |
+| Text native trong UNSAFE | Nhận predicate và case conversion trên field text bất kỳ đủ điều kiện; LIKE literal nhiều từ có thể dùng match_phrase, không còn residual SQL của phần đã nhận xấp xỉ. | TEXT-USER-SQL, TEXT-NATIVE-* |
+| Compiler chuỗi trên text | Runtime field đọc nguyên giá trị `_source` cho các hàm length/trim/substring/replace/concat/strpos/ends_with, nullable/CASE, so sánh/logic và tổ hợp được hỗ trợ. | A-TEXT01..33, S-TEXT01..33 |
+| Scalar và text array | Dùng chung các nhóm biểu thức; array source giữ phần tử NULL và xử lý từng phần tử trong lambda. | A-TEXT18 và nhóm COALESCE/CASE |
+| Unicode case trong runtime | Những cây không fallible có thể dùng Unicode case của Elasticsearch, ghi APPROXIMATE; cây fallible giữ prefilter bảo toàn SQL. | S-TEXT05..07 và các ca replace/concat |
+| Field keyword phụ không đầy đủ | Native full-text dùng parent text, gồm review dài bị keyword ignore_above bỏ qua. | TEXT-NATIVE-with_keyword-* |
+| Request runtime đồng bộ | Definitions đi cùng Scroll/PIT nhiều trang, COUNT và aggregation đang hỗ trợ. | TEXT-COUNT, TEXT-GROUP, VOL-TEXT-COUNT; integration PIT ES7/ES8 |
+| So sánh có chủ đích | APPROXIMATE có oracle Elasticsearch riêng và ghi rõ khác SQL gốc; không gọi tìm kiếm tương đối là EXACT. | TEXT-ZERO-TOKENS, TEXT-ARRAY-AND, TEXT-USER-SQL |
+
+Kết quả mới: **990/990 ca của bản mới đạt** theo hợp đồng từng chế độ; 524 exact, 68 approximate và 326 prefilter. Master đạt 990/990; internal/production 980/990, vẫn có 10 sai biệt signed zero/regex đã ghi nhận trước. Số liệu này thuộc fixture kiểm thử, không phải tỷ lệ offload chung.
+
+[Bảng đầy đủ có SQL và ba phiên bản](../../testing/elasticsearch-query-shape-lab/EXPRESSION-COMPARISON.md) · [Plan triển khai text](PLAN-UNSAFE-TEXT-PUSHDOWN.md).

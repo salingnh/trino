@@ -17,6 +17,7 @@ from collections import Counter
 import csv
 import gzip
 import json
+import re
 from pathlib import Path
 
 VERSIONS = ('master', 'internal', 'current')
@@ -29,7 +30,7 @@ def commands(value):
     found = set()
     if isinstance(value, dict):
         for key, child in value.items():
-            if key in ('bool', 'filter', 'must', 'must_not', 'should', 'range', 'term', 'terms', 'exists', 'prefix', 'regexp', 'match_none', 'script'):
+            if key in ('bool', 'filter', 'must', 'must_not', 'should', 'range', 'term', 'terms', 'exists', 'prefix', 'regexp', 'match_phrase', 'match_phrase_prefix', 'match_none', 'script'):
                 found.add(key)
             if key != 'script':
                 found |= commands(child)
@@ -51,8 +52,12 @@ def describe(record):
     dsl = (','.join(sorted(names)) or '—') if record.get('classification') not in ('LOCAL', 'NO_FILTER') else '—'
     actual = record.get('actual', {})
     outcome = 'lỗi ' + actual['error'] if actual.get('error') else str(len(actual.get('rows', []))) + ' dòng'
+    if re.match(r'\s*SELECT\s+count\(\*\)', record.get('sql', ''), re.IGNORECASE) and len(actual.get('rows', [])) == 1:
+        outcome = 'COUNT=' + str(actual['rows'][0][0])
     reference = record.get('oracle_kind', 'SQL')
-    delta = ' · khác SQL gốc' if record.get('sql_equal') is False and record['correct'] else ''
+    delta = ' · khác SQL gốc' if record.get('sql_equal') is False and record['correct'] and record.get('classification', '').endswith('APPROXIMATE') else ''
+    if delta and record.get('sql_golden_rows') is not None:
+        delta += ' (' + str(record['sql_golden_rows']) + ' dòng SQL gốc)'
     return f"{status} [{reference}]{delta} · {mode} ({dsl}) · {outcome} · {record.get('source_hits', 0)} doc / {record.get('response_bytes', 0):,} B"
 
 
@@ -88,6 +93,12 @@ def main():
     summary_row('Kết quả đúng', [f"{summary[v]['correct']}/{summary[v]['total']}" for v in VERSIONS])
     for mode in ('NATIVE EXACT', 'SCRIPT EXACT', 'HYBRID EXACT', 'NATIVE APPROXIMATE', 'SCRIPT APPROXIMATE', 'HYBRID APPROXIMATE', 'PREFILTER', 'LOCAL', 'FOLD', 'NO_FILTER'):
         summary_row(NAMES[mode], [summary[v]['modes'].get(mode, 0) for v in VERSIONS])
+    lines += ['', '## Kết quả mở rộng text trên VM', '',
+              '102 SQL text bổ sung × ES7/ES8: bản mới đạt 204/204 ca. Có 20 lượt local theo các cấu hình SAFE/DISABLED hoặc tắt script. Câu người dùng `LOWER(raw_review_comment) LIKE ...` dùng native match_phrase khi UNSAFE, kể cả scripts OFF.', '',
+              'Ví dụ trong fixture: SQL exact trả 4 dòng, native analyzer trả 5 dòng vì nhận thêm chuỗi `SÁCH, rất tốt`. Ca stopword có thể mất dòng SQL vì analyzer xóa toàn bộ token. AND full-text trên array có thể khớp các token ở các phần tử khác nhau. Đây là các khác biệt được ghi nhận khi chọn UNSAFE, không phải bằng chứng tương đương SQL.', '',
+              'Biểu thức source không fallible có thể EXACT; Unicode case UNSAFE dùng chính sách Elasticsearch được ghi APPROXIMATE. Các cây fallible giữ PREFILTER và residual. Runtime source definitions có mặt trong COUNT và từng request PIT; Source statistics trả unknown để không lấy ước lượng sai từ query thiếu runtime definitions.', '']
+    lines += ['- Text UNSAFE: native full-text dùng analyzer; source runtime dùng nguyên chuỗi. Các ca có oracle Elasticsearch được gắn nhãn [Elasticsearch analyzer]. Khác SQL gốc có chủ đích được ghi riêng, không gọi là lỗi hoặc EXACT.',
+              '- Các ca có source runtime mang runtime_mappings trong request. Native approximate không cần Painless; runtime source cần flag scalar/array script tương ứng.', '']
     lines += ['', '## Cách đọc và phạm vi', '',
               '- **Exact**: không còn residual cho điều kiện được dịch. **Prefilter**: Elasticsearch lọc ứng viên, Trino kiểm tra residual. **Local**: không có điều kiện remote hữu ích cho phép lọc này. **Fold**: Trino rút gọn SQL, không cần scan.',
               '- `doc` là tổng document `_source` thực chuyển về Trino trong các response search/scroll; không phải số document Elasticsearch xét nội bộ. `B` là byte HTTP response body chưa nén, gồm cả metadata của response search/count/scroll. Loại `_search_shards` khỏi số đo này. Query COUNT remote có thể trả kết quả mà không chuyển document nào.',
@@ -98,8 +109,6 @@ def main():
               '- Trên keyword, Unicode LOWER/UPPER giữ residual và cho ứng viên chưa chứng minh qua Trino. Mapping ignore_above/normalizer/không doc values, capture, nhiều cột hoặc overload chưa hỗ trợ được kiểm tra để fallback an toàn.',
               '- Chỉ các index có prefix `expr_a2af4b7203e_` được tạo lại khi dùng `--seed`. Giới hạn script compilation được tăng tạm thời trong lab để chạy nhiều hình dạng biểu thức, rồi phục hồi trong `finally`; trước/sau lưu tại thư mục kết quả trên host.',
               '', '## Sai biệt của baseline và regression đã sửa', '', 'Các ca REAL/DOUBLE của internal thiếu document `id=2` chứa `-0.0`: Elasticsearch phân biệt hai dấu zero trong native query, SQL coi chúng bằng nhau. Regex của internal thiếu `id=15` chứa `abc` kèm newline cuối, trong khi end anchor SQL vẫn khớp trước newline cuối. Mỗi ca được chạy trên cả ES7 và ES8.', '']
-    lines += ['- Text UNSAFE: native full-text dùng analyzer; source runtime dùng nguyên chuỗi. Các ca có oracle Elasticsearch được gắn nhãn [Elasticsearch analyzer]. Khác SQL gốc có chủ đích được ghi riêng, không gọi là lỗi hoặc EXACT.',
-              '- Các ca có source runtime mang runtime_mappings trong request. Native approximate không cần Painless; runtime source cần flag scalar/array script tương ứng.', '']
     failures = [r for r in records if not r['correct']]
     if not failures:
         lines.append('Không có sai biệt kết quả trong lần chạy này.')

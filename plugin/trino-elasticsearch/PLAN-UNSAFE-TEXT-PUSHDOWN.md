@@ -1,6 +1,6 @@
 # Plan: mở rộng pushdown cho mọi field text theo chế độ UNSAFE
 
-Ngày lập: 16/11/2026. Trạng thái: **đã triển khai code; đang kiểm thử và cập nhật kết quả VM**.
+Ngày lập: 16/11/2026. Trạng thái: **đã triển khai và kiểm thử trên VM**. Code runtime: `e10be840714`. Ma trận: 495 SQL × ES7/ES8 × 3 Trino = 2.970 lượt; bản mới đạt 990/990 theo oracle SQL hoặc Elasticsearch tương ứng.
 
 ## 1. Mục tiêu và phạm vi
 
@@ -182,3 +182,13 @@ Các ca native fully pushed phải chứng minh không có Filter/residual của
 - [runtime_mappings có thể khai báo ngay trong search request](https://www.elastic.co/guide/en/elasticsearch/reference/8.19/runtime-search-request.html).
 
 Runtime fallback chuyển việc đọc/tính toán sang Elasticsearch và có thể giảm dữ liệu về Trino; nó vẫn cần xử lý document ứng viên, không có hiệu năng truy cập index như native cho cùng điều kiện.
+
+## 11. Kết quả triển khai ngày 16/11/2026
+
+- Native text và runtime source dùng chung đã chạy trên VM `172.16.11.138`, Trino mới ở `127.0.0.1:18093`; baseline master/internal giữ nguyên.
+- Giữ mặc định full-text SAFE ở catalog test. Các SQL cần tìm tương đối bật session UNSAFE; native không cần Painless, runtime cần flag scalar/array script tương ứng.
+- Đã kiểm tra 226 unit test trong CI/Error Prone, thêm 34 unit về page-source/PIT, và các ca tích hợp ES7/ES8 Scroll/PIT nhiều trang.
+- 102 SQL text bổ sung chạy trên cả hai backend. Bản mới đạt 204/204 ca text; 20 lượt local là các cấu hình SAFE/DISABLED hoặc tắt script cần được giữ local.
+- Tổng mới: 524 lượt exact, 68 approximate, 326 prefilter, 68 local và 4 fold. Những khác biệt có chủ đích so với SQL exact được ghi trong bảng, không tính là sai hoặc gọi là EXACT.
+- Fallible source expressions giữ PREFILTER và policy case bảo toàn SQL; không bỏ residual chỉ vì bật UNSAFE. Compiler trên text vẫn theo allowlist; các hàm/overload chưa hỗ trợ tiếp tục fallback. Runtime statistics trả unknown để tránh ước lượng sai từ query thiếu definitions hoặc chạy lại script trong giai đoạn lấy thống kê.
+- [Bảng SQL, kết quả và DSL đã ghi nhận](../../testing/elasticsearch-query-shape-lab/EXPRESSION-COMPARISON.md).

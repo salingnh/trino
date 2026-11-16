@@ -436,7 +436,7 @@ def classify(plan, actual, events):
     elif residual:
         classification = 'PREFILTER' if pushed else 'LOCAL'
     elif pushed:
-        suffix = ' APPROXIMATE' if 'APPROXIMATE' in plan else ' EXACT'
+        suffix = ' APPROXIMATE' if re.search(r'enforcement\s*=\s*APPROXIMATE', plan) else ' EXACT'
         classification = ('HYBRID' if scripts and native else 'SCRIPT' if scripts else 'NATIVE') + suffix
     else:
         classification = 'LOCAL' if 'error' in actual else 'NO_FILTER'
@@ -484,7 +484,7 @@ def run_case(version, backend, item, golden, session, approximate_golden=None):
     stats = info.get('queryStats', {})
     result = {
         'version':version,'backend':backend,'case_id':item['id'],'group':item['group'],'sql':item['sql'],'mode':item['mode'],'oracle_kind':oracle_kind,
-        'sql_equal':actual.get('error')==sql_golden.get('error') if 'error' in actual or 'error' in sql_golden else key_rows(actual.get('rows',[]))==key_rows(sql_golden.get('rows',[])),
+        'sql_equal':correct if item['subset'] else actual.get('error')==sql_golden.get('error') if 'error' in actual or 'error' in sql_golden else key_rows(actual.get('rows',[]))==key_rows(sql_golden.get('rows',[])),
         'sql_extra':list((key_rows(actual.get('rows',[]))-key_rows(sql_golden.get('rows',[]))).elements())[:10],
         'sql_missing':list((key_rows(sql_golden.get('rows',[]))-key_rows(actual.get('rows',[]))).elements())[:10], 'transport':'N+S' if scripts and native else 'S' if scripts else 'N' if native else '-',
         'correct':correct,'classification':classification,'residual':residual,'source_hits':sum(event.get('source_hits',0) for event in events),
@@ -492,7 +492,7 @@ def run_case(version, backend, item, golden, session, approximate_golden=None):
         'physical_input_positions':stats.get('physicalInputPositions'),'physical_input_bytes':stats.get('physicalInputDataSize'),
         'processed_input_positions':stats.get('processedInputPositions'), 'query_stats':{name:stats.get(name) for name in ('elapsedTime','executionTime','cpuTime','peakUserMemoryReservation')},
         'plan':plan,'plan_error':plan_result.get('error'),'session':settings,'actual':actual,
-        'golden_error':golden.get('error'),'golden_rows':len(golden.get('rows',[])),
+        'golden_error':golden.get('error'),'golden_rows':len(golden.get('rows',[])), 'sql_golden_rows':len(sql_golden.get('rows',[])),
     }
     if not correct and 'rows' in actual and 'rows' in golden:
         result['extra'] = list((key_rows(actual['rows'])-key_rows(golden['rows'])).elements())[:10]
@@ -609,13 +609,22 @@ def reclassify(directory):
     with gzip.open(path / 'comparison.json.gz', 'rt', encoding='utf-8') as stream:
         document = json.load(stream)
     records = document['results']
+    oracle_path = path / 'oracle.json'
+    if oracle_path.exists():
+        document['sql_oracles'] = json.loads(oracle_path.read_text())
+    oracles = {(item['backend'], item['sql']): item for item in document.get('sql_oracles', [])}
+    cases = {item['id']: item for item in document['cases']}
     for record in records:
+        item = cases[record['case_id']]
+        oracle = oracles.get((record['backend'], item.get('reference') or record['sql']))
+        if oracle is not None:
+            record['sql_golden_rows'] = len(oracle.get('rows', []))
         if 'harness_error' in record:
             continue
         mode, scripts, native, residual, events = classify(record['plan'], record['actual'], record['events'])
         record.update(classification=mode, transport='N+S' if scripts and native else 'S' if scripts else 'N' if native else '-',
                       residual=residual, requests=len(events), response_bytes=sum(event.get('response_bytes', 0) for event in events))
-    document['classification_note'] = 'Derived from captured plans/DSL; an empty match_none body is a real native predicate. Metadata search_shards calls excluded.'
+    document['classification_note'] = 'Derived from captured plans/DSL, including runtime_mappings and enforcement. Independent SQL and Elasticsearch analyzer oracles retained. Metadata search_shards calls excluded.'
     with gzip.open(path / 'comparison.json.gz', 'wt', encoding='utf-8') as stream:
         json.dump(document, stream, ensure_ascii=False)
     versions = sorted({record['version'] for record in records})

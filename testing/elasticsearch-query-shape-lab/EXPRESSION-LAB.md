@@ -21,11 +21,12 @@ The comparison is deployed on `172.16.11.138` under
 | --- | --- | --- |
 | master | `2162c006a7171d90305e21d1b2dd2fd47ef72b2a` | 18091 |
 | internal/production | `9abc69bc79ad0de1563031d7d5dd533b9212b3b6` | 18092 |
-| candidate | `ffcf7b85a3b187b869cac8d8f7a56ec531b7630a` | 18093 |
+| candidate | `e10be8407141f8e758ca343726e74fe60ce955b7` | 18093 |
 
 Both catalogs, `es8_compare` and `es7_compare`, use schema `default`.
 The candidate enables the array and scalar script catalog defaults, with full-text
-SAFE. Baseline sessions only set properties supported by that baseline.
+SAFE. Text extension cases explicitly set UNSAFE per session; this remains an opt-in
+change in search semantics, not a global switch to approximate results. Baseline sessions only set properties supported by that baseline.
 Scripts-OFF test cases explicitly disable both script session properties.
 The existing Trino service on port 18090 is not replaced.
 
@@ -75,7 +76,7 @@ Clean-build the selected source revisions using JDK 25 and Maven 3.9.16:
 Build candidate SPI as well when its source differs from the base. The deployed
 candidate's core and SPI artifacts were built from `a2af4b7203e`; no source in
 those modules changed in the subsequent fix commit. Connector and server launcher
-were clean-built from `ffcf7b85a3b`. Their embedded manifests and SHA-256 values
+were clean-built from `e10be840714`. Their embedded manifests and SHA-256 values
 are recorded in `deployment.json` and the raw evidence.
 
 Master/internal production source differs only in the Elasticsearch connector;
@@ -89,11 +90,13 @@ On the host, from the deployment root:
 ```bash
 python3 expression-deploy.py --es7
 # Redeploy only a staged candidate:
-python3 expression-deploy.py --es7 --variants current
+python3 expression-deploy.py --es7 --variants current --candidate-revision e10be8407141f8e758ca343726e74fe60ce955b7
 ```
 
-The deployment script pins the tested source revisions; update its candidate
-revision when staging a different candidate. Do not relabel an existing artifact
+The deployment script pins the baseline revisions. Candidate revision comes from
+`--candidate-revision` or the staged `artifacts/current/SOURCE_REVISION`; the
+connector manifest must match it. Update the staged marker when building another
+candidate. Do not relabel an existing artifact
 as a different commit.
 
 ## Run and render
@@ -103,8 +106,9 @@ python3 expression-compare.py --seed > comparison.log 2>&1
 python3 expression-report.py results/comparison.json.gz --out results
 ```
 
-`--seed` recreates only the owned `expr_a2af4b7203e_cases` and
-`expr_a2af4b7203e_volume` indices on both backends. Preserve previous results before
+`--seed` recreates only the owned `expr_a2af4b7203e_cases`,
+`expr_a2af4b7203e_volume`, `expr_a2af4b7203e_text`, and
+`expr_a2af4b7203e_text_volume` indices on both backends. Preserve previous results before
 rerunning. Without `--seed`, retain `results/fixtures.json` from the seeded run.
 For a focused rerun, copy that file to a separate output directory and use:
 
@@ -114,7 +118,10 @@ python3 expression-compare.py --only 'TXT27|DATE-NULL-ERROR|DIFF-REVERSE' \
 ```
 
 The harness waits for catalogs, runs a local reference query for every SQL, then
-executes EXPLAIN and SQL on three variants concurrently. Each variant/backend has
+executes EXPLAIN and SQL on three variants concurrently. Text native approximate cases have an independent direct-Elasticsearch oracle;
+when a version keeps the predicate local, it uses the SQL oracle. Intentional
+UNSAFE differences are recorded as semantic deltas, rather than treated as failed
+SQL equivalence or labeled EXACT. Each variant/backend has
 its own proxy listener and state; SQL cases within one listener run serially.
 A candidate mismatch makes the process fail. Baseline mismatches remain recorded
 without changing baseline code. Expected SQL errors are checked by error code;
@@ -144,5 +151,8 @@ or a test against production customer indices.
 
 The initial failed matrix is retained on the host in `results-initial/`, with
 `comparison-initial.log` and `temporal-probe-before.json`. The final report uses
-the subsequent corrected deployment. Local verification included 220 connector
-unit tests, four ES7/ES8 regression integration tests, CI checks and Error Prone.
+the subsequent corrected deployment. The previous final keyword/numeric matrix is retained in `results-20261113-final/`.
+Text verification added source runtime, analyzer and NULL/array cases. Local checks
+passed 226 unit tests plus 34 page-source/PIT unit tests, ES7/ES8 Scroll and multi-page PIT integration tests, and the
+combined CI/Error Prone profile. One parallel ES8 PIT run lost its connection during
+cleanup; the separate ES8 rerun passed and its original log was preserved locally.
