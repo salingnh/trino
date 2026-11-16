@@ -304,6 +304,10 @@ final class ElasticsearchPredicateComposer
         .toString()
         .getBytes(StandardCharsets.UTF_8)
         .length;
+        var runtimeMappings = ElasticsearchRemotePredicateQueryBuilder.runtimeMappings(Optional.of(predicate));
+        if (!runtimeMappings.isEmpty()) {
+            bytes += runtimeMappings.toString().getBytes(StandardCharsets.UTF_8).length + 32;
+        }
         return bytes <= policy.maxQueryBytes();
     }
 

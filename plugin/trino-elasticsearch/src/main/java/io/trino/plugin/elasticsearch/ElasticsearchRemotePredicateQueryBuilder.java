@@ -19,6 +19,8 @@ import com.fasterxml.jackson.databind.node.JsonNodeFactory;
 import com.fasterxml.jackson.databind.node.ObjectNode;
 import io.trino.plugin.elasticsearch.expression.ElasticsearchRemotePredicate;
 
+import java.util.Optional;
+
 import static java.util.Objects.requireNonNull;
 
 final class ElasticsearchRemotePredicateQueryBuilder
@@ -39,6 +41,8 @@ final class ElasticsearchRemotePredicateQueryBuilder
                     "bool",
                     JSON.objectNode().set("must_not", JSON.arrayNode().add(build(not.predicate()))));
             case ElasticsearchRemotePredicate.Enforced enforced -> build(enforced.predicate());
+            case ElasticsearchRemotePredicate.SourceScript script -> JSON.objectNode().set(
+                    "term", JSON.objectNode().put(script.runtimeField(), true));
             case ElasticsearchRemotePredicate.ScriptPredicate script -> {
                 ObjectNode parameters = JSON.objectNode();
                 script.parameters().forEach((name, value) -> parameters.set(name, toJsonValue(value)));
@@ -78,6 +82,33 @@ final class ElasticsearchRemotePredicateQueryBuilder
                     "exists",
                     JSON.objectNode().put("field", exists.field()));
         };
+    }
+
+    static ObjectNode runtimeMappings(Optional<ElasticsearchRemotePredicate> predicate)
+    {
+        ObjectNode mappings = JSON.objectNode();
+        predicate.ifPresent(value -> collectRuntimeMappings(value, mappings));
+        return mappings;
+    }
+
+    private static void collectRuntimeMappings(ElasticsearchRemotePredicate predicate, ObjectNode mappings)
+    {
+        switch (predicate) {
+            case ElasticsearchRemotePredicate.SourceScript script -> {
+                ObjectNode parameters = JSON.objectNode();
+                script.parameters().forEach((name, value) -> parameters.set(name, toJsonValue(value)));
+                ObjectNode body = JSON.objectNode().put("lang", "painless").put("source", script.source());
+                body.set("params", parameters);
+                ObjectNode field = JSON.objectNode().put("type", "boolean");
+                field.set("script", body);
+                mappings.set(script.runtimeField(), field);
+            }
+            case ElasticsearchRemotePredicate.And and -> and.predicates().forEach(value -> collectRuntimeMappings(value, mappings));
+            case ElasticsearchRemotePredicate.Or or -> or.predicates().forEach(value -> collectRuntimeMappings(value, mappings));
+            case ElasticsearchRemotePredicate.Not not -> collectRuntimeMappings(not.predicate(), mappings);
+            case ElasticsearchRemotePredicate.Enforced enforced -> collectRuntimeMappings(enforced.predicate(), mappings);
+            default -> {}
+        }
     }
 
     private static ObjectNode booleanQuery(String clauseName, Iterable<ElasticsearchRemotePredicate> predicates, boolean minimumShouldMatch)

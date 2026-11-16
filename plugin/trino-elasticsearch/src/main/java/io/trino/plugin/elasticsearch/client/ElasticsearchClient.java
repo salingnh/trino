@@ -754,7 +754,15 @@ public class ElasticsearchClient
 
     public SearchResult beginSearch(String index, int shard, JsonNode query, Optional<List<String>> fields, List<String> documentFields, List<JsonNode> sort, OptionalLong limit, Consumer<String> context)
     {
+        return beginSearch(index, shard, query, fields, documentFields, sort, limit, context, JSON.objectNode());
+    }
+
+    public SearchResult beginSearch(String index, int shard, JsonNode query, Optional<List<String>> fields, List<String> documentFields, List<JsonNode> sort, OptionalLong limit, Consumer<String> context, JsonNode runtimeMappings)
+    {
         ObjectNode searchBody = searchBody(query, fields, documentFields, sort, limit);
+        if (!runtimeMappings.isEmpty()) {
+            searchBody.set("runtime_mappings", runtimeMappings);
+        }
 
         LOG.debug("Begin search: %s:%s, query: %s", index, shard, searchBody);
 
@@ -857,7 +865,24 @@ public class ElasticsearchClient
             List<JsonNode> searchAfter,
             Consumer<String> context)
     {
+        return searchPointInTime(id, query, fields, documentFields, sort, limit, searchAfter, context, JSON.objectNode());
+    }
+
+    public SearchResult searchPointInTime(
+            String id,
+            JsonNode query,
+            Optional<List<String>> fields,
+            List<String> documentFields,
+            List<JsonNode> sort,
+            OptionalLong limit,
+            List<JsonNode> searchAfter,
+            Consumer<String> context,
+            JsonNode runtimeMappings)
+    {
         ObjectNode body = searchBody(query, fields, documentFields, sort, limit);
+        if (!runtimeMappings.isEmpty()) {
+            body.set("runtime_mappings", runtimeMappings);
+        }
         body.set("pit", JSON.objectNode().put("id", id).put("keep_alive", scrollTimeout.toMillis() + "ms"));
         body.put("track_total_hits", false);
         // Stable within the PIT, unlike _doc across independently executed requests.
@@ -951,7 +976,15 @@ public class ElasticsearchClient
 
     public long count(String index, int shard, JsonNode query)
     {
+        return count(index, shard, query, JSON.objectNode());
+    }
+
+    public long count(String index, int shard, JsonNode query, JsonNode runtimeMappings)
+    {
         ObjectNode countBody = JSON.objectNode();
+        if (!runtimeMappings.isEmpty()) {
+            countBody.set("runtime_mappings", runtimeMappings);
+        }
         countBody.put("size", 0);
         countBody.put("track_total_hits", true);
         countBody.set("query", query);

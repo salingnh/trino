@@ -23,9 +23,13 @@ import org.intellij.lang.annotations.Language;
 import org.junit.jupiter.api.Test;
 
 import java.io.IOException;
+import java.util.Arrays;
+import java.util.HashMap;
+import java.util.List;
 import java.util.Map;
 
 import static io.trino.testing.TestingNames.randomNameSuffix;
+import static io.trino.testing.assertions.Assert.assertEqualsIgnoreOrder;
 import static java.lang.String.format;
 import static org.assertj.core.api.Assertions.assertThat;
 
@@ -332,6 +336,80 @@ public abstract class BaseElasticsearchFullTextPushdownTest
                     .matches("VALUES VARCHAR '1'")
                     .skipResultsCorrectnessCheckForPushdown()
                     .isFullyPushedDown();
+        }
+        finally {
+            deleteIndex(indexName);
+        }
+    }
+
+    @Test
+    public void testUnsafeTextExpressionsUseNativeAndSourceRuntime()
+            throws IOException
+    {
+        String indexName = "unsafe_text_expressions_" + randomNameSuffix();
+        createIndex(indexName,
+                """
+                {"_meta":{"trino":{"comments":{"isArray":true}}},"properties":{
+                  "id":{"type":"keyword"},"comment":{"type":"text"},"comments":{"type":"text"},
+                  "with_keyword":{"type":"text","fields":{"keyword":{"type":"keyword","ignore_above":256}}}
+                }}
+                """);
+        try {
+            List<String> values = Arrays.asList("SÁCH rất tốt", "SÁCH, rất tốt", "  ABC  ", "", null, "a ".repeat(160) + "SÁCH rất tốt", "X😀Y");
+            for (int i = 0; i < values.size(); i++) {
+                Map<String, Object> document = new HashMap<>();
+                document.put("id", Integer.toString(i));
+                document.put("comment", values.get(i));
+                document.put("comments", Arrays.asList(values.get(i), null));
+                document.put("with_keyword", values.get(i));
+                index(indexName, document);
+            }
+            index(indexName, ImmutableMap.of("id", "missing"));
+            index(indexName, ImmutableMap.of("id", "empty", "comments", List.of()));
+            index(indexName, ImmutableMap.of("id", "numeric", "comment", 123, "comments", List.of(123)));
+            // Exceed the PIT suite's page size so runtime definitions are exercised after search_after.
+            for (int i = 0; i < 110; i++) {
+                index(indexName, ImmutableMap.of("id", "page_" + i, "comment", "filler", "comments", List.of("filler"), "with_keyword", "filler"));
+            }
+            String catalog = getSession().getCatalog().orElseThrow();
+            Session enabled = Session.builder(getSession())
+                    .setCatalogSessionProperty(catalog, "full_text_pushdown_mode", "UNSAFE")
+                    .setCatalogSessionProperty(catalog, "scalar_script_pushdown_enabled", "true")
+                    .setCatalogSessionProperty(catalog, "array_script_pushdown_enabled", "true").build();
+            Session local = Session.builder(enabled).setSystemProperty("allow_pushdown_into_connectors", "false").build();
+            Session nativeOnly = Session.builder(enabled)
+                    .setCatalogSessionProperty(catalog, "scalar_script_pushdown_enabled", "false")
+                    .setCatalogSessionProperty(catalog, "array_script_pushdown_enabled", "false").build();
+            for (String field : List.of("comment", "with_keyword")) {
+                String sql = "SELECT id FROM " + indexName + " WHERE LOWER(" + field + ") LIKE '%sách rất%'";
+                assertThat(query(nativeOnly, sql)).matches("VALUES VARCHAR '0', VARCHAR '1', VARCHAR '5'")
+                        .skipResultsCorrectnessCheckForPushdown().isFullyPushedDown();
+            }
+            for (String predicate : List.of(
+                    "length(trim(comment)) > 3",
+                    "ends_with(lower(trim(comment)), 'tốt')",
+                    "length(upper(trim(comment))) > 3",
+                    "strpos(replace(comment, ' ', '_'), 'rất_tốt') > 0",
+                    "substring(comment, 2) = '😀Y'",
+                    "trim(comment) = 'ABC'",
+                    "coalesce(comment, 'fallback') = 'fallback'",
+                    "CASE WHEN comment IS NULL THEN true ELSE length(comment) > 2 END",
+                    "NOT starts_with(trim(comment), 'abc')",
+                    "any_match(comments, x -> x IS NULL)",
+                    "any_match(comments, x -> coalesce(x, 'fallback') = 'fallback')",
+                    "any_match(comments, x -> length(trim(x)) > 3)",
+                    "any_match(comments, x -> ends_with(lower(trim(x)), 'tốt'))")) {
+                String sql = "SELECT id FROM " + indexName + " WHERE " + predicate;
+                assertEqualsIgnoreOrder(computeActual(enabled, sql).getMaterializedRows(), computeActual(local, sql).getMaterializedRows());
+            }
+            assertThat(query(enabled, "SELECT id FROM " + indexName + " WHERE length(trim(comment)) > 3")).isFullyPushedDown();
+            assertThat(query(enabled, "SELECT id FROM " + indexName + " WHERE any_match(comments, x -> x IS NULL)")).isFullyPushedDown();
+            String count = "SELECT count(*) FROM " + indexName + " WHERE length(trim(comment)) > 3";
+            assertThat(computeActual(enabled, count).getMaterializedRows()).isEqualTo(computeActual(local, count).getMaterializedRows());
+            assertThat(query(enabled, count)).isFullyPushedDown();
+            String grouped = "SELECT id, count(*) FROM " + indexName + " WHERE length(trim(comment)) > 3 GROUP BY id";
+            assertEqualsIgnoreOrder(computeActual(enabled, grouped).getMaterializedRows(), computeActual(local, grouped).getMaterializedRows());
+            assertThat(query(nativeOnly, "SELECT id FROM " + indexName + " WHERE length(trim(comment)) > 3")).isNotFullyPushedDown(FilterNode.class);
         }
         finally {
             deleteIndex(indexName);

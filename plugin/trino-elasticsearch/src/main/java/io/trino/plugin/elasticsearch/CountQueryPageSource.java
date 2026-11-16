@@ -61,7 +61,7 @@ class CountQueryPageSource
             if (!table.index().equals(split.index())) {
                 query = addIndexFilter(query, split.index());
             }
-            count = client.count(table.index(), split.shard(), query);
+            count = client.count(table.index(), split.shard(), query, ElasticsearchQueryBuilder.runtimeMappings(table));
         }
         catch (RuntimeException e) {
             diagnostics.recordFailure();

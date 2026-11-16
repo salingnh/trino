@@ -532,7 +532,8 @@ public class ElasticsearchMetadata
     {
         ElasticsearchTableHandle handle = (ElasticsearchTableHandle) table;
         if (!statisticsEnabled || isPassthroughQuery(handle) || handle.aggregation().isPresent()
-                || handle.remotePredicate().filter(predicate -> !predicate.isExact()).isPresent()) {
+                || handle.remotePredicate().filter(predicate -> !predicate.isExact()).isPresent()
+                || !ElasticsearchQueryBuilder.runtimeMappings(handle).isEmpty()) {
             return TableStatistics.empty();
         }
 

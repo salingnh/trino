@@ -207,6 +207,14 @@ public class ElasticsearchPushdownDiagnostics
             case ElasticsearchRemotePredicate.Exists _ -> existsPredicates.increment();
             case ElasticsearchRemotePredicate.ArrayScript _ -> arrayScriptPredicates.increment();
             case ElasticsearchRemotePredicate.ScalarScript _ -> scalarScriptPredicates.increment();
+            case ElasticsearchRemotePredicate.SourceScript script -> {
+                if (script.array()) {
+                    arrayScriptPredicates.increment();
+                }
+                else {
+                    scalarScriptPredicates.increment();
+                }
+            }
             case ElasticsearchRemotePredicate.MatchNone _ -> {}
         }
     }

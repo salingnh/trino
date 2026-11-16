@@ -22,7 +22,7 @@ from pathlib import Path
 VERSIONS = ('master', 'internal', 'current')
 LABELS = ('Trino master', 'Trino internal/production', 'Trino branch mới')
 NAMES = {'NATIVE EXACT': 'Native exact', 'SCRIPT EXACT': 'Script exact', 'HYBRID EXACT': 'Hybrid exact',
-         'PREFILTER': 'Prefilter', 'LOCAL': 'Local', 'FOLD': 'Fold', 'NO_FILTER': 'Không cần filter', 'NO_SCAN': 'Không scan'}
+         'NATIVE APPROXIMATE': 'Native approximate', 'SCRIPT APPROXIMATE': 'Script approximate', 'HYBRID APPROXIMATE': 'Hybrid approximate', 'PREFILTER': 'Prefilter', 'LOCAL': 'Local', 'FOLD': 'Fold', 'NO_FILTER': 'Không cần filter', 'NO_SCAN': 'Không scan'}
 
 
 def commands(value):
@@ -46,10 +46,14 @@ def describe(record):
     for event in record.get('events', []):
         if '/_search_shards' not in event.get('path', ''):
             names |= commands(event.get('request', {}).get('query', {}))
+            if event.get('request', {}).get('runtime_mappings'):
+                names.update(('runtime_mappings', 'script'))
     dsl = (','.join(sorted(names)) or '—') if record.get('classification') not in ('LOCAL', 'NO_FILTER') else '—'
     actual = record.get('actual', {})
     outcome = 'lỗi ' + actual['error'] if actual.get('error') else str(len(actual.get('rows', []))) + ' dòng'
-    return f"{status} · {mode} ({dsl}) · {outcome} · {record.get('source_hits', 0)} doc / {record.get('response_bytes', 0):,} B"
+    reference = record.get('oracle_kind', 'SQL')
+    delta = ' · khác SQL gốc' if record.get('sql_equal') is False and record['correct'] else ''
+    return f"{status} [{reference}]{delta} · {mode} ({dsl}) · {outcome} · {record.get('source_hits', 0)} doc / {record.get('response_bytes', 0):,} B"
 
 
 def markdown(text):
@@ -75,25 +79,27 @@ def main():
                             'modes': dict(Counter(r.get('classification', 'HARNESS ERROR') for r in selected))}
     lines = ['# Kết quả SQL: master, internal/production và branch mới', '',
              f"Thời điểm: `{data['generated_at']}`. Host kiểm thử: `172.16.11.138`. Branch: `Feat/elasticsearch-array-necessary-prefilter`.", '',
-             f"Chạy **{len(data['cases'])} SQL × {len(backends)} phiên bản Elasticsearch × 3 Trino = {len(records):,} lượt**; mỗi SQL được đối chiếu với cùng query chạy local (`allow_pushdown_into_connectors=false`). Kết quả dưới đây được lấy từ SQL đã thực thi, distributed plan và Query DSL HTTP thực gửi tới Elasticsearch.", '',
+             f"Chạy **{len(data['cases'])} SQL × {len(backends)} phiên bản Elasticsearch × 3 Trino = {len(records):,} lượt**; các ca SQL exact được đối chiếu với local (`allow_pushdown_into_connectors=false`); các ca UNSAFE native approximate có oracle Query DSL Elasticsearch riêng. Kết quả dưới đây được lấy từ SQL đã thực thi, distributed plan và Query DSL HTTP thực gửi tới Elasticsearch.", '',
              '| Chỉ số | ' + ' | '.join(LABELS) + ' |', '| --- | --- | --- | --- |']
     def summary_row(label, values):
         lines.append('| ' + label + ' | ' + ' | '.join(str(v) for v in values) + ' |')
     summary_row('Commit runtime', ['`' + data['deployment']['versions'][v]['revision'] + '`' for v in VERSIONS])
     summary_row('Port loopback', [data['deployment']['versions'][v]['port'] for v in VERSIONS])
     summary_row('Kết quả đúng', [f"{summary[v]['correct']}/{summary[v]['total']}" for v in VERSIONS])
-    for mode in ('NATIVE EXACT', 'SCRIPT EXACT', 'HYBRID EXACT', 'PREFILTER', 'LOCAL', 'FOLD', 'NO_FILTER'):
+    for mode in ('NATIVE EXACT', 'SCRIPT EXACT', 'HYBRID EXACT', 'NATIVE APPROXIMATE', 'SCRIPT APPROXIMATE', 'HYBRID APPROXIMATE', 'PREFILTER', 'LOCAL', 'FOLD', 'NO_FILTER'):
         summary_row(NAMES[mode], [summary[v]['modes'].get(mode, 0) for v in VERSIONS])
     lines += ['', '## Cách đọc và phạm vi', '',
               '- **Exact**: không còn residual cho điều kiện được dịch. **Prefilter**: Elasticsearch lọc ứng viên, Trino kiểm tra residual. **Local**: không có điều kiện remote hữu ích cho phép lọc này. **Fold**: Trino rút gọn SQL, không cần scan.',
               '- `doc` là tổng document `_source` thực chuyển về Trino trong các response search/scroll; không phải số document Elasticsearch xét nội bộ. `B` là byte HTTP response body chưa nén, gồm cả metadata của response search/count/scroll. Loại `_search_shards` khỏi số đo này. Query COUNT remote có thể trả kết quả mà không chuyển document nào.',
               '- Các dòng lỗi được coi là ĐÚNG khi giữ cùng mã lỗi SQL như chạy local. Không coi query trả sai kết quả là một thành công pushdown. Thứ tự kết quả không quan trọng; LIMIT không ORDER BY được kiểm tra theo tập con hợp lệ và số dòng.',
-              '- Dữ liệu do bộ test tạo: 18 document biên và 10.000 document volume trên mỗi Elasticsearch. Có NULL/missing/array rỗng, nhiều phần tử khác nhau, Unicode/newline, signed zero/NaN sinh từ phép tính, overflow/division by zero, mapping không tương đương nguồn và timestamp trước epoch/leap day.',
+              '- Dữ liệu do bộ test tạo: 18 document biên keyword/numeric, 20 document biên text, cùng hai index volume 10.000 document trên mỗi Elasticsearch. Có NULL/missing/array rỗng, nhiều phần tử khác nhau, Unicode/newline, signed zero/NaN sinh từ phép tính, overflow/division by zero, mapping không tương đương nguồn và timestamp trước epoch/leap day.',
               '- Elasticsearch 7.17.27 và 8.11.3 dùng cùng schema và dữ liệu. Ba Trino có cùng tài nguyên (2 CPU, heap 4 GiB), scroll-size 1.000 và cùng backend qua listener proxy riêng. Bảng nhằm đo tính đúng và offload; không phải benchmark latency độc lập vì ba phiên bản chạy đồng thời.',
               '- Branch mới bật hai catalog properties `elasticsearch.array-script-pushdown.enabled=true` và `elasticsearch.scalar-script-pushdown.enabled=true`; full-text SAFE. Baseline chỉ dùng properties mà phiên bản đó thực sự hỗ trợ. Các ca có nhãn scripts OFF tắt cả hai session properties để kiểm tra native/Plan 1.',
-              '- Unicode LOWER/UPPER giữ residual và cho ứng viên chưa chứng minh qua Trino. Mapping ignore_above/normalizer/không doc values, capture, nhiều cột hoặc overload chưa hỗ trợ được kiểm tra để fallback an toàn.',
+              '- Trên keyword, Unicode LOWER/UPPER giữ residual và cho ứng viên chưa chứng minh qua Trino. Mapping ignore_above/normalizer/không doc values, capture, nhiều cột hoặc overload chưa hỗ trợ được kiểm tra để fallback an toàn.',
               '- Chỉ các index có prefix `expr_a2af4b7203e_` được tạo lại khi dùng `--seed`. Giới hạn script compilation được tăng tạm thời trong lab để chạy nhiều hình dạng biểu thức, rồi phục hồi trong `finally`; trước/sau lưu tại thư mục kết quả trên host.',
               '', '## Sai biệt của baseline và regression đã sửa', '', 'Các ca REAL/DOUBLE của internal thiếu document `id=2` chứa `-0.0`: Elasticsearch phân biệt hai dấu zero trong native query, SQL coi chúng bằng nhau. Regex của internal thiếu `id=15` chứa `abc` kèm newline cuối, trong khi end anchor SQL vẫn khớp trước newline cuối. Mỗi ca được chạy trên cả ES7 và ES8.', '']
+    lines += ['- Text UNSAFE: native full-text dùng analyzer; source runtime dùng nguyên chuỗi. Các ca có oracle Elasticsearch được gắn nhãn [Elasticsearch analyzer]. Khác SQL gốc có chủ đích được ghi riêng, không gọi là lỗi hoặc EXACT.',
+              '- Các ca có source runtime mang runtime_mappings trong request. Native approximate không cần Painless; runtime source cần flag scalar/array script tương ứng.', '']
     failures = [r for r in records if not r['correct']]
     if not failures:
         lines.append('Không có sai biệt kết quả trong lần chạy này.')
@@ -119,7 +125,7 @@ def main():
             if case['group'] != previous:
                 lines += ['', '#### ' + case['group'], '', '| SQL | ' + ' | '.join(LABELS) + ' |', '| --- | --- | --- | --- |']
                 previous = case['group']
-            suffix = ' · scripts OFF' if case['off'] else ''
+            suffix = (' · scripts OFF' if case['off'] else '') + ' · ' + case.get('mode', 'SAFE')
             sql = f"**{case['id']}{suffix}**<br><code>{markdown(case['sql'])}</code>"
             lines.append('| ' + sql + ' | ' + ' | '.join(describe(lookup[backend, case['id'], v]) for v in VERSIONS) + ' |')
     lines += ['', '## Provenance triển khai', '',
@@ -132,13 +138,14 @@ def main():
         writer.writerow(['SQL', *LABELS])
         for backend in backends:
             for case in data['cases']:
-                writer.writerow([f"-- {backend} {case['id']}\n" + case['sql'], *(describe(lookup[backend, case['id'], v]).replace('**', '') for v in VERSIONS)])
+                writer.writerow([f"-- {backend} {case['id']} mode={case.get('mode', 'SAFE')}\n" + case['sql'], *(describe(lookup[backend, case['id'], v]).replace('**', '') for v in VERSIONS)])
     sql = ['-- Executed SQL matrix. Run with username expression-comparison and time zone UTC.', '-- Use current runtime on port 18093; scripts are enabled by catalog defaults.', '']
     for backend in backends:
         sql += ['USE ' + backend + '_compare.default;', "SET TIME ZONE 'UTC';"]
         for case in data['cases']:
             state = 'false' if case['off'] else 'true'
             sql += [f"-- {case['id']}: {case['group']}",
+                    f"SET SESSION {backend}_compare.full_text_pushdown_mode = '{case.get('mode', 'SAFE')}';",
                     f'SET SESSION {backend}_compare.array_script_pushdown_enabled = {state};',
                     f'SET SESSION {backend}_compare.scalar_script_pushdown_enabled = {state};', case['sql'] + ';', '']
     (output / 'expression-comparison.sql').write_text('\n'.join(sql), encoding='utf-8')

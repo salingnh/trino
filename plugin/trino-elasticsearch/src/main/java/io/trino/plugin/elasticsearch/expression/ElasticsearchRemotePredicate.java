@@ -19,13 +19,16 @@ import com.fasterxml.jackson.annotation.JsonSubTypes;
 import com.fasterxml.jackson.annotation.JsonTypeInfo;
 import com.google.common.collect.ImmutableList;
 import com.google.common.collect.ImmutableMap;
+import com.google.common.hash.Hashing;
 
 import java.util.List;
 import java.util.Map;
 import java.util.Objects;
 import java.util.Optional;
+import java.util.TreeMap;
 
 import static com.google.common.base.Preconditions.checkArgument;
+import static java.nio.charset.StandardCharsets.UTF_8;
 import static java.util.Objects.requireNonNull;
 
 /**
@@ -54,6 +57,7 @@ import static java.util.Objects.requireNonNull;
         @JsonSubTypes.Type(value = ElasticsearchRemotePredicate.Exists.class, name = "exists"),
         @JsonSubTypes.Type(value = ElasticsearchRemotePredicate.ArrayScript.class, name = "arrayScript"),
         @JsonSubTypes.Type(value = ElasticsearchRemotePredicate.ScalarScript.class, name = "scalarScript"),
+        @JsonSubTypes.Type(value = ElasticsearchRemotePredicate.SourceScript.class, name = "sourceScript"),
         @JsonSubTypes.Type(value = ElasticsearchRemotePredicate.MatchNone.class, name = "matchNone"),
 })
 public sealed interface ElasticsearchRemotePredicate
@@ -114,6 +118,7 @@ public sealed interface ElasticsearchRemotePredicate
             case Exists _ -> "exists";
             case ArrayScript _ -> "arrayScript";
             case ScalarScript _ -> "scalarScript";
+            case SourceScript _ -> "sourceScript";
             case MatchNone _ -> "matchNone";
         };
     }
@@ -162,13 +167,34 @@ public sealed interface ElasticsearchRemotePredicate
      */
     sealed interface ScriptPredicate
             extends ElasticsearchRemotePredicate
-            permits ArrayScript, ScalarScript
+            permits ArrayScript,
+                    ScalarScript,
+                    SourceScript
     {
         String field();
 
         String source();
 
         Map<String, Value> parameters();
+    }
+
+    record SourceScript(String field, String source, Map<String, Value> parameters, boolean array)
+            implements ScriptPredicate
+    {
+        public SourceScript
+        {
+            field = requireField(field);
+            requireNonNull(source, "source is null");
+            checkArgument(!source.isEmpty(), "script source is empty");
+            parameters = ImmutableMap.copyOf(requireNonNull(parameters, "parameters is null"));
+            checkArgument(new Value(ValueType.STRING, field).equals(parameters.get("field")), "script field parameter does not match field");
+        }
+
+        @JsonIgnore
+        public String runtimeField()
+        {
+            return "__trino_text_" + Hashing.sha256().hashString(field + "\0" + source + "\0" + new TreeMap<>(parameters), UTF_8);
+        }
     }
 
     record ScalarScript(String field, String source, Map<String, Value> parameters)

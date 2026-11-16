@@ -41,11 +41,11 @@ final class SearchExecutionStrategies
         JsonNode searchQuery = query;
         List<JsonNode> sort = buildSort(table.sortOrder(), table.query().isPresent());
         if (client.isPointInTimeSearchEnabled()) {
-            return new PointInTimeSearchExecutionStrategy(client, table.index(), split.shard(), searchQuery, fields, documentFields, sort, table.limit(), diagnostics);
+            return new PointInTimeSearchExecutionStrategy(client, table.index(), split.shard(), searchQuery, fields, documentFields, sort, table.limit(), diagnostics, ElasticsearchQueryBuilder.runtimeMappings(table));
         }
         return new ScrollSearchExecutionStrategy(
                 client,
-                context -> client.beginSearch(table.index(), split.shard(), searchQuery, fields, documentFields, sort, table.limit(), context),
+                context -> client.beginSearch(table.index(), split.shard(), searchQuery, fields, documentFields, sort, table.limit(), context, ElasticsearchQueryBuilder.runtimeMappings(table)),
                 diagnostics);
     }
 }

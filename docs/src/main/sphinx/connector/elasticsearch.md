@@ -775,29 +775,65 @@ without an exact-match `keyword` sub-field — are evaluated by the engine,
 because a `text` field is tokenized and does not preserve exact string values.
 
 The `elasticsearch.full-text-pushdown` configuration property, or the
-`full_text_pushdown_mode` session property, opts in to pushing these predicates
-down as Elasticsearch full-text queries. Equality and `IN` predicates become a
-`match_phrase` query, a `LIKE` prefix pattern (`abc%`) becomes a
-`match_phrase_prefix` query, and other `LIKE` patterns and `regexp_like` become a
-`regexp` query, which Elasticsearch evaluates per token using Lucene regular
-expression syntax. Because tokenization, lowercasing, and stemming apply, results
-can differ from exact SQL semantics. Three modes are available:
+`full_text_pushdown_mode` session property, selects the treatment of analyzed
+text predicates:
 
-- `DISABLED`, the default: text predicates are evaluated by the engine only.
-- `SAFE`: push a full-text pre-filter but re-apply the exact predicate in the
-  engine, which removes false positives. This is *not* lossless: because the
-  pre-filter is not a guaranteed superset, rows can still be dropped — for
-  example a value that analyzes to nothing, such as a stop word, or a
-  `regexp_like` pattern that matches across analyzer token boundaries, because
-  Elasticsearch matches per token rather than across the whole string. A
-  multi-token `LIKE` prefix is pushed as a `match_phrase_prefix` pre-filter while
-  the engine keeps the exact prefix range, so its result stays correct; a
-  multi-token contains pattern is left to the engine.
-- `UNSAFE`: push the full-text query and trust the Elasticsearch result. Fully
-  pushed down and fastest, but results follow Elasticsearch analysis semantics.
+- `DISABLED` (default) keeps unproven analyzed-text expressions in Trino.
+- `SAFE` uses only exact translations or candidates proven not to lose SQL
+  matches. Analyzed-text candidates without that proof remain local.
+- `UNSAFE` accepts explicitly approximate Elasticsearch semantics. Translated
+  approximate predicates do not retain their original exact SQL residual.
+  Tokenization, case conversion, stemming, stop words and punctuation can change
+  results. Diagnostics report these predicates as `APPROXIMATE`, not `EXACT`.
 
-Both `SAFE` and `UNSAFE` are therefore approximate on analyzed `text`; only a
-predicate on a field with an exact-match `keyword` sub-field is exact.
+UNSAFE text routing applies to scalar text columns and `any_match` over text
+arrays. Native full-text queries are preferred when a translation exists.
+Literal and contains-literal LIKE patterns, including multi-token patterns,
+use `match_phrase`; prefixes use `match_phrase_prefix`. Supported other patterns
+use Lucene `regexp` queries over tokens. LOWER/UPPER around a field can use this
+native path: the field's analyzer defines the case/normalization behavior, which
+is intentionally not a promise to execute Trino's string function exactly.
+
+For example, replace `elasticsearch` with the actual catalog name:
+
+```sql
+SET SESSION elasticsearch.full_text_pushdown_mode = 'UNSAFE';
+SELECT id FROM reviews
+WHERE lower(raw_review_comment) LIKE '%sách rất%';
+```
+
+This shape uses a native `match_phrase` query on the analyzed parent text field,
+including when an optional keyword subfield drops long values. It does not need
+Painless or an exact SQL residual. It can match both `SÁCH rất tốt` and
+`SÁCH, rất tốt`, according to the configured analyzer.
+
+For text expressions without a native translation, enable the corresponding
+`scalar_script_pushdown_enabled` or `array_script_pushdown_enabled` session
+property to allow a runtime-field fallback. These flags remain independent and
+default to false. The fallback reads the complete value from `_source`; it does
+not treat analyzed tokens as the original string. Runtime definitions exist only
+in the search request, so no reindexing or persistent mapping change is required.
+This requires `_source` to be available and the cluster to permit runtime scripts.
+
+The fallback reuses the typed expression compiler for string functions such as
+length, trim/ltrim/rtrim, substr/substring, replace, concat, strpos, ends_with,
+nullable/CASE expressions, and their supported compositions. Scalar numeric
+source values are converted to strings like the VARCHAR decoder. Source arrays
+preserve NULL elements and evaluate the complete lambda on each element.
+Unsupported functions/overloads and expressions over multiple captured columns
+still follow the normal fallback rules.
+
+In non-fallible source expressions, UNSAFE LOWER/UPPER can use Elasticsearch's
+Unicode case behavior and are marked APPROXIMATE. Fallible expressions keep a
+lossless candidate and the original residual, including the existing conservative
+Unicode case guard, rather than silently suppressing SQL errors. Other proven
+source expressions may be exact. Turning on UNSAFE does not disable all residuals
+or error checks in the query.
+
+Runtime definitions are carried through Scroll, PIT/search_after, COUNT and
+supported aggregation requests. Reading `_source` and evaluating scripts costs
+more than an indexed native predicate: fewer documents transferred to Trino does
+not imply that Elasticsearch avoided scanning or parsing candidate documents.
 
 Dynamic filters on `text` join keys are always safe to push, because the join
 re-checks the key. They are pushed as `match_phrase` pre-filters whenever the

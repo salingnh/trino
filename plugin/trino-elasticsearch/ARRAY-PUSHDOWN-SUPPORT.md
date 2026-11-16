@@ -4,9 +4,17 @@ Tài liệu mô tả code trên branch `Feat/elasticsearch-array-necessary-prefi
 
 Phạm vi gồm điều kiện `WHERE any_match(array_column, x -> biểu_thức)` và cây biểu thức scalar trên một cột. Một hàm nằm trong bảng không có nghĩa mọi kiểu dữ liệu, overload hoặc cách kết hợp của hàm đều được pushdown. Connector phải dịch được cây biểu thức, kiểm tra mapping, NULL, lỗi và giới hạn tài nguyên trước khi chọn plan.
 
+## Mở rộng text với UNSAFE
+
+Bản mở rộng sau `ffcf7b85a3b` bổ sung pipeline text chung cho scalar và `any_match(array(text))`, dùng `full_text_pushdown_mode=UNSAFE`. Native full-text được xét trước; `LOWER(text) LIKE '%sách rất%'` có thể dùng `match_phrase` và bỏ residual SQL của phần đã nhận xấp xỉ. Các biến đổi khác dùng compiler chung qua runtime field đọc `_source` khi bật flag script scalar/array tương ứng. Đây là phần bổ sung cho điều kiện keyword/doc values của đường script cũ, không phải nới mọi mapping thành source-equivalent.
+
+Runtime source giữ NULL/missing và phần tử NULL trong array. Hàm chuỗi, nullable/CASE, so sánh, logic và tổ hợp được xét theo allowlist hiện có. Source expressions không gây lỗi có thể EXACT; case conversion UNSAFE dùng Unicode của Elasticsearch được đánh dấu APPROXIMATE. Biểu thức fallible giữ PREFILTER và residual bảo toàn SQL. Native và runtime definitions được kiểm tra budget; definitions đi cùng Scan/Scroll/PIT, COUNT và aggregation đang hỗ trợ.
+
+Xem [plan và phạm vi](PLAN-UNSAFE-TEXT-PUSHDOWN.md) và [bảng SQL được chạy trên VM](../../testing/elasticsearch-query-shape-lab/EXPRESSION-COMPARISON.md). Mô tả keyword bên dưới vẫn áp dụng cho đường doc values và các chế độ không mở rộng text UNSAFE.
+
 ## Phần mở rộng scalar
 
-Các nhóm biểu thức ở bảng số học, so sánh, nullable/CASE, hàm số, chuỗi và timestamp bên dưới hiện dùng **cùng compiler** cho cả phần tử array và giá trị scalar của một cột. Bổ sung này chưa commit cùng B để review. Native vẫn được ưu tiên; không cần bọc cột scalar thành array trong SQL.
+Các nhóm biểu thức ở bảng số học, so sánh, nullable/CASE, hàm số, chuỗi và timestamp bên dưới hiện dùng **cùng compiler** cho cả phần tử array và giá trị scalar của một cột. Phần mở rộng này đã được commit cùng B tại `a2af4b7203e`. Native vẫn được ưu tiên; không cần bọc cột scalar thành array trong SQL.
 
 ```sql
 SET SESSION elasticsearch.scalar_script_pushdown_enabled = true;

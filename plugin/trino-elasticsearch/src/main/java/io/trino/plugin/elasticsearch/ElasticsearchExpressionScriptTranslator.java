@@ -94,6 +94,65 @@ final class ElasticsearchExpressionScriptTranslator
         return translate(source, source, variable, column, column.type(), policy, false);
     }
 
+    static Optional<ElasticsearchPredicateTranslation<ConnectorExpression>> translateTextSource(
+            ConnectorExpression source,
+            ConnectorExpression expression,
+            Variable variable,
+            ElasticsearchColumnHandle column,
+            boolean array,
+            ElasticsearchPredicateCompositionPolicy policy)
+    {
+        try {
+            Compiler compiler = new Compiler(variable, policy, true);
+            Compiled body = compiler.compile(expression, 0);
+            if (!body.type().equals(BOOLEAN)) {
+                return Optional.empty();
+            }
+            // Fallible expressions retain SQL residuals. Their candidate must therefore use the exact case policy.
+            if (body.fallible()) {
+                compiler = new Compiler(variable, policy);
+                body = compiler.compile(expression, 0);
+            }
+            compiler.parameters.put("field", ElasticsearchRemotePredicate.Value.of(column.remoteName()));
+            compiler.parameters.put("pathLength", ElasticsearchRemotePredicate.Value.of(column.path().size()));
+            for (int index = 0; index < column.path().size(); index++) {
+                compiler.parameters.put("path" + index, ElasticsearchRemotePredicate.Value.of(column.path().get(index)));
+            }
+            String helpers = HELPERS + "\ndef sourceText(def value) { if (value == null) return null; "
+                    + "if (value instanceof String || value instanceof Number) return value.toString(); "
+                    + "throw new IllegalArgumentException('Expected a string or numeric source value'); }\n"
+                    + "def sourceCase(def value, boolean upper) { if (value == null) return null; "
+                    + "return upper ? ((String)value).toUpperCase(Locale.ROOT) : ((String)value).toLowerCase(Locale.ROOT); }\n";
+            String binding = "def value = params._source;\nfor (int i = 0; i < params.pathLength; i++) { "
+                    + "if (value == null) break; if (!(value instanceof Map)) throw new IllegalArgumentException('Invalid source field path'); "
+                    + "value = value.get(params.get('path' + i)); }\n";
+            String errors = "} catch (ArithmeticException e) { emit(true); return; } catch (IllegalArgumentException e) { emit(true); return; } catch (DateTimeException e) { emit(true); return; }\n";
+            String script;
+            if (array) {
+                script = helpers + binding + "if (value == null) { emit(false); return; }\n"
+                        + "def values = value instanceof List ? value : [value];\nfor (def item : values) {\ndef x = sourceText(item);\ntry {\n"
+                        + "if (Boolean.TRUE.equals(" + body.code() + ")) { emit(true); return; }\n" + errors + "}\nemit(false);\n";
+            }
+            else {
+                script = helpers + binding + "def x = sourceText(value);\ntry {\nemit(Boolean.TRUE.equals(" + body.code() + "));\n" + errors;
+            }
+            ElasticsearchRemotePredicate predicate = new ElasticsearchRemotePredicate.SourceScript(column.remoteName(), script, compiler.parameters, array);
+            if (script.getBytes(UTF_8).length > MAX_SCRIPT_BYTES || !ElasticsearchPredicateComposer.isWithinRequestBudget(predicate, policy)) {
+                return Optional.of(ElasticsearchPredicateTranslation.residual(source, UNSUPPORTED_EXPRESSION));
+            }
+            if (body.fallible()) {
+                return Optional.of(ElasticsearchPredicateTranslation.prefilter(predicate, source, array ? PREFILTER_ARRAY_SCRIPT : PREFILTER_SCALAR_SCRIPT));
+            }
+            if (compiler.sourceCaseUsed) {
+                return Optional.of(ElasticsearchPredicateTranslation.approximate(predicate, ElasticsearchPredicateTranslation.Reason.FULL_TEXT_UNSAFE_APPROXIMATE));
+            }
+            return Optional.of(ElasticsearchPredicateTranslation.exact(predicate, array ? EXACT_ARRAY_SCRIPT : EXACT_SCALAR_SCRIPT));
+        }
+        catch (UnsupportedExpression _) {
+            return Optional.empty();
+        }
+    }
+
     private static Optional<ElasticsearchPredicateTranslation<ConnectorExpression>> translate(
             ConnectorExpression source,
             ConnectorExpression expression,
@@ -200,11 +259,19 @@ final class ElasticsearchExpressionScriptTranslator
         private final ElasticsearchPredicateCompositionPolicy policy;
         private final Map<String, ElasticsearchRemotePredicate.Value> parameters = new LinkedHashMap<>();
         private int nodes;
+        private final boolean sourceCaseEnabled;
+        private boolean sourceCaseUsed;
 
         private Compiler(Variable element, ElasticsearchPredicateCompositionPolicy policy)
         {
+            this(element, policy, false);
+        }
+
+        private Compiler(Variable element, ElasticsearchPredicateCompositionPolicy policy, boolean sourceCaseEnabled)
+        {
             this.element = element;
             this.policy = policy;
+            this.sourceCaseEnabled = sourceCaseEnabled;
         }
 
         private Compiled compile(ConnectorExpression expression, int depth)
@@ -529,6 +596,16 @@ final class ElasticsearchExpressionScriptTranslator
             if (arguments.size() < required || arguments.size() > (operation == 6 ? 3 : required)
                     || arguments.stream().anyMatch(value -> !(value.type() instanceof VarcharType))) {
                 throw new UnsupportedExpression();
+            }
+            if (sourceCaseEnabled && (operation == 1 || operation == 2)) {
+                sourceCaseUsed = true;
+                Compiled value = arguments.getFirst();
+                return new Compiled(
+                        "sourceCase(" + value.code() + ", " + (operation == 2) + ")",
+                        type,
+                        value.dependent(),
+                        value.fallible(),
+                        value.onNull().known() && value.onNull().value() == null ? Known.of(null) : Known.unknown());
             }
             Compiled empty = constant(new Constant(utf8Slice(""), VARCHAR));
             List<Compiled> values = List.of(arguments.getFirst(), arguments.size() > 1 ? arguments.get(1) : empty, arguments.size() > 2 ? arguments.get(2) : empty);

@@ -86,6 +86,7 @@ def build(variant):
     with zipfile.ZipFile(jars[0]) as archive:
         names = archive.namelist()
         hashes['connector_manifest'] = archive.read('META-INF/MANIFEST.MF').decode()
+        assert 'Git-Commit-Id: ' + details['revision'] in hashes['connector_manifest'], 'Staged connector revision does not match deployment revision'
         if variant == 'current':
             assert any(name.endswith('/ElasticsearchScalarPredicateTranslator.class') for name in names)
         else:
@@ -130,7 +131,13 @@ def main():
     parser = argparse.ArgumentParser()
     parser.add_argument('--variants', default='master,internal,current')
     parser.add_argument('--es7', action='store_true')
+    parser.add_argument('--candidate-revision', help='Commit recorded in the staged candidate connector/launcher')
     args = parser.parse_args()
+    revision_file = ROOT / 'artifacts/current/SOURCE_REVISION'
+    if args.candidate_revision or revision_file.exists():
+        revision = args.candidate_revision or revision_file.read_text().strip()
+        assert len(revision) == 40 and all(character in '0123456789abcdef' for character in revision)
+        VERSIONS['current']['revision'] = revision
     assert command('docker', 'image', 'inspect', BASE, '--format', '{{.Id}}', capture=True) == BASE_ID
     ROOT.mkdir(exist_ok=True)
     if args.es7:

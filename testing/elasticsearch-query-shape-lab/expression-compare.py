@@ -35,12 +35,12 @@ LABELS = {'master': 'Trino master', 'internal': 'Trino internal/production', 'cu
 CASES = []
 
 
-def add(identifier, group, predicate=None, *, array=None, sql=None, table='cases', off=False, allow_local=False, reference=None, subset=False):
+def add(identifier, group, predicate=None, *, array=None, sql=None, table='cases', off=False, allow_local=False, reference=None, subset=False, mode='SAFE', approximate_query=None):
     if sql is None:
         condition = f'any_match({array}, x -> {predicate})' if array else predicate
         sql = f'SELECT id FROM {PREFIX}_{table} WHERE {condition}'
     CASES.append({'id': identifier, 'group': group, 'sql': sql, 'table': table,
-                  'off': off, 'allow_local': allow_local, 'reference': reference, 'subset': subset})
+                  'off': off, 'allow_local': allow_local, 'reference': reference, 'subset': subset, 'mode': mode, 'approximate_query': approximate_query})
 
 
 def pair(identifier, group, body, field='numbers', scalar='n', **kwargs):
@@ -184,6 +184,60 @@ add('VOL-LOWER', '10.000 document', "lower(word) LIKE '%sá%'", table='volume')
 add('VOL-COUNT', '10.000 document + COUNT', table='volume', sql=f'SELECT count(*) FROM {PREFIX}_volume WHERE any_match(numbers,x -> x>1500 AND mod(x,2)=0)')
 
 
+# Text uses a dedicated fixture, preserving the 393 existing regression SQL unchanged.
+add('TEXT-USER-SQL', 'Text / user query', "LOWER(raw_review_comment) LIKE '%sách rất%'", table='text', mode='UNSAFE', off=True, approximate_query={'match_phrase':{'raw_review_comment':'sách rất'}})
+for field in ('review', 'with_keyword', 'foldedreview', 'casereview'):
+    for operation, pattern, query_type in [('lower', '%sách rất%', 'match_phrase'), ('upper', '%SÁCH RẤT%', 'match_phrase'), ('lower', 'sách rất%', 'match_phrase_prefix')]:
+        literal = pattern.strip('%')
+        add(f'TEXT-NATIVE-{field}-{operation}-{query_type}', 'Text / native approximate',
+            f"{operation}({field}) LIKE '{pattern}'", table='text', mode='UNSAFE',
+            approximate_query={query_type:{field:literal}})
+add('TEXT-ZERO-TOKENS', 'Text / analyzer stopwords', "lower(foldedreview) LIKE '%the%'", table='text', mode='UNSAFE', approximate_query={'match_phrase':{'foldedreview':'the'}})
+add('TEXT-ARRAY-AND', 'Text / approximate array correlation', "lower(x) LIKE '%sách%' AND lower(x) LIKE '%rất%'", array='reviews', table='text', mode='UNSAFE', approximate_query={'bool':{'filter':[{'match_phrase':{'reviews':'sách'}},{'match_phrase':{'reviews':'rất'}}]}})
+for mode in ('DISABLED', 'SAFE', 'UNSAFE'):
+    for array in (False, True):
+        add(f'TEXT-MODE-{mode}-' + ('A' if array else 'S'), 'Text / mode and script flags',
+            "lower(x) LIKE '%sách rất%'" if array else "lower(review) LIKE '%sách rất%'",
+            array='reviews' if array else None, table='text', mode=mode, off=True,
+            approximate_query={'match_phrase':{'reviews' if array else 'review':'sách rất'}})
+        add(f'TEXT-FLAG-{mode}-' + ('A' if array else 'S'), 'Text / mode and script flags',
+            'length(trim(x))>2' if array else 'length(trim(review))>2',
+            array='reviews' if array else None, table='text', mode=mode, off=True)
+text_expressions = [
+    'length(x)>2', 'length(trim(x))>2', "ends_with(x,'tốt')", "strpos(x,'😀')>0",
+    "lower(trim(x)) LIKE '%sách rất%'", "ends_with(lower(trim(x)),'tốt')", "length(upper(trim(x)))>3",
+    "trim(x)='ABC'", "ltrim(x)='ABC  '", "rtrim(x)='  ABC'", "substring(x,2)='😀Y'", "substr(x,-2,1)='b'",
+    "strpos(replace(x,' ','_'),'rất_tốt')>0", "replace(x,'','!') LIKE '%!s!á!%'", "concat(trim(x),'Z')='ABCZ'",
+    "coalesce(x,'fallback')='fallback'", "nullif(x,'') IS NULL", 'x IS NULL', 'x IS NOT NULL',
+    "CASE WHEN x IS NULL THEN true ELSE length(x)>2 END", "IF(x IS NULL,true,length(x)>2)",
+    "NOT starts_with(trim(x),'abc')", "length(trim(x))>2 AND ends_with(x,'tốt')",
+    "length(trim(x))>2 OR ends_with(x,'tốt')", "length(x) BETWEEN 2 AND 10", "length(x) IN (2,3,4)",
+    "x > 'abc'", "x NOT IN ('abc','')", "x BETWEEN 'a' AND 'z'", "x IS NOT DISTINCT FROM 'abc'",
+    "regexp_like(lower(x),'sách')", "x LIKE '%rất%'", "starts_with(x,'sách')",
+]
+for index, body in enumerate(text_expressions,1):
+    pair(f'TEXT{index:02}', 'Text / shared source compiler', body, field='reviews', scalar='review', table='text', mode='UNSAFE')
+# Native token queries are intentionally approximate. Provide independent Elasticsearch oracles for those shapes.
+for case in CASES:
+    if case['id'] in ('A-TEXT32','S-TEXT32'):
+        case['approximate_query']={'match_phrase':{'reviews' if case['id'].startswith('A-') else 'review':'rất'}}
+    if case['id'] in ('A-TEXT30','S-TEXT30'):
+        case['approximate_query']={'match_phrase':{'reviews' if case['id'].startswith('A-') else 'review':'abc'}}
+    if case['id'] in ('A-TEXT33','S-TEXT33'):
+        case['approximate_query']={'match_phrase_prefix':{'reviews' if case['id'].startswith('A-') else 'review':'sách'}}
+add('TEXT-NESTED', 'Text / source field paths', 'length(profile.reviewcomment)>2', table='text', mode='UNSAFE')
+add('TEXT-MIXED-AND', 'Text / compose columns', "n>10 AND lower(review) LIKE '%sách rất%'", table='text', mode='UNSAFE',
+    approximate_query={'bool':{'filter':[{'range':{'n':{'gt':10}}},{'match_phrase':{'review':'sách rất'}}]}})
+add('TEXT-MIXED-OR', 'Text / compose columns', "n>10 OR lower(review) LIKE '%sách rất%'", table='text', mode='UNSAFE',
+    approximate_query={'bool':{'should':[{'range':{'n':{'gt':10}}},{'match_phrase':{'review':'sách rất'}}], 'minimum_should_match':1}})
+add('TEXT-COUNT', 'Text / COUNT and GROUP BY', table='text', mode='UNSAFE', sql=f'SELECT count(*) FROM {PREFIX}_text WHERE length(trim(review))>2')
+add('TEXT-GROUP', 'Text / COUNT and GROUP BY', table='text', mode='UNSAFE', sql=f'SELECT n,count(*) FROM {PREFIX}_text WHERE length(trim(review))>2 GROUP BY n')
+add('TEXT-LIMIT', 'Text / LIMIT and ordering', table='text', mode='UNSAFE', sql=f'SELECT id FROM {PREFIX}_text WHERE length(trim(review))>2 ORDER BY id LIMIT 3')
+add('VOL-TEXT-NATIVE', '10.000 text documents', "lower(review) LIKE '%sách rất%'", table='text_volume', mode='UNSAFE',
+    approximate_query={'match_phrase':{'review':'sách rất'}})
+add('VOL-TEXT-RUNTIME', '10.000 text documents', "ends_with(lower(trim(review)),'rất tốt')", table='text_volume', mode='UNSAFE')
+add('VOL-TEXT-COUNT', '10.000 text documents', table='text_volume', mode='UNSAFE', sql=f'SELECT count(*) FROM {PREFIX}_text_volume WHERE length(trim(review))>8')
+
 def http(url, payload=None, method=None, headers=None, timeout=90):
     if isinstance(payload, dict):
         payload = json.dumps(payload, ensure_ascii=False).encode()
@@ -301,7 +355,31 @@ def seed(backend, volume_count):
     main_count = create(PREFIX+'_cases', {'_meta':meta,'properties':properties}, docs, settings)
     volume = [{'id':i,'numbers':[(i%20)*100+j for j in range(64)],'word':['abc plain','đóng gói','nice plain','SÁCH đẹp'][i%4]} for i in range(volume_count)]
     volume_total = create(PREFIX+'_volume', {'_meta':{'trino':{'numbers':{'isArray':True}}},'properties':{'id':{'type':'integer'},'numbers':{'type':'integer'},'word':{'type':'keyword'}}}, volume)
-    return {'cases':main_count,'volume':volume_total,'schema':properties}
+    text_values = ['SÁCH rất tốt','SÁCH, rất tốt','Cuốn sách rất tốt','  ABC  ','abc','a_b','a%b','',None,None,
+                   'a '*160+'SÁCH rất tốt','đóng gói','SÁCH đẹp','sách rất','rất sách','X😀Y','abc\n',123,'\u2009abc\u2009','THE']
+    text_docs=[]
+    for index,value in enumerate(text_values):
+        document={'id':index+1,'n':index,'review':value,'with_keyword':value,'foldedreview':value,
+                  'reviews':[None,value], 'casereview':value, 'raw_review_comment':value, 'profile':{'ReviewComment':value}}
+        if index==5:
+            document['reviews']=['sách','rất tốt']
+        if index==7:
+            document['reviews']=[]
+        if index==9:
+            document={'id':index+1,'n':index}
+        text_docs.append(document)
+    text_mapping={'_meta':{'trino':{'reviews':{'isArray':True}}},'properties':{
+        'id':{'type':'integer'},'n':{'type':'integer'},'review':{'type':'text'},'reviews':{'type':'text'},'raw_review_comment':{'type':'text'},
+        'with_keyword':{'type':'text','fields':{'keyword':{'type':'keyword','ignore_above':256}}},
+        'foldedreview':{'type':'text','analyzer':'folded_review'},'casereview':{'type':'text','analyzer':'case_review'},
+        'profile':{'properties':{'ReviewComment':{'type':'text'}}}}}
+    text_settings={'number_of_shards':1,'number_of_replicas':0,'analysis':{'analyzer':{'folded_review':{
+        'type':'custom','tokenizer':'standard','filter':['lowercase','asciifolding','stop']},'case_review':{'type':'custom','tokenizer':'standard','filter':[]}}}}
+    text_count=create(PREFIX+'_text',text_mapping,text_docs,text_settings)
+    text_volume=[{'id':index,'review':['abc plain','SÁCH rất tốt','đóng gói','SÁCH, rất tốt'][index%4]} for index in range(volume_count)]
+    text_volume_count=create(PREFIX+'_text_volume',{'properties':{'id':{'type':'integer'},'review':{'type':'text'}}},text_volume)
+    return {'cases':main_count,'volume':volume_total,'schema':properties,'text':text_count,'text_volume':text_volume_count,'text_schema':text_mapping}
+
 
 
 def key_rows(rows):
@@ -338,7 +416,7 @@ def has_native(value):
         if name == 'script':
             continue
         if name in ('range','prefix','regexp','terms','term','exists','match_none','match_phrase','match_phrase_prefix'):
-            if isinstance(item, dict) and item and set(item).issubset({'_index'}):
+            if isinstance(item, dict) and item and (set(item).issubset({'_index'}) or all(key.startswith('__trino_text_') for key in item)):
                 continue
             return True
         if has_native(item):
@@ -350,7 +428,7 @@ def classify(plan, actual, events):
     search_events = [event for event in events if '/_search_shards' not in event.get('path', '')]
     queries = [event.get('request',{}).get('query',{}) for event in search_events]
     pushed = any(useful(value) for value in queries)
-    scripts = any(has_script(value) for value in queries)
+    scripts = any(has_script(value) for value in queries) or any(event.get('request',{}).get('runtime_mappings') for event in search_events)
     native = any(has_native(value) for value in queries)
     residual = bool(re.search(r'filterPredicate\s*=|\bFilter\[|\bScanFilter\[',plan))
     if not events and ('Values[' in plan or not plan):
@@ -358,15 +436,18 @@ def classify(plan, actual, events):
     elif residual:
         classification = 'PREFILTER' if pushed else 'LOCAL'
     elif pushed:
-        classification = 'HYBRID EXACT' if scripts and native else 'SCRIPT EXACT' if scripts else 'NATIVE EXACT'
+        suffix = ' APPROXIMATE' if 'APPROXIMATE' in plan else ' EXACT'
+        classification = ('HYBRID' if scripts and native else 'SCRIPT' if scripts else 'NATIVE') + suffix
     else:
         classification = 'LOCAL' if 'error' in actual else 'NO_FILTER'
     return classification, scripts, native, residual, search_events
 
 
-def run_case(version, backend, item, golden, session):
+def run_case(version, backend, item, golden, session, approximate_golden=None):
     catalog = backend+'_compare'
     settings = dict(session)
+    if catalog+'.full_text_pushdown_mode' in settings:
+        settings[catalog+'.full_text_pushdown_mode']=item['mode']
     if item['off']:
         for name in ('array_script_pushdown_enabled','scalar_script_pushdown_enabled'):
             if catalog+'.'+name in settings:
@@ -382,6 +463,12 @@ def run_case(version, backend, item, golden, session):
         info = http(f'http://127.0.0.1:{PORTS[version]}/v1/query/{actual["query_id"]}', headers={'X-Trino-User':'expression-comparison'})
     except (HTTPError,URLError):
         pass
+    classification, scripts, native, residual, search_events = classify(plan, actual, events)
+    sql_golden = golden
+    oracle_kind = 'SQL'
+    if classification.endswith('APPROXIMATE') and approximate_golden is not None:
+        golden = approximate_golden
+        oracle_kind = 'Elasticsearch analyzer'
     if 'error' in golden:
         correct = actual.get('error') == golden['error']
     elif 'error' in actual:
@@ -396,7 +483,10 @@ def run_case(version, backend, item, golden, session):
     classification, scripts, native, residual, search_events = classify(plan, actual, events)
     stats = info.get('queryStats', {})
     result = {
-        'version':version,'backend':backend,'case_id':item['id'],'group':item['group'],'sql':item['sql'],'transport':'N+S' if scripts and native else 'S' if scripts else 'N' if native else '-',
+        'version':version,'backend':backend,'case_id':item['id'],'group':item['group'],'sql':item['sql'],'mode':item['mode'],'oracle_kind':oracle_kind,
+        'sql_equal':actual.get('error')==sql_golden.get('error') if 'error' in actual or 'error' in sql_golden else key_rows(actual.get('rows',[]))==key_rows(sql_golden.get('rows',[])),
+        'sql_extra':list((key_rows(actual.get('rows',[]))-key_rows(sql_golden.get('rows',[]))).elements())[:10],
+        'sql_missing':list((key_rows(sql_golden.get('rows',[]))-key_rows(actual.get('rows',[]))).elements())[:10], 'transport':'N+S' if scripts and native else 'S' if scripts else 'N' if native else '-',
         'correct':correct,'classification':classification,'residual':residual,'source_hits':sum(event.get('source_hits',0) for event in events),
         'response_bytes':sum(event.get('response_bytes',0) for event in search_events), 'requests':len(search_events), 'events':events,
         'physical_input_positions':stats.get('physicalInputPositions'),'physical_input_bytes':stats.get('physicalInputDataSize'),
@@ -462,11 +552,19 @@ def execute():
     info,sessions=wait_and_sessions(versions,backends)
     (output/'server-info.json').write_text(json.dumps({'info':info,'sessions':sessions},indent=2))
     golden={}
+    approximate_golden={}
     for backend in backends:
         for number,item in enumerate(cases):
             sql=item['reference'] or item['sql']
             if (backend,sql) not in golden:
                 golden[backend,sql]=query('current',sql,backend,{'allow_pushdown_into_connectors':'false'})
+            if item.get('approximate_query'):
+                response=http(f'http://127.0.0.1:{ES_PORTS[backend]}/{PREFIX}_{item["table"]}/_search',
+                              {'query':item['approximate_query'],'size':10000,'track_total_hits':True,'_source':['id']},'POST')
+                rows=[[hit['_source']['id']] for hit in response.get('hits',{}).get('hits',[])]
+                if re.match(r'SELECT count\(\*\)',item['sql'],re.IGNORECASE):
+                    rows=[[response['hits']['total']['value']]]
+                approximate_golden[backend,item['id']]={'rows':rows}
             if number%50==0:
                 print('ORACLE',backend,number,'/',len(cases),flush=True)
     (output/'oracle.json').write_text(json.dumps([{'backend':backend,'sql':sql,**result} for (backend,sql),result in golden.items()],ensure_ascii=False))
@@ -477,7 +575,7 @@ def execute():
             for backend in backends:
                 for number,item in enumerate(cases):
                     try:
-                        record=run_case(version,backend,item,golden[backend,item['reference'] or item['sql']],sessions[version+':'+backend])
+                        record=run_case(version,backend,item,golden[backend,item['reference'] or item['sql']],sessions[version+':'+backend],approximate_golden.get((backend,item['id'])))
                     except Exception as error:
                         record={'version':version,'backend':backend,'case_id':item['id'],'sql':item['sql'],'group':item['group'],'correct':False,'harness_error':repr(error)}
                     records.append(record)
@@ -492,7 +590,8 @@ def execute():
         for job in as_completed(jobs):
             records.extend(job.result())
     document={'generated_at':datetime.now(timezone.utc).isoformat(),'deployment':json.loads((ROOT/'deployment.json').read_text()),
-              'fixtures':fixtures,'cases':cases,'results':records,'server_info':info,'sessions':sessions}
+              'fixtures':fixtures,'cases':cases,'results':records,'server_info':info,'sessions':sessions,
+              'approximate_oracles':[{'backend':b,'case_id':c,**value} for (b,c),value in approximate_golden.items()]}
     with gzip.open(output/'comparison.json.gz','wt',encoding='utf-8') as stream:
         json.dump(document,stream,ensure_ascii=False)
     summary={version:{'total':sum(r['version']==version for r in records),'correct':sum(r['version']==version and r['correct'] for r in records),

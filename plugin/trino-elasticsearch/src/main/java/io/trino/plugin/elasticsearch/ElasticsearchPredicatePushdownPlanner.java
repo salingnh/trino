@@ -118,6 +118,9 @@ final class ElasticsearchPredicatePushdownPlanner
                 translation = ElasticsearchScalarPredicateTranslator.translateFloatingDomain(column, domain, policy).orElse(translation);
             }
 
+            if (fullTextMode == UNSAFE && scalarScriptPushdownEnabled && translation.remotePredicate().isEmpty()) {
+                translation = ElasticsearchTextPredicateTranslator.translateDomain(session, column, domain, policy).orElse(translation);
+            }
             decisions.add(translation.decision());
             translation.remotePredicate().ifPresent(remotePredicates::add);
             if (translation.remaining().isEmpty() || translation.residual().isPresent()) {
@@ -213,6 +216,12 @@ final class ElasticsearchPredicatePushdownPlanner
                 session, expression, assignments, policy, scalarScriptPushdownEnabled);
         if (scalar.isPresent()) {
             return scalar.orElseThrow();
+        }
+
+        Optional<ElasticsearchPredicateTranslation<ConnectorExpression>> text = ElasticsearchTextPredicateTranslator.translate(
+                session, expression, assignments, fullTextMode, policy, arrayScriptPushdownEnabled, scalarScriptPushdownEnabled);
+        if (text.isPresent()) {
+            return text.orElseThrow();
         }
 
         if (expression instanceof Call call && AND_FUNCTION_NAME.equals(call.getFunctionName())) {

@@ -14,6 +14,7 @@
 package io.trino.plugin.elasticsearch;
 
 import com.fasterxml.jackson.databind.JsonNode;
+import com.fasterxml.jackson.databind.node.JsonNodeFactory;
 import io.trino.plugin.elasticsearch.client.ElasticsearchClient;
 import io.trino.plugin.elasticsearch.client.SearchResult;
 import io.trino.spi.TrinoException;
@@ -34,6 +35,7 @@ final class PointInTimeSearchExecutionStrategy
     private final String index;
     private final int shard;
     private final JsonNode query;
+    private final JsonNode runtimeMappings;
     private final Optional<List<String>> fields;
     private final List<String> documentFields;
     private final List<JsonNode> sort;
@@ -54,10 +56,26 @@ final class PointInTimeSearchExecutionStrategy
             OptionalLong limit,
             ElasticsearchPushdownDiagnostics diagnostics)
     {
+        this(client, index, shard, query, fields, documentFields, sort, limit, diagnostics, JsonNodeFactory.instance.objectNode());
+    }
+
+    PointInTimeSearchExecutionStrategy(
+            ElasticsearchClient client,
+            String index,
+            int shard,
+            JsonNode query,
+            Optional<List<String>> fields,
+            List<String> documentFields,
+            List<JsonNode> sort,
+            OptionalLong limit,
+            ElasticsearchPushdownDiagnostics diagnostics,
+            JsonNode runtimeMappings)
+    {
         this.client = requireNonNull(client, "client is null");
         this.index = requireNonNull(index, "index is null");
         this.shard = shard;
         this.query = requireNonNull(query, "query is null");
+        this.runtimeMappings = requireNonNull(runtimeMappings, "runtimeMappings is null");
         this.fields = requireNonNull(fields, "fields is null");
         this.documentFields = List.copyOf(documentFields);
         this.sort = List.copyOf(sort);
@@ -82,7 +100,7 @@ final class PointInTimeSearchExecutionStrategy
     @Override
     public SearchResult nextPage()
     {
-        SearchResult result = client.searchPointInTime(requireNonNull(id, "id is null"), query, fields, documentFields, sort, limit, searchAfter, context -> id = context);
+        SearchResult result = client.searchPointInTime(requireNonNull(id, "id is null"), query, fields, documentFields, sort, limit, searchAfter, context -> id = context, runtimeMappings);
         id = result.pointInTimeId().orElse(id);
         if (!result.hits().isEmpty() && (result.searchAfter().isEmpty() || result.searchAfter().equals(searchAfter))) {
             throw new TrinoException(ELASTICSEARCH_INVALID_RESPONSE, "PIT response has a missing or non-progressing search_after token");
