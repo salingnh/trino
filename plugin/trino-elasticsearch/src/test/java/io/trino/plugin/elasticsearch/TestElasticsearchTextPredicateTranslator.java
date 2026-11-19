@@ -125,6 +125,28 @@ class TestElasticsearchTextPredicateTranslator
     }
 
     @Test
+    void testAnalyzedArrayConjunctionIsApproximateOnlyInUnsafeMode()
+    {
+        ArrayType type = new ArrayType(VARCHAR);
+        Variable array = new Variable("comments", type);
+        Variable x = new Variable("x", VARCHAR);
+        Call predicate = call(BOOLEAN, "$and", call(BOOLEAN, "$like", x, text("Nguyen%")), call(BOOLEAN, "$like", x, text("%Van%")));
+        Call source = call(BOOLEAN, "any_match", array, new Lambda(new FunctionType(List.of(VARCHAR), BOOLEAN), List.of(x), predicate));
+        ElasticsearchColumnHandle column = new ElasticsearchColumnHandle(COLUMN.path(), type, COLUMN.elasticsearchType(), COLUMN.decoderDescriptor(), false);
+        for (FullTextPushdownMode mode : FullTextPushdownMode.values()) {
+            var translated = ElasticsearchTextPredicateTranslator.translate(TestingConnectorSession.builder().build(), source, Map.of("comments", column), mode, ElasticsearchPredicateCompositionPolicy.DEFAULT, false, false);
+            if (mode != UNSAFE) {
+                assertThat(translated).isEmpty();
+                continue;
+            }
+            var result = translated.orElseThrow();
+            assertThat(result.enforcement()).contains(APPROXIMATE);
+            assertThat(result.residual()).isEmpty();
+            assertThat(unwrap(result.remotePredicate().orElseThrow())).isInstanceOf(ElasticsearchRemotePredicate.And.class);
+        }
+    }
+
+    @Test
     void testTextRangeDomainUsesOriginalSource()
     {
         for (boolean nullable : List.of(false, true)) {

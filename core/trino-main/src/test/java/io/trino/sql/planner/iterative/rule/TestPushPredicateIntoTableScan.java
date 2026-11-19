@@ -47,13 +47,13 @@ import io.trino.spi.type.FunctionType;
 import io.trino.spi.type.Type;
 import io.trino.sql.ir.Bind;
 import io.trino.sql.ir.Call;
-import io.trino.sql.ir.Case;
 import io.trino.sql.ir.ComparisonOperator;
 import io.trino.sql.ir.Constant;
 import io.trino.sql.ir.Expression;
 import io.trino.sql.ir.Logical;
+import io.trino.sql.ir.Match;
+import io.trino.sql.ir.MatchClause;
 import io.trino.sql.ir.Reference;
-import io.trino.sql.ir.WhenClause;
 import io.trino.sql.planner.DomainTranslator;
 import io.trino.sql.planner.Symbol;
 import io.trino.sql.planner.iterative.rule.test.BaseRuleTest;
@@ -288,10 +288,11 @@ public class TestPushPredicateIntoTableScan
                                                         .functionCallBuilder("rand")
                                                         .build(),
                                                 new Constant(DOUBLE, 42.0)),
-                                        // non-translatable to connector expression
-                                        new Case(
-                                                ImmutableList.of(new WhenClause(
-                                                        TRUE,
+                                        // Match expressions are not translatable to connector expressions.
+                                        new Match(
+                                                TRUE,
+                                                ImmutableList.of(new MatchClause(
+                                                        new io.trino.sql.ir.Lambda(ImmutableList.of(new Symbol(BOOLEAN, "value")), TRUE),
                                                         comparison(
                                                                 EQUAL,
                                                                 new Call(MODULO_BIGINT, ImmutableList.of(new Reference(BIGINT, "nationkey"), new Constant(BIGINT, 17L))),
