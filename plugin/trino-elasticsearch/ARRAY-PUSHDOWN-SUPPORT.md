@@ -24,7 +24,7 @@ WHERE LOWER(raw_review_comment) LIKE '%sá%'
 LIMIT 20;
 ```
 
-Trong `SET SESSION`, thay tiền tố `elasticsearch` bằng tên catalog thực tế, ví dụ `osint_profiling_3517.scalar_script_pushdown_enabled`. Catalog có thể bật mặc định bằng `elasticsearch.scalar-script-pushdown.enabled=true`. Mặc định false; độc lập với cờ array. Cột chuỗi cần mapping keyword trực tiếp, doc values và bằng chứng tương đương nguồn giống compiler array. Text đã tokenize, keyword bị ignore_above/normalizer hoặc mapping không đủ bằng chứng vẫn local.
+Trong `SET SESSION`, thay tiền tố `elasticsearch` bằng tên catalog thực tế, ví dụ `osint_profiling_3517.scalar_script_pushdown_enabled`. Catalog có thể bật mặc định bằng `elasticsearch.scalar-script-pushdown.enabled=true`. Mặc định false; độc lập với cờ array. Cột chuỗi cần mapping keyword trực tiếp, doc values và bằng chứng tương đương nguồn giống compiler array. Đây là yêu cầu của đường doc values. Với text, khi bật `full_text_pushdown_mode=UNSAFE`, connector có thể dùng native analyzer hoặc runtime `_source` như mục mở rộng text phía trên; không dùng token của text làm chuỗi SQL gốc. Keyword bị ignore_above/normalizer hoặc mapping không đủ bằng chứng vẫn không được coi là nguồn doc values tương đương SQL.
 
 | Trường hợp | Scalar | Array `any_match` |
 | --- | --- | --- |
@@ -39,7 +39,7 @@ Trong `SET SESSION`, thay tiền tố `elasticsearch` bằng tên catalog thực
 
 Compiler scalar đọc một giá trị, không dùng vòng lặp existential. Nếu field scalar có nhiều doc values, query báo lỗi thay vì tùy ý lấy phần tử đầu tiên. Native scalar regexp vẫn dùng hợp đồng SAFE/UNSAFE và residual hiện có. Trino đôi khi chuyển điều kiện thành TupleDomain; đường scalar mới có fallback cho domain số thực, giữ đúng signed zero và NaN membership.
 
-Với ví dụ tiếng Việt, offload hiện là **prefilter**, vẫn cần kiểm tra local: script loại được các chuỗi ASCII chắc chắn không khớp và giữ các chuỗi Unicode cho Trino xử lý. LIMIT chỉ tính số dòng sau khi residual lọc xong.
+Với ví dụ tiếng Việt trên **keyword qua doc values**, offload là **prefilter**, vẫn cần kiểm tra local: script loại được các chuỗi ASCII chắc chắn không khớp và giữ các chuỗi Unicode cho Trino xử lý. LIMIT chỉ tính số dòng sau khi residual lọc xong.
 
 Code mới: [ElasticsearchScalarPredicateTranslator.java:54](src/main/java/io/trino/plugin/elasticsearch/ElasticsearchScalarPredicateTranslator.java#L54), compiler chung [ElasticsearchExpressionScriptTranslator.java:80](src/main/java/io/trino/plugin/elasticsearch/ElasticsearchExpressionScriptTranslator.java#L80), [kiểm thử scalar](src/test/java/io/trino/plugin/elasticsearch/TestElasticsearchScalarPredicateTranslator.java). IR có `scalarScript` riêng, dùng chung render/budget/field tracking với `arrayScript`, cùng metric `scalarScriptPredicates` riêng.
 
@@ -49,7 +49,7 @@ Code mới: [ElasticsearchScalarPredicateTranslator.java:54](src/main/java/io/tr
 | --- | --- | --- |
 | Native / EXACT | Query DSL có sẵn của Elasticsearch biểu diễn chính xác tập document đạt điều kiện | Không còn residual của điều kiện đã offload |
 | Hybrid / EXACT | Kết hợp query native và Painless trong một query DSL | Không còn residual nếu toàn bộ biểu thức đã được chứng minh chính xác |
-| Script / EXACT | Connector sinh Painless, chạy vòng lặp theo từng phần tử của doc values | Không còn residual của điều kiện đã offload |
+| Script / EXACT | Connector sinh Painless cho scalar hoặc từng phần tử array; đọc doc values hoặc runtime `_source` theo đường được chọn | Không còn residual của điều kiện đã offload |
 | PREFILTER | Điều kiện cần: có thể giữ thừa document, không được loại document cần giữ hoặc che lỗi SQL | Có; chỉ tải và kiểm tra những document Elasticsearch giữ lại |
 | Local | Không tạo được điều kiện remote an toàn cho biểu thức này | Có; vẫn có thể hưởng điều kiện remote khác của query |
 | APPROXIMATE | Đường full-text UNSAFE đã có trước, chấp nhận ngữ nghĩa analyzer khác SQL | Có thể bỏ residual theo chế độ UNSAFE; không được hiểu là EXACT hoặc prefilter bảo toàn SQL |
@@ -129,7 +129,7 @@ AND cho phép lấy nhánh cần thiết đã biết; OR cần bao phủ tất c
 | `DECIMAL(p,s)` | Không thêm mapping array DECIMAL mới | Hỗ trợ **biểu thức DECIMAL** sinh ra bằng cast/tính toán từ phần tử hợp lệ, precision tối đa 38 |
 | `half_float`, `scaled_float`, array lồng nhau/ROW/object | Không thuộc tập typed script này | Local hoặc đường translator khác, không tuyên bố hỗ trợ ở B |
 
-Script cần doc values và bằng chứng `sourceValueSemanticsExact` trên mọi backing index. `null_value`, `ignore_above`, normalizer, coercion làm thay đổi nguồn và các trường hợp mất giá trị có thể chặn pushdown. Field không có doc values không chạy compiler script này. Native keyword mới cần `index:true` để tương thích ES 7; ES 8 có thể làm được nhiều hơn nhưng connector dùng tập chung an toàn.
+Đường script doc values trong bảng trên cần doc values và bằng chứng `sourceValueSemanticsExact` trên mọi backing index. `null_value`, `ignore_above`, normalizer, coercion làm thay đổi nguồn và các trường hợp mất giá trị có thể chặn pushdown. Field không có doc values không chạy compiler script này. Native keyword mới cần `index:true` để tương thích ES 7; ES 8 có thể làm được nhiều hơn nhưng connector dùng tập chung an toàn.
 
 ## 5. Số học, so sánh và logic trong Painless
 
@@ -301,3 +301,29 @@ Kiểm tra phần mở rộng scalar:
 - Ca bổ sung `LIMIT 3`: qua trên ES 7, trả đủ 3 dòng SQL từ 4 ứng viên remote có một document bị residual loại.
 
 - Airstyle và CI verify module Elasticsearch: qua. CI dùng `-Denforcer.skipRules=requireJavaVendor` vì môi trường là Ubuntu JDK 25.
+
+## 12. Hiệu năng và độ chọn lọc
+
+EXACT/PREFILTER/APPROXIMATE mô tả ngữ nghĩa, không bảo đảm tốc độ. Cần tách hai
+phép so sánh:
+
+- Offload so với Trino local: lọc bỏ nhiều document có thể giảm truyền mạng,
+  giải mã dữ liệu và tính WHERE ở Trino. Lọc bỏ ít document có thể không bù được
+  chi phí tính toán ở Elasticsearch. Chi phí biểu thức, projection và Scroll
+  cũng ảnh hưởng; không có một ngưỡng phần trăm lọc chung cho mọi query.
+- Hybrid so với Painless thuần: hai cách có thể trả về cùng tập candidate.
+  Native guard có thể giảm số document phải gọi script, nhưng kết hợp native
+  và script cũng có chi phí. Script OR thuần còn có thể short-circuit bên trong.
+  Ít lần gọi script không tự chứng minh CPU ES hoặc latency thấp hơn.
+
+Với AND, native guard chọn lọc hơn thường giảm candidate cần chạy script.
+Với OR, nhánh native khớp nhiều document có thể giúp bỏ qua script trên nhiều
+document, đồng thời giữ lại nhiều document hơn để chuyển về Trino. Đây là hai
+đại lượng khác nhau: tỷ lệ document trả về và tỷ lệ document phải chạy script.
+
+[Bộ đo ES8 hybrid/Painless/local](../../testing/elasticsearch-query-shape-lab/EXPRESSION-ES8-HYBRID.md)
+so sánh cùng SQL và cùng Trino trên bảy cấu hình, giữ cả các ca chậm và khoảng đo
+chồng lấp. Số lần gọi script từ profile đếm không đại diện tổng số lần đánh giá
+trên mọi trang Scroll. [Benchmark ba phiên bản](../../testing/elasticsearch-query-shape-lab/EXPRESSION-PERFORMANCE.md)
+và [bảng ca chậm ES8](../../testing/elasticsearch-query-shape-lab/EXPRESSION-ES8-SLOW-CASES.md)
+có SQL và bằng chứng riêng; không trộn các lượt đo khác nhau thành cùng baseline.

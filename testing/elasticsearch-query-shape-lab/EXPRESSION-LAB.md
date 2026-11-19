@@ -149,6 +149,11 @@ transient value in `finally`. Before/after values are saved with the run. This i
 an isolated functional/offload comparison, not an independent latency benchmark
 or a test against production customer indices.
 
+The later [sequential scaling benchmark](EXPRESSION-PERFORMANCE-LAB.md) measures
+latency, Trino CPU and transferred documents/bytes as shards and documents grow.
+See its separate [performance results](EXPRESSION-PERFORMANCE.md); do not treat
+the concurrent functional run's timings as controlled performance comparisons.
+
 The initial failed matrix is retained on the host in `results-initial/`, with
 `comparison-initial.log` and `temporal-probe-before.json`. The final report uses
 the subsequent corrected deployment. The previous final keyword/numeric matrix is retained in `results-20261113-final/`.
