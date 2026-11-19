@@ -55,6 +55,6 @@ public class HybridScriptExporter {
             }
             output.put(Integer.toString(feature), Map.of("script", Map.of("script", Map.of("lang", "painless", "source", script.source(), "params", params))));
         }
-        Files.writeString(Path.of(args[0]), new ObjectMapper().writeValueAsString(output));
+        Files.writeString(Path.of(args[0]), new ObjectMapper().writeValueAsString(output) + "\n");
     }
 }

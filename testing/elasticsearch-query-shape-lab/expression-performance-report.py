@@ -319,7 +319,7 @@ def main():
     (output / 'expression-performance.sql').write_text('\n'.join(sql_lines) + '\n')
     (output / 'performance-summary.json').write_text(json.dumps({'manifest': manifest,
         'counts': dict(counts), 'correct': dict(correct), 'groups': len(summaries),
-        'summaries': list(summaries.values())}, ensure_ascii=False, indent=2))
+        'summaries': list(summaries.values())}, ensure_ascii=False, indent=2) + '\n')
     print(json.dumps({'executions': len(records), 'groups': len(summaries),
                       'correct': dict(correct), 'comparison_rows': len(comparison_rows)}, indent=2))
 
