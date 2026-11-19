@@ -31,6 +31,8 @@ public final class ElasticsearchSessionProperties
 {
     public static final String DYNAMIC_FILTERING_WAIT_TIMEOUT = "dynamic_filtering_wait_timeout";
     public static final String AGGREGATION_PUSHDOWN_ENABLED = "aggregation_pushdown_enabled";
+    public static final String SCALAR_SCRIPT_PUSHDOWN_ENABLED = "scalar_script_pushdown_enabled";
+    public static final String ARRAY_SCRIPT_PUSHDOWN_ENABLED = "array_script_pushdown_enabled";
     public static final String FULL_TEXT_PUSHDOWN_MODE = "full_text_pushdown_mode";
     public static final String KEYWORD_SUBFIELD_PUSHDOWN_WITH_IGNORE_ABOVE = "keyword_subfield_pushdown_with_ignore_above";
 
@@ -49,6 +51,16 @@ public final class ElasticsearchSessionProperties
                         AGGREGATION_PUSHDOWN_ENABLED,
                         "Enable pushing down aggregations to Elasticsearch",
                         config.isAggregationPushdownEnabled(),
+                        false))
+                .add(booleanProperty(
+                        ARRAY_SCRIPT_PUSHDOWN_ENABLED,
+                        "Enable Painless pushdown for typed array expressions with source-equivalent mappings",
+                        config.isArrayScriptPushdownEnabled(),
+                        false))
+                .add(booleanProperty(
+                        SCALAR_SCRIPT_PUSHDOWN_ENABLED,
+                        "Enable Painless pushdown for typed scalar expressions with source-equivalent mappings",
+                        config.isScalarScriptPushdownEnabled(),
                         false))
                 .add(enumProperty(
                         FULL_TEXT_PUSHDOWN_MODE,
@@ -78,6 +90,16 @@ public final class ElasticsearchSessionProperties
     public static boolean isAggregationPushdownEnabled(ConnectorSession session)
     {
         return session.getProperty(AGGREGATION_PUSHDOWN_ENABLED, Boolean.class);
+    }
+
+    public static boolean isScalarScriptPushdownEnabled(ConnectorSession session)
+    {
+        return session.getProperty(SCALAR_SCRIPT_PUSHDOWN_ENABLED, Boolean.class);
+    }
+
+    public static boolean isArrayScriptPushdownEnabled(ConnectorSession session)
+    {
+        return session.getProperty(ARRAY_SCRIPT_PUSHDOWN_ENABLED, Boolean.class);
     }
 
     public static FullTextPushdownMode getFullTextPushdownMode(ConnectorSession session)

@@ -18,12 +18,17 @@ import com.fasterxml.jackson.annotation.JsonProperty;
 import com.fasterxml.jackson.annotation.JsonSubTypes;
 import com.fasterxml.jackson.annotation.JsonTypeInfo;
 import com.google.common.collect.ImmutableList;
+import com.google.common.collect.ImmutableMap;
+import com.google.common.hash.Hashing;
 
 import java.util.List;
+import java.util.Map;
 import java.util.Objects;
 import java.util.Optional;
+import java.util.TreeMap;
 
 import static com.google.common.base.Preconditions.checkArgument;
+import static java.nio.charset.StandardCharsets.UTF_8;
 import static java.util.Objects.requireNonNull;
 
 /**
@@ -50,11 +55,16 @@ import static java.util.Objects.requireNonNull;
         @JsonSubTypes.Type(value = ElasticsearchRemotePredicate.MatchPhrase.class, name = "matchPhrase"),
         @JsonSubTypes.Type(value = ElasticsearchRemotePredicate.MatchPhrasePrefix.class, name = "matchPhrasePrefix"),
         @JsonSubTypes.Type(value = ElasticsearchRemotePredicate.Exists.class, name = "exists"),
+        @JsonSubTypes.Type(value = ElasticsearchRemotePredicate.ArrayScript.class, name = "arrayScript"),
+        @JsonSubTypes.Type(value = ElasticsearchRemotePredicate.ScalarScript.class, name = "scalarScript"),
+        @JsonSubTypes.Type(value = ElasticsearchRemotePredicate.SourceScript.class, name = "sourceScript"),
+        @JsonSubTypes.Type(value = ElasticsearchRemotePredicate.MatchNone.class, name = "matchNone"),
 })
 public sealed interface ElasticsearchRemotePredicate
         permits ElasticsearchRemotePredicate.And,
                 ElasticsearchRemotePredicate.Enforced,
                 ElasticsearchRemotePredicate.Exists,
+                ElasticsearchRemotePredicate.MatchNone,
                 ElasticsearchRemotePredicate.MatchPhrase,
                 ElasticsearchRemotePredicate.MatchPhrasePrefix,
                 ElasticsearchRemotePredicate.Not,
@@ -62,6 +72,7 @@ public sealed interface ElasticsearchRemotePredicate
                 ElasticsearchRemotePredicate.Prefix,
                 ElasticsearchRemotePredicate.Range,
                 ElasticsearchRemotePredicate.Regexp,
+                ElasticsearchRemotePredicate.ScriptPredicate,
                 ElasticsearchRemotePredicate.Term,
                 ElasticsearchRemotePredicate.Terms
 {
@@ -85,7 +96,7 @@ public sealed interface ElasticsearchRemotePredicate
             case Or or -> or.predicates().stream().allMatch(ElasticsearchRemotePredicate::isExact);
             case Not not -> not.predicate().isExact();
             case Enforced _ -> false;
-            case Term _, Terms _, Range _, Prefix _, Regexp _, MatchPhrase _, MatchPhrasePrefix _, Exists _ -> true;
+            case Term _, Terms _, Range _, Prefix _, Regexp _, MatchPhrase _, MatchPhrasePrefix _, Exists _, ScriptPredicate _, MatchNone _ -> true;
         };
     }
 
@@ -105,6 +116,10 @@ public sealed interface ElasticsearchRemotePredicate
             case MatchPhrase _ -> "matchPhrase";
             case MatchPhrasePrefix _ -> "matchPhrasePrefix";
             case Exists _ -> "exists";
+            case ArrayScript _ -> "arrayScript";
+            case ScalarScript _ -> "scalarScript";
+            case SourceScript _ -> "sourceScript";
+            case MatchNone _ -> "matchNone";
         };
     }
 
@@ -140,6 +155,71 @@ public sealed interface ElasticsearchRemotePredicate
                 return new Value(ValueType.STRING, stringValue);
             }
             throw new IllegalArgumentException("Unsupported remote predicate value type: " + value.getClass().getSimpleName());
+        }
+    }
+
+    record MatchNone()
+            implements ElasticsearchRemotePredicate {}
+
+    /**
+     * Connector-generated scalar and positive existential filters. Parameter values never become Painless source text.
+     * Fallible operations must be wrapped with PREFILTER enforcement and retain the original SQL expression.
+     */
+    sealed interface ScriptPredicate
+            extends ElasticsearchRemotePredicate
+            permits ArrayScript,
+                    ScalarScript,
+                    SourceScript
+    {
+        String field();
+
+        String source();
+
+        Map<String, Value> parameters();
+    }
+
+    record SourceScript(String field, String source, Map<String, Value> parameters, boolean array)
+            implements ScriptPredicate
+    {
+        public SourceScript
+        {
+            field = requireField(field);
+            requireNonNull(source, "source is null");
+            checkArgument(!source.isEmpty(), "script source is empty");
+            parameters = ImmutableMap.copyOf(requireNonNull(parameters, "parameters is null"));
+            checkArgument(new Value(ValueType.STRING, field).equals(parameters.get("field")), "script field parameter does not match field");
+        }
+
+        @JsonIgnore
+        public String runtimeField()
+        {
+            return "__trino_text_" + Hashing.sha256().hashString(field + "\0" + source + "\0" + new TreeMap<>(parameters), UTF_8);
+        }
+    }
+
+    record ScalarScript(String field, String source, Map<String, Value> parameters)
+            implements ScriptPredicate
+    {
+        public ScalarScript
+        {
+            field = requireField(field);
+            requireNonNull(source, "source is null");
+            checkArgument(!source.isEmpty(), "script source is empty");
+            parameters = ImmutableMap.copyOf(requireNonNull(parameters, "parameters is null"));
+            checkArgument(new Value(ValueType.STRING, field).equals(parameters.get("field")), "script field parameter does not match field");
+        }
+    }
+
+    record ArrayScript(String field, String source, Map<String, Value> parameters)
+            implements ScriptPredicate
+    {
+        public ArrayScript
+        {
+            field = requireField(field);
+            requireNonNull(source, "source is null");
+            checkArgument(!source.isEmpty(), "script source is empty");
+            parameters = ImmutableMap.copyOf(requireNonNull(parameters, "parameters is null"));
+            checkArgument(new Value(ValueType.STRING, field).equals(parameters.get("field")), "script field parameter does not match field");
         }
     }
 

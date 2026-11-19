@@ -70,9 +70,14 @@ public record IndexMetadata(ObjectType schema)
         }
     }
 
-    public record PrimitiveType(String name, Optional<String> keyword, boolean aggregatable, boolean sourceValueSemanticsExact)
+    public record PrimitiveType(String name, Optional<String> keyword, boolean aggregatable, boolean sourceValueSemanticsExact, boolean indexed)
             implements Type
     {
+        public PrimitiveType(String name, Optional<String> keyword, boolean aggregatable, boolean sourceValueSemanticsExact)
+        {
+            this(name, keyword, aggregatable, sourceValueSemanticsExact, true);
+        }
+
         public PrimitiveType(String name, Optional<String> keyword, boolean aggregatable)
         {
             this(name, keyword, aggregatable, true);

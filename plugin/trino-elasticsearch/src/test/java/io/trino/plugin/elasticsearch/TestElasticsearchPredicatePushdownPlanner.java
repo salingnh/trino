@@ -353,6 +353,18 @@ public class TestElasticsearchPredicatePushdownPlanner
     }
 
     @Test
+    public void testSafeKeywordRegexpEndAnchorKeepsTerminalNewlineCandidates()
+    {
+        ElasticsearchColumnHandle column = keywordColumn();
+        Call regexp = new Call(BOOLEAN, new FunctionName("regexp_like"), ImmutableList.of(new Variable("value", VARCHAR), new Constant(utf8Slice("^foo$"), VARCHAR)));
+        ElasticsearchPredicatePushdownPlanner.Result result = ElasticsearchPredicatePushdownPlanner.plan(
+                TestingConnectorSession.builder().build(), expressionConstraint(column, regexp), SAFE);
+        assertThat(result.residualExpressions()).containsExactly(regexp);
+        assertThat(result.remotePredicate()).contains(new ElasticsearchRemotePredicate.Enforced(
+                new ElasticsearchRemotePredicate.Regexp("value", "(foo).*"), PREFILTER));
+    }
+
+    @Test
     public void testWholeAnalyzedArrayDomainRemainsLocal()
     {
         ArrayType arrayType = new ArrayType(VARCHAR);

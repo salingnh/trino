@@ -132,6 +132,11 @@ The following table details all general configuration properties:
   - Enable pushing down aggregations to Elasticsearch. Can be overridden per
     query with the `aggregation_pushdown_enabled` session property.
   - `true`
+* - `elasticsearch.scalar-script-pushdown.enabled`
+  - Enable Painless pushdown for supported scalar expressions on source-equivalent
+    fields with doc values. Can be overridden with the
+    `scalar_script_pushdown_enabled` session property.
+  - `false`
 * - `elasticsearch.full-text-pushdown`
   - Push predicates and dynamic filters on analyzed `text` fields to
     Elasticsearch as full-text queries. One of `DISABLED`, `SAFE`, or `UNSAFE`.
@@ -570,6 +575,191 @@ following data types:
 
 No other data types are supported for predicate push down.
 
+### Array predicate prefiltering
+
+For primitive arrays with compatible exact mappings, the connector can use a
+necessary condition from an `any_match` lambda as an Elasticsearch prefilter when
+the whole lambda cannot be pushed down exactly. For example:
+
+```sql
+SELECT id
+FROM events
+WHERE any_match(numbers, x -> x > 10 AND mod(x, 2) = 0);
+```
+
+Elasticsearch filters documents to those with a `numbers` value greater than 10.
+Trino then evaluates the complete original lambda, so the same element must be
+both greater than 10 and even. With script pushdown disabled, the modulo
+expression itself is not pushed down.
+
+An `AND` can use necessary conditions from a subset of its branches. An `OR`
+requires a safe candidate for every branch; `x > 10 OR mod(x, 2) = 0` remains
+local with script pushdown disabled. Prefilters retain the original lambda for
+evaluation in Trino, and are omitted when mapping safety or query resource limits
+cannot be met.
+Analyzed-text array behavior is controlled separately by the full-text mode.
+
+### Native array expression logic
+
+For source-equivalent integral array mappings, `any_match` can combine
+comparisons, `IN`, `BETWEEN`, `AND`, `OR`, and `NOT` without Painless. The
+connector computes the allowed values of one element before generating queries.
+For example:
+
+```sql
+-- term query for 12, rather than independent document conditions
+SELECT id FROM events
+WHERE any_match(numbers, x -> x IN (5, 12) AND x > 10);
+
+-- ranges below and above 12; a document containing [12, 13] still matches
+SELECT id FROM events
+WHERE any_match(numbers, x -> x <> 12);
+```
+
+Intersections, unions, repeated bounds, and contradictions become `term`,
+`terms`, `range`, `bool.should`, or `match_none` queries. `IS NOT NULL` may use
+`exists` when indexed values preserve source semantics. TRUE and FALSE value
+sets are tracked separately: NULL in an `IN` list cannot become TRUE through
+negation. Predicates that can be TRUE for a NULL element remain local because
+NULL array elements are not indexed. These rules apply to a positive `any_match`
+filter, not to negating the enclosing `any_match`.
+
+Exact indexed keyword arrays additionally support `starts_with`, SQL `LIKE` with its
+optional escape, the supported substring-prefix form, and a conservative subset
+of `regexp_like`. LIKE patterns use native prefix or regexp queries. Regex
+constructs without an exact shared translation, including end anchors and inline
+flags, remain local. Prefix conjunctions can be reduced to the stronger prefix
+or an empty match; other unproven conjunctions retain the original lambda after
+prefiltering. Normalized, truncated, and otherwise source-incompatible mappings
+are not eligible. Fields with neither an index nor doc values remain local.
+These native string queries are not generated for doc-values-only keyword
+fields, for compatibility with Elasticsearch 7. Script support described below
+can still apply to eligible keyword doc values.
+
+Native translation is independent of `array_script_pushdown_enabled`. When
+scripts are enabled, an OR can combine exact native branches with non-throwing
+script branches. An AND can combine a native necessary condition with a script
+for the complete lambda, preserving same-element evaluation. Fallible arithmetic
+keeps the whole-script prefilter strategy and SQL residual, so a native guard
+cannot hide an arithmetic error. If a combined query exceeds resource limits,
+the connector tries the whole script or the existing native prefilter/local
+fallback. Expression depth, size, value counts, and final query size are bounded.
+
+### Array expression scripts
+
+Enable `elasticsearch.array-script-pushdown.enabled=true` in the catalog, or set
+its `array_script_pushdown_enabled` session property to `true`, to push supported
+`any_match` expressions as Painless script queries. This option is disabled by
+default and is independent of full-text pushdown mode. Native exact queries are
+preferred; eligible mixed expressions can use native queries and scripts together.
+
+Supported source-equivalent array mappings include integral types, `REAL` on
+`float`, `DOUBLE` on `double`, `BOOLEAN`, direct `keyword` strings, and
+`TIMESTAMP(3)` on eligible date fields. Doc values are required in every backing
+index. `half_float`, `scaled_float`, normalized or truncated strings, and mappings
+that can lose source values are not eligible for exact script evaluation.
+
+The typed compiler supports the following expressions when it can preserve their
+NULL, type, and error semantics:
+
+- Arithmetic `+`, `-`, `*`, `/`, `%`, `mod`, and unary minus; comparisons,
+  `IS NOT DISTINCT FROM`, `IN`, `BETWEEN`, `AND`, `OR`, and `NOT`.
+- Numeric casts and `TRY_CAST`, `COALESCE`, `NULLIF`, and searched `CASE`.
+  Floating-point to integral or decimal casts remain local. Decimal arithmetic
+  is supported on decimal expressions derived from eligible array elements;
+  this does not add a decimal Elasticsearch array mapping.
+- `abs`, `ceil`/`ceiling`, `floor`, `round`, `truncate`, `sign`, `sqrt`, and
+  `pow`/`power`, for supported signatures. Decimal rounding places must be constant.
+- String `length`, `starts_with`, `ends_with`, `strpos`, `replace`, `concat`,
+  `substr`/`substring`, `trim`, `ltrim`, `rtrim`, `lower`, `upper`, and constant
+  SQL `LIKE` patterns with optional escape. Character positions use Unicode code
+  points. Case conversion admits non-ASCII strings for checking by Trino.
+- UTC timestamp `year`, `month`, `day`/`day_of_month`, `hour`, `minute`, `second`,
+  `day_of_week`/`dow`, `day_of_year`/`doy`, `date_trunc`, `date_add`, and fixed-unit
+  `date_diff`. Calendar month, quarter, and year differences remain local.
+
+For example, both branches of this `OR` can be evaluated by Elasticsearch:
+
+```sql
+SELECT id
+FROM events
+WHERE any_match(numbers, x -> x > 10 OR mod(x, 2) = 0);
+```
+
+A supported non-throwing expression can be pushed exactly. Fallible arithmetic,
+Unicode case conversion, guarded string expansion, three-argument substring,
+and temporal expressions retain the original SQL lambda as a residual. A script
+admits the document when a supported operation errors or reaches its guard, so
+Trino can preserve SQL errors and finish evaluation. Every expression is evaluated
+on the same array element. Floating comparisons preserve Trino's NaN semantics,
+including the difference between equality and `IS NOT DISTINCT FROM`. Native
+array predicates with floating zero or non-finite constants are declined; typed
+scripts preserve SQL equality of positive and negative zero when enabled.
+
+The compiler proves that a NULL element cannot make the lambda true or introduce
+an error that would be lost by skipping it. Expressions such as
+`coalesce(x, 0) > 10` are eligible; `coalesce(x, 100) > 10` and `x IS NULL` remain
+local. Missing, empty, and only-NULL arrays are excluded correctly for eligible
+positive `any_match` filters. Captured columns, unsupported signatures, and failed
+NULL proofs remain local or use an available necessary native prefilter.
+
+Scripts are generated by the connector with parameterized values. Expression
+size and depth, parameter counts, and rendered request bytes are bounded.
+Dynamic filters do not use this script compiler. Script queries require the
+Elasticsearch cluster to allow them, including `search.allow_expensive_queries`.
+Unexpected runtime script failures fail the query. Scripts can increase
+Elasticsearch CPU usage, especially for large arrays; test the workload before
+enabling the option. Disabling it restores native queries and array prefiltering
+without scripts.
+
+### Scalar expression scripts
+
+Scalar `WHERE` expressions use the same typed expression compiler as array
+lambdas. Enable `elasticsearch.scalar-script-pushdown.enabled=true` in the catalog,
+or set the `scalar_script_pushdown_enabled` catalog session property to `true`.
+It is disabled by default and independent of `array_script_pushdown_enabled`.
+Native predicates are preferred and do not require either script option.
+
+```sql
+SET SESSION elasticsearch.scalar_script_pushdown_enabled = true;
+
+SELECT id
+FROM events
+WHERE lower(raw_review_comment) LIKE '%sá%'
+LIMIT 20;
+
+SELECT id
+FROM events
+WHERE number > 10 OR mod(number, 2) = 0;
+```
+
+The supported arithmetic, casts, nullable expressions, math functions, strings,
+and UTC timestamps follow the array expression allowlist above. Each compiled
+scalar expression refers to one column, with any number of references to that
+column. Separate predicates on different columns can be composed; an arithmetic
+expression combining two different columns remains local. Native scalar regexp
+predicates keep their existing full-text mode and residual policy.
+
+Scalar NULL semantics are evaluated directly, including a missing field. For
+example, `coalesce(number, 100) > 10` can be exact and include NULL rows; the
+corresponding array lambda is ineligible because NULL array elements are absent
+from doc values. Floating-point domains extracted by Trino can also use scripts
+to preserve signed-zero and explicit NaN membership semantics.
+
+Scripts require the same source-equivalent mapping proof and doc values as the
+array compiler: direct exact `keyword` strings and eligible numeric, boolean,
+and date mappings. An analyzed text field alone, a lossy keyword sub-field,
+`ignore_above`, or a normalizer does not become eligible by enabling scripts.
+The field is read as one scalar value; unexpected multiple doc values fail the
+query rather than selecting an arbitrary element.
+
+Non-throwing expressions can be exact. Fallible operations and Unicode case
+conversion remain prefilters with the original SQL predicate retained. Thus
+`lower(raw_review_comment) LIKE '%sá%'` can filter documents in Elasticsearch
+when the column is eligible, but non-ASCII strings still require Trino's Unicode
+case conversion and LIKE check. LIMIT remains above this residual filter; a
+remote candidate count must not be mistaken for the requested SQL result count.
+
 ### Prefix predicate push down
 
 Predicates that match a string prefix are pushed down as an Elasticsearch
@@ -585,29 +775,65 @@ without an exact-match `keyword` sub-field — are evaluated by the engine,
 because a `text` field is tokenized and does not preserve exact string values.
 
 The `elasticsearch.full-text-pushdown` configuration property, or the
-`full_text_pushdown_mode` session property, opts in to pushing these predicates
-down as Elasticsearch full-text queries. Equality and `IN` predicates become a
-`match_phrase` query, a `LIKE` prefix pattern (`abc%`) becomes a
-`match_phrase_prefix` query, and other `LIKE` patterns and `regexp_like` become a
-`regexp` query, which Elasticsearch evaluates per token using Lucene regular
-expression syntax. Because tokenization, lowercasing, and stemming apply, results
-can differ from exact SQL semantics. Three modes are available:
+`full_text_pushdown_mode` session property, selects the treatment of analyzed
+text predicates:
 
-- `DISABLED`, the default: text predicates are evaluated by the engine only.
-- `SAFE`: push a full-text pre-filter but re-apply the exact predicate in the
-  engine, which removes false positives. This is *not* lossless: because the
-  pre-filter is not a guaranteed superset, rows can still be dropped — for
-  example a value that analyzes to nothing, such as a stop word, or a
-  `regexp_like` pattern that matches across analyzer token boundaries, because
-  Elasticsearch matches per token rather than across the whole string. A
-  multi-token `LIKE` prefix is pushed as a `match_phrase_prefix` pre-filter while
-  the engine keeps the exact prefix range, so its result stays correct; a
-  multi-token contains pattern is left to the engine.
-- `UNSAFE`: push the full-text query and trust the Elasticsearch result. Fully
-  pushed down and fastest, but results follow Elasticsearch analysis semantics.
+- `DISABLED` (default) keeps unproven analyzed-text expressions in Trino.
+- `SAFE` uses only exact translations or candidates proven not to lose SQL
+  matches. Analyzed-text candidates without that proof remain local.
+- `UNSAFE` accepts explicitly approximate Elasticsearch semantics. Translated
+  approximate predicates do not retain their original exact SQL residual.
+  Tokenization, case conversion, stemming, stop words and punctuation can change
+  results. Diagnostics report these predicates as `APPROXIMATE`, not `EXACT`.
 
-Both `SAFE` and `UNSAFE` are therefore approximate on analyzed `text`; only a
-predicate on a field with an exact-match `keyword` sub-field is exact.
+UNSAFE text routing applies to scalar text columns and `any_match` over text
+arrays. Native full-text queries are preferred when a translation exists.
+Literal and contains-literal LIKE patterns, including multi-token patterns,
+use `match_phrase`; prefixes use `match_phrase_prefix`. Supported other patterns
+use Lucene `regexp` queries over tokens. LOWER/UPPER around a field can use this
+native path: the field's analyzer defines the case/normalization behavior, which
+is intentionally not a promise to execute Trino's string function exactly.
+
+For example, replace `elasticsearch` with the actual catalog name:
+
+```sql
+SET SESSION elasticsearch.full_text_pushdown_mode = 'UNSAFE';
+SELECT id FROM reviews
+WHERE lower(raw_review_comment) LIKE '%sách rất%';
+```
+
+This shape uses a native `match_phrase` query on the analyzed parent text field,
+including when an optional keyword subfield drops long values. It does not need
+Painless or an exact SQL residual. It can match both `SÁCH rất tốt` and
+`SÁCH, rất tốt`, according to the configured analyzer.
+
+For text expressions without a native translation, enable the corresponding
+`scalar_script_pushdown_enabled` or `array_script_pushdown_enabled` session
+property to allow a runtime-field fallback. These flags remain independent and
+default to false. The fallback reads the complete value from `_source`; it does
+not treat analyzed tokens as the original string. Runtime definitions exist only
+in the search request, so no reindexing or persistent mapping change is required.
+This requires `_source` to be available and the cluster to permit runtime scripts.
+
+The fallback reuses the typed expression compiler for string functions such as
+length, trim/ltrim/rtrim, substr/substring, replace, concat, strpos, ends_with,
+nullable/CASE expressions, and their supported compositions. Scalar numeric
+source values are converted to strings like the VARCHAR decoder. Source arrays
+preserve NULL elements and evaluate the complete lambda on each element.
+Unsupported functions/overloads and expressions over multiple captured columns
+still follow the normal fallback rules.
+
+In non-fallible source expressions, UNSAFE LOWER/UPPER can use Elasticsearch's
+Unicode case behavior and are marked APPROXIMATE. Fallible expressions keep a
+lossless candidate and the original residual, including the existing conservative
+Unicode case guard, rather than silently suppressing SQL errors. Other proven
+source expressions may be exact. Turning on UNSAFE does not disable all residuals
+or error checks in the query.
+
+Runtime definitions are carried through Scroll, PIT/search_after, COUNT and
+supported aggregation requests. Reading `_source` and evaluating scripts costs
+more than an indexed native predicate: fewer documents transferred to Trino does
+not imply that Elasticsearch avoided scanning or parsing candidate documents.
 
 Dynamic filters on `text` join keys are always safe to push, because the join
 re-checks the key. They are pushed as `match_phrase` pre-filters whenever the

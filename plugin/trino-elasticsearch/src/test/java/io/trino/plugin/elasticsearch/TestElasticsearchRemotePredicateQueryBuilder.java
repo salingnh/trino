@@ -17,6 +17,7 @@ import com.google.common.collect.ImmutableList;
 import io.trino.plugin.elasticsearch.expression.ElasticsearchRemotePredicate;
 import org.junit.jupiter.api.Test;
 
+import java.util.Map;
 import java.util.Optional;
 
 import static io.trino.plugin.elasticsearch.ElasticsearchRemotePredicateQueryBuilder.build;
@@ -27,6 +28,35 @@ import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
 public class TestElasticsearchRemotePredicateQueryBuilder
 {
+    @Test
+    public void testArrayScriptParameters()
+    {
+        ElasticsearchRemotePredicate.ArrayScript script = new ElasticsearchRemotePredicate.ArrayScript(
+                "Numbers",
+                "return doc[params.field].size() > params.minimum;",
+                Map.of(
+                        "field", ElasticsearchRemotePredicate.Value.of("Numbers"),
+                        "minimum", ElasticsearchRemotePredicate.Value.of(0L)));
+        assertThat(build(script).at("/script/script/lang").asText()).isEqualTo("painless");
+        assertThat(build(script).at("/script/script/source").asText()).isEqualTo(script.source());
+        assertThat(build(script).at("/script/script/params/field").asText()).isEqualTo("Numbers");
+        assertThat(build(script).at("/script/script/params/minimum").isIntegralNumber()).isTrue();
+        assertThatThrownBy(() -> new ElasticsearchRemotePredicate.ArrayScript("Other", script.source(), script.parameters()))
+                .isInstanceOf(IllegalArgumentException.class)
+                .hasMessageContaining("field parameter");
+    }
+
+    @Test
+    public void testScalarScriptParameters()
+    {
+        var script = new ElasticsearchRemotePredicate.ScalarScript("Review.Comment", "return params.value == 1;", Map.of(
+                "field", ElasticsearchRemotePredicate.Value.of("Review.Comment"), "value", ElasticsearchRemotePredicate.Value.of(1L)));
+        assertThat(build(script).at("/script/script/params/field").asText()).isEqualTo("Review.Comment");
+        assertThat(build(script).at("/script/script/params/value").asLong()).isEqualTo(1);
+        assertThatThrownBy(() -> new ElasticsearchRemotePredicate.ScalarScript("Other", script.source(), script.parameters()))
+                .isInstanceOf(IllegalArgumentException.class);
+    }
+
     @Test
     public void testTermAndTerms()
     {
@@ -54,6 +84,7 @@ public class TestElasticsearchRemotePredicateQueryBuilder
     @Test
     public void testRange()
     {
+        assertThat(build(new ElasticsearchRemotePredicate.MatchNone()).toString()).isEqualTo("{\"match_none\":{}}");
         ElasticsearchRemotePredicate.Range range = new ElasticsearchRemotePredicate.Range(
                 "age",
                 Optional.of(new ElasticsearchRemotePredicate.Bound(18L, true)),

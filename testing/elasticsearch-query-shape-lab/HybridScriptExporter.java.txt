@@ -1,0 +1,60 @@
+package io.trino.plugin.elasticsearch;
+
+import com.fasterxml.jackson.databind.ObjectMapper;
+import io.trino.plugin.elasticsearch.client.IndexMetadata.PrimitiveType;
+import io.trino.plugin.elasticsearch.decoders.IntegerDecoder;
+import io.trino.plugin.elasticsearch.expression.ElasticsearchRemotePredicate;
+import io.trino.spi.expression.Call;
+import io.trino.spi.expression.Constant;
+import io.trino.spi.expression.FunctionName;
+import io.trino.spi.expression.Lambda;
+import io.trino.spi.expression.Variable;
+import io.trino.spi.type.ArrayType;
+import io.trino.spi.type.FunctionType;
+import java.nio.file.Files;
+import java.nio.file.Path;
+import java.util.LinkedHashMap;
+import java.util.List;
+import java.util.Map;
+import static io.trino.spi.type.BooleanType.BOOLEAN;
+import static io.trino.spi.type.IntegerType.INTEGER;
+
+public class HybridScriptExporter {
+    public static void main(String[] args) throws Exception {
+        Map<String, Object> output = new LinkedHashMap<>();
+        for (int feature : List.of(13, 14, 30)) {
+            boolean array = feature != 30;
+            Variable x = new Variable(array ? "x" : "n", INTEGER);
+            Call range = new Call(BOOLEAN, new FunctionName("$greater_than"), List.of(x, new Constant(10L, INTEGER)));
+            Call mod = new Call(INTEGER, new FunctionName("mod"), List.of(x, new Constant(2L, INTEGER)));
+            Call equal = new Call(BOOLEAN, new FunctionName("$equal"), List.of(mod, new Constant(0L, INTEGER)));
+            Call predicate = new Call(BOOLEAN, new FunctionName(feature == 14 ? "$and" : "$or"), List.of(range, equal));
+            var column = new ElasticsearchColumnHandle(List.of(array ? "numbers" : "n"), array ? new ArrayType(INTEGER) : INTEGER,
+                    new PrimitiveType("integer"), new IntegerDecoder.Descriptor(array ? "numbers" : "n"), false);
+            ElasticsearchPredicateTranslation<?> result;
+            if (array) {
+                Lambda lambda = new Lambda(new FunctionType(List.of(INTEGER), BOOLEAN), List.of(x), predicate);
+                Call call = new Call(BOOLEAN, new FunctionName("any_match"), List.of(new Variable("numbers", new ArrayType(INTEGER)), lambda));
+                result = ElasticsearchArrayScriptTranslator.translate(call, lambda, column, ElasticsearchPredicateCompositionPolicy.DEFAULT).orElseThrow();
+            }
+            else {
+                result = ElasticsearchExpressionScriptTranslator.translateScalar(predicate, x, column, ElasticsearchPredicateCompositionPolicy.DEFAULT).orElseThrow();
+            }
+            var remote = result.remotePredicate().orElseThrow();
+            if (remote instanceof ElasticsearchRemotePredicate.Enforced enforced) remote = enforced.predicate();
+            var script = (ElasticsearchRemotePredicate.ScriptPredicate) remote;
+            Map<String, Object> params = new LinkedHashMap<>();
+            for (var entry : script.parameters().entrySet()) {
+                var value = entry.getValue();
+                params.put(entry.getKey(), switch (value.type()) {
+                    case STRING -> value.value();
+                    case LONG -> Long.parseLong(value.value());
+                    case DOUBLE -> Double.parseDouble(value.value());
+                    case BOOLEAN -> Boolean.parseBoolean(value.value());
+                });
+            }
+            output.put(Integer.toString(feature), Map.of("script", Map.of("script", Map.of("lang", "painless", "source", script.source(), "params", params))));
+        }
+        Files.writeString(Path.of(args[0]), new ObjectMapper().writeValueAsString(output) + "\n");
+    }
+}

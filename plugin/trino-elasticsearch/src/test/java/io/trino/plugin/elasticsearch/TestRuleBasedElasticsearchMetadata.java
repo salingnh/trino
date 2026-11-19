@@ -27,11 +27,17 @@ import io.trino.spi.connector.Constraint;
 import io.trino.spi.connector.ConstraintApplicationResult;
 import io.trino.spi.connector.SortItem;
 import io.trino.spi.connector.SortOrder;
+import io.trino.spi.expression.Call;
+import io.trino.spi.expression.Constant;
+import io.trino.spi.expression.FunctionName;
+import io.trino.spi.expression.Lambda;
 import io.trino.spi.expression.Variable;
 import io.trino.spi.predicate.Domain;
 import io.trino.spi.predicate.Range;
 import io.trino.spi.predicate.TupleDomain;
 import io.trino.spi.predicate.ValueSet;
+import io.trino.spi.type.ArrayType;
+import io.trino.spi.type.FunctionType;
 import io.trino.testing.TestingConnectorSession;
 import org.junit.jupiter.api.AfterAll;
 import org.junit.jupiter.api.BeforeAll;
@@ -48,7 +54,10 @@ import static io.trino.plugin.elasticsearch.ElasticsearchRemotePredicateTranslat
 import static io.trino.plugin.elasticsearch.ElasticsearchTableHandle.Type.SCAN;
 import static io.trino.plugin.elasticsearch.FullTextPushdownMode.SAFE;
 import static io.trino.spi.expression.Constant.TRUE;
+import static io.trino.spi.expression.StandardFunctions.AND_FUNCTION_NAME;
+import static io.trino.spi.expression.StandardFunctions.GREATER_THAN_OPERATOR_FUNCTION_NAME;
 import static io.trino.spi.type.BigintType.BIGINT;
+import static io.trino.spi.type.BooleanType.BOOLEAN;
 import static io.trino.spi.type.DoubleType.DOUBLE;
 import static io.trino.spi.type.IntegerType.INTEGER;
 import static io.trino.spi.type.SmallintType.SMALLINT;
@@ -220,6 +229,31 @@ public class TestRuleBasedElasticsearchMetadata
                 new ElasticsearchRemotePredicate.Term("UserID", 20L))));
         assertThat(metadata.applyFilter(session, second, exactConstraint(10L))).isEmpty();
         assertThat(metadata.applyFilter(session, second, exactConstraint(20L))).isEmpty();
+    }
+
+    @Test
+    public void testArrayPrefilterPreservesResidualAndReachesFixedPoint()
+    {
+        ArrayType arrayType = new ArrayType(INTEGER);
+        ElasticsearchColumnHandle column = new ElasticsearchColumnHandle(
+                List.of("Numbers"), arrayType, new IndexMetadata.PrimitiveType("integer"), new IntegerDecoder.Descriptor("Numbers"), false);
+        Variable element = new Variable("element", INTEGER);
+        Call body = new Call(BOOLEAN, AND_FUNCTION_NAME, List.of(
+                new Call(BOOLEAN, GREATER_THAN_OPERATOR_FUNCTION_NAME, List.of(element, new Constant(10L, INTEGER))),
+                new Call(BOOLEAN, new FunctionName("unsupported_predicate"), List.of(element))));
+        Call expression = new Call(BOOLEAN, new FunctionName("any_match"), List.of(
+                new Variable("numbers", arrayType), new Lambda(new FunctionType(List.of(INTEGER), BOOLEAN), List.of(element), body)));
+        Constraint constraint = new Constraint(TupleDomain.all(), expression, Map.of("numbers", column));
+
+        ConstraintApplicationResult<ConnectorTableHandle> result = metadata.applyFilter(session, emptyTable(), constraint).orElseThrow();
+        ElasticsearchTableHandle handle = (ElasticsearchTableHandle) result.getHandle();
+
+        assertThat(result.getRemainingExpression()).contains(expression);
+        assertThat(result.getRemainingFilter().isAll()).isTrue();
+        assertThat(handle.remotePredicate()).isPresent();
+        assertThat(handle.remotePredicate().orElseThrow().isExact()).isFalse();
+        assertThat(metadata.applyFilter(session, handle, constraint)).isEmpty();
+        assertThat(metadata.getTableStatistics(session, handle).getRowCount().isUnknown()).isTrue();
     }
 
     @Test

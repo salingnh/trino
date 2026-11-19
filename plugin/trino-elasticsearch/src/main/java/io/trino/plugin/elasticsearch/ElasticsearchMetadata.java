@@ -532,7 +532,8 @@ public class ElasticsearchMetadata
     {
         ElasticsearchTableHandle handle = (ElasticsearchTableHandle) table;
         if (!statisticsEnabled || isPassthroughQuery(handle) || handle.aggregation().isPresent()
-                || handle.remotePredicate().filter(predicate -> !predicate.isExact()).isPresent()) {
+                || handle.remotePredicate().filter(predicate -> !predicate.isExact()).isPresent()
+                || !ElasticsearchQueryBuilder.runtimeMappings(handle).isEmpty()) {
             return TableStatistics.empty();
         }
 
@@ -654,6 +655,8 @@ public class ElasticsearchMetadata
             case ElasticsearchRemotePredicate.MatchPhrase match -> fields.add(match.field());
             case ElasticsearchRemotePredicate.MatchPhrasePrefix match -> fields.add(match.field());
             case ElasticsearchRemotePredicate.Exists exists -> fields.add(exists.field());
+            case ElasticsearchRemotePredicate.ScriptPredicate script -> fields.add(script.field());
+            case ElasticsearchRemotePredicate.MatchNone _ -> {}
         }
     }
 

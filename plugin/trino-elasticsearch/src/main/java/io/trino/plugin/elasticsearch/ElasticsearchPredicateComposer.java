@@ -304,6 +304,10 @@ final class ElasticsearchPredicateComposer
         .toString()
         .getBytes(StandardCharsets.UTF_8)
         .length;
+        var runtimeMappings = ElasticsearchRemotePredicateQueryBuilder.runtimeMappings(Optional.of(predicate));
+        if (!runtimeMappings.isEmpty()) {
+            bytes += runtimeMappings.toString().getBytes(StandardCharsets.UTF_8).length + 32;
+        }
         return bytes <= policy.maxQueryBytes();
     }
 
@@ -331,6 +335,7 @@ final class ElasticsearchPredicateComposer
             case ElasticsearchRemotePredicate.Enforced enforced -> resourceUsage(enforced.predicate());
             case ElasticsearchRemotePredicate.Term _ -> new ResourceUsage(1, 1, 0);
             case ElasticsearchRemotePredicate.Terms terms -> new ResourceUsage(terms.values().size(), 1, 0);
+            case ElasticsearchRemotePredicate.ScriptPredicate script -> new ResourceUsage(script.parameters().size(), 1, 0);
             default -> new ResourceUsage(0, 1, 0);
         };
     }

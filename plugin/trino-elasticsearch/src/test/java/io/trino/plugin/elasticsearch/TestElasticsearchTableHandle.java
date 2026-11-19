@@ -22,6 +22,7 @@ import io.airlift.json.JsonCodecFactory;
 import io.airlift.json.JsonMapperProvider;
 import io.trino.metadata.HandleJsonModule;
 import io.trino.metadata.HandleResolver;
+import io.trino.plugin.elasticsearch.client.IndexMetadata.PrimitiveType;
 import io.trino.plugin.elasticsearch.expression.ElasticsearchRemotePredicate;
 import io.trino.spi.connector.ColumnHandle;
 import io.trino.spi.connector.ConnectorTableHandle;
@@ -37,6 +38,15 @@ import static org.assertj.core.api.Assertions.assertThat;
 
 public class TestElasticsearchTableHandle
 {
+    @Test
+    void testPrimitiveIndexCapabilityRoundTrip()
+    {
+        JsonCodec<PrimitiveType> codec = new JsonCodecFactory(new JsonMapperProvider().get()).jsonCodec(PrimitiveType.class);
+        PrimitiveType type = new PrimitiveType("keyword", Optional.empty(), true, true, false);
+        assertThat(codec.fromJson(codec.toJson(type))).isEqualTo(type);
+        assertThat(codec.fromJson(codec.toJson(type)).indexed()).isFalse();
+    }
+
     private static final JsonCodec<ElasticsearchTableHandle> TABLE_CODEC = new JsonCodecFactory(new JsonMapperProvider().get())
             .jsonCodec(ElasticsearchTableHandle.class);
     private static final JsonCodec<ConnectorTableHandle> CONNECTOR_TABLE_CODEC = connectorTableCodec();
@@ -52,7 +62,12 @@ public class TestElasticsearchTableHandle
     public void testRemotePredicateJsonRoundTrip()
     {
         ElasticsearchRemotePredicate predicate = new ElasticsearchRemotePredicate.And(ImmutableList.of(
+                new ElasticsearchRemotePredicate.ArrayScript("Numbers", "return params.value > 0;", ImmutableMap.of(
+                        "field", ElasticsearchRemotePredicate.Value.of("Numbers"),
+                        "value", ElasticsearchRemotePredicate.Value.of(2L))),
+                new ElasticsearchRemotePredicate.ScalarScript("Word", "return params.field != null;", ImmutableMap.of("field", ElasticsearchRemotePredicate.Value.of("Word"))),
                 new ElasticsearchRemotePredicate.Term("status.keyword", "active"),
+                new ElasticsearchRemotePredicate.MatchNone(),
                 new ElasticsearchRemotePredicate.Terms("id", ImmutableList.of(1L, 2L, 3L)),
                 new ElasticsearchRemotePredicate.Range(
                         "score",
@@ -91,6 +106,7 @@ public class TestElasticsearchTableHandle
     public void testRemotePredicateJsonRoundTripThroughConnectorHandleCodec()
     {
         ElasticsearchRemotePredicate predicate = new ElasticsearchRemotePredicate.And(ImmutableList.of(
+                new ElasticsearchRemotePredicate.ScalarScript("Word", "return params.field != null;", ImmutableMap.of("field", ElasticsearchRemotePredicate.Value.of("Word"))),
                 new ElasticsearchRemotePredicate.Term("status.keyword", "active"),
                 new ElasticsearchRemotePredicate.Enforced(
                         new ElasticsearchRemotePredicate.MatchPhrase("description", "apache trino"),

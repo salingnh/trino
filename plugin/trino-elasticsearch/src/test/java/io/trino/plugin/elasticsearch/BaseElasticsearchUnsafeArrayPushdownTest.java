@@ -425,10 +425,18 @@ public abstract class BaseElasticsearchUnsafeArrayPushdownTest
                         .isNotFullyPushedDown(FilterNode.class);
             }
 
-            // Different elements satisfy the two sides. The generic analyzed-text AND must remain local.
-            assertThat(query(unsafe, "SELECT id FROM " + indexName + " WHERE any_match(names, x -> x LIKE 'Nguyen%' AND x LIKE '%Van%')"))
-                    .matches("VALUES VARCHAR '2', VARCHAR '6'")
-                    .isNotFullyPushedDown(FilterNode.class);
+            String sameElementQuery = "SELECT id FROM " + indexName + " WHERE any_match(names, x -> x LIKE 'Nguyen%' AND x LIKE '%Van%')";
+            // SQL requires both predicates to match the same element in modes that preserve SQL semantics.
+            for (String mode : List.of("DISABLED", "SAFE")) {
+                assertThat(query(sessionWithFullTextMode(mode), sameElementQuery))
+                        .matches("VALUES VARCHAR '2', VARCHAR '6'")
+                        .isNotFullyPushedDown(FilterNode.class);
+            }
+            // UNSAFE accepts document-level analyzer matches, including different array elements in document 1.
+            assertThat(query(unsafe, sameElementQuery))
+                    .matches("VALUES VARCHAR '1', VARCHAR '2', VARCHAR '6'")
+                    .skipResultsCorrectnessCheckForPushdown()
+                    .isFullyPushedDown();
 
             // NULL, empty, missing, and duplicate source values remain ordinary ARRAY cases around the approximate
             // positive membership candidate.

@@ -106,3 +106,29 @@ Add `--file testing/elasticsearch-query-shape-lab/manual-tests.sql` to run the
 manual query collection in batch. Change catalogs to exercise ES7 and PIT.
 The SQL collection resets the session switches after comparing enabled/disabled
 pushdown; it does not recreate fixtures or inject failures.
+
+## Array and scalar expression comparison
+
+The later three-revision expression comparison has its own
+[deployment and replay instructions](EXPRESSION-LAB.md) and
+[SQL results table](EXPRESSION-COMPARISON.md). It keeps master,
+internal/production and the candidate on separate loopback ports and records
+actual Elasticsearch Query DSL for each query on Elasticsearch 7 and 8.
+
+The [sequential performance benchmark](EXPRESSION-PERFORMANCE-LAB.md) scales
+primary shards, document counts and both together for the release report's
+40 feature examples on the same three Trino revisions. Its
+[SQL performance table](EXPRESSION-PERFORMANCE.md) separates measured wall time,
+Trino CPU and source-document/HTTP-byte offload; approximate results retain
+their distinct Elasticsearch semantics.
+
+Follow-up analysis is **ES8 only**: see the [separate slower-case table](EXPRESSION-ES8-SLOW-CASES.md)
+and [actual index/regexp/script execution and ES load diagnosis](EXPRESSION-ES8-QUERY-AUDIT.md).
+These preserve the historical matrix and add Lucene profiles, an independent
+canary process and uncached container CPU counters.
+
+The [ES8 hybrid ablation](EXPRESSION-ES8-HYBRID.md) compares native + Painless,
+Painless alone and local filtering on the **same current Trino binary**. It uses
+four existing hybrid examples, seven shard/document configurations, actual wire
+DSL, candidate-ID fingerprints and ES container CPU counters. The temporary
+proxy hook is scoped to the benchmark indices and restored after measurement.

@@ -14,6 +14,7 @@
 package io.trino.plugin.elasticsearch;
 
 import com.fasterxml.jackson.databind.JsonNode;
+import com.fasterxml.jackson.databind.node.ObjectNode;
 import com.google.common.annotations.VisibleForTesting;
 import com.google.common.collect.ImmutableList;
 import io.trino.plugin.elasticsearch.client.ElasticsearchClient;
@@ -64,6 +65,7 @@ class AggregationQueryPageSource
     private final ElasticsearchClient client;
     private final String index;
     private final JsonNode filterQuery;
+    private final JsonNode runtimeMappings;
     private final List<ElasticsearchColumnHandle> groupingColumns;
     private final List<ElasticsearchAggregate> aggregates;
     private final List<Output> outputs;
@@ -92,6 +94,7 @@ class AggregationQueryPageSource
         requireNonNull(table, "table is null");
         this.index = table.index();
         this.filterQuery = buildSearchQuery(table, diagnostics);
+        this.runtimeMappings = ElasticsearchQueryBuilder.runtimeMappings(table);
         ElasticsearchAggregation aggregation = table.aggregation().orElseThrow(() -> new IllegalArgumentException("table handle has no aggregation"));
         this.groupingColumns = aggregation.groupingColumns();
         this.aggregates = aggregation.aggregates();
@@ -149,7 +152,10 @@ class AggregationQueryPageSource
 
     private SourcePage globalPage()
     {
-        JsonNode body = buildAggregationQuery(filterQuery, groupingColumns, aggregates, compositeSize, Optional.empty());
+        ObjectNode body = buildAggregationQuery(filterQuery, groupingColumns, aggregates, compositeSize, Optional.empty());
+        if (!runtimeMappings.isEmpty()) {
+            body.set("runtime_mappings", runtimeMappings);
+        }
         JsonNode response = request(body);
         if (!response.path("hits").path("total").path("relation").asText().equals("eq")) {
             throw new TrinoException(ELASTICSEARCH_INVALID_RESPONSE, "Aggregation returned an inexact document count");
@@ -172,7 +178,10 @@ class AggregationQueryPageSource
 
     private SourcePage groupedPage()
     {
-        JsonNode body = buildAggregationQuery(filterQuery, groupingColumns, aggregates, compositeSize, afterKey);
+        ObjectNode body = buildAggregationQuery(filterQuery, groupingColumns, aggregates, compositeSize, afterKey);
+        if (!runtimeMappings.isEmpty()) {
+            body.set("runtime_mappings", runtimeMappings);
+        }
         JsonNode groups = request(body).path("aggregations").path("groups");
         JsonNode buckets = groups.path("buckets");
         if (!buckets.isArray()) {

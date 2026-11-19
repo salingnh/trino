@@ -25,6 +25,7 @@ import javax.management.MBeanServerFactory;
 import javax.management.ObjectName;
 
 import java.util.List;
+import java.util.Map;
 import java.util.Optional;
 import java.util.concurrent.CopyOnWriteArrayList;
 import java.util.logging.Handler;
@@ -45,6 +46,48 @@ import static org.assertj.core.api.Assertions.assertThat;
 
 public class TestElasticsearchPushdownDiagnostics
 {
+    @Test
+    public void testArrayScriptDiagnostics()
+    {
+        ElasticsearchPushdownDiagnostics diagnostics = new ElasticsearchPushdownDiagnostics();
+        diagnostics.recordTranslation(new Decision(Reason.EXACT_ARRAY_SCRIPT, Optional.of(EXACT), true, false, false, List.of()));
+        diagnostics.recordRemotePredicate(new ElasticsearchRemotePredicate.ArrayScript(
+                "Numbers",
+                "return true;",
+                Map.of("field", ElasticsearchRemotePredicate.Value.of("Numbers"))));
+        assertThat(diagnostics.snapshot().anyMatchTranslations()).isEqualTo(1);
+        assertThat(diagnostics.snapshot().arrayScriptPredicates()).isEqualTo(1);
+        assertThat(diagnostics.getArrayScriptPredicates()).isEqualTo(1);
+        assertThat(diagnostics.getTranslationReasonCounts()).containsEntry(Reason.EXACT_ARRAY_SCRIPT.name(), 1L);
+    }
+
+    @Test
+    public void testScalarScriptDiagnostics()
+    {
+        var diagnostics = new ElasticsearchPushdownDiagnostics();
+        diagnostics.recordTranslation(new Decision(Reason.EXACT_SCALAR_SCRIPT, Optional.of(EXACT), true, false, false, List.of()));
+        diagnostics.recordRemotePredicate(new ElasticsearchRemotePredicate.ScalarScript("Word", "return true;", Map.of("field", ElasticsearchRemotePredicate.Value.of("Word"))));
+        assertThat(diagnostics.snapshot().scalarScriptPredicates()).isEqualTo(1);
+        assertThat(diagnostics.snapshot().arrayScriptPredicates()).isZero();
+        assertThat(diagnostics.snapshot().anyMatchTranslations()).isZero();
+        assertThat(diagnostics.getScalarScriptPredicates()).isEqualTo(1);
+    }
+
+    @Test
+    public void testAnyMatchPrefilterDiagnostics()
+    {
+        ElasticsearchPushdownDiagnostics diagnostics = new ElasticsearchPushdownDiagnostics();
+        diagnostics.recordTranslation(new Decision(Reason.PREFILTER_ANY_MATCH, Optional.of(PREFILTER), true, false, true, List.of()));
+
+        ElasticsearchPushdownDiagnostics.Snapshot snapshot = diagnostics.snapshot();
+        assertThat(snapshot.anyMatchTranslations()).isEqualTo(1);
+        assertThat(snapshot.prefilterTranslations()).isEqualTo(1);
+        assertThat(snapshot.residualTranslations()).isEqualTo(1);
+        assertThat(snapshot.exactTranslations()).isZero();
+        assertThat(snapshot.approximateTranslations()).isZero();
+        assertThat(snapshot.translationReasonCounts()).containsEntry(Reason.PREFILTER_ANY_MATCH.name(), 1L);
+    }
+
     @Test
     public void testJmxExportReadsLiveDiagnosticState()
             throws Exception

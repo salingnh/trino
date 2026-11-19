@@ -46,6 +46,12 @@ public final class StandardFunctions
     public static final FunctionName COALESCE_FUNCTION_NAME = new FunctionName("$coalesce");
 
     /**
+     * Searched CASE as condition/result pairs followed by a default value. Conditions are BOOLEAN and every result
+     * has the call's type. At least one pair is required. Only the first TRUE branch (or default) is evaluated.
+     */
+    public static final FunctionName CASE_FUNCTION_NAME = new FunctionName("$case");
+
+    /**
      * $cast function result type is determined by the {@link Call#getType()}
      */
     public static final FunctionName CAST_FUNCTION_NAME = new FunctionName("$cast");

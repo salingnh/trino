@@ -23,20 +23,24 @@ import io.trino.spi.expression.Call;
 import io.trino.spi.expression.ConnectorExpression;
 import io.trino.spi.expression.Constant;
 import io.trino.spi.expression.FunctionName;
+import io.trino.spi.expression.Lambda;
 import io.trino.spi.expression.Variable;
 import io.trino.spi.predicate.TupleDomain;
 import io.trino.spi.type.ArrayType;
+import io.trino.spi.type.FunctionType;
 import io.trino.testing.TestingConnectorSession;
 import org.junit.jupiter.api.Test;
 
 import java.util.List;
 import java.util.Map;
+import java.util.Optional;
 
 import static io.airlift.slice.Slices.utf8Slice;
 import static io.trino.plugin.elasticsearch.FullTextPushdownMode.SAFE;
 import static io.trino.plugin.elasticsearch.expression.ElasticsearchRemotePredicate.Enforcement.PREFILTER;
 import static io.trino.spi.expression.Constant.TRUE;
 import static io.trino.spi.expression.StandardFunctions.AND_FUNCTION_NAME;
+import static io.trino.spi.expression.StandardFunctions.GREATER_THAN_OPERATOR_FUNCTION_NAME;
 import static io.trino.spi.expression.StandardFunctions.LIKE_FUNCTION_NAME;
 import static io.trino.spi.expression.StandardFunctions.NOT_FUNCTION_NAME;
 import static io.trino.spi.expression.StandardFunctions.OR_FUNCTION_NAME;
@@ -47,6 +51,34 @@ import static org.assertj.core.api.Assertions.assertThat;
 
 public class TestElasticsearchPredicateCompositionPlanner
 {
+    @Test
+    public void testAnyMatchCandidateIsPlannerOwnedAndKeepsCompleteLambda()
+    {
+        Call expression = partialAnyMatch();
+        ElasticsearchPredicatePushdownPlanner.Result result = plan(expression, Map.of("numbers", integerArrayColumn("Numbers")));
+
+        assertThat(result.remainingConstraint().getExpression()).isEqualTo(TRUE);
+        assertThat(result.remainingConstraint().getSummary().isAll()).isTrue();
+        assertThat(result.residualExpressions()).containsExactly(expression);
+        assertThat(result.remotePredicate()).contains(new ElasticsearchRemotePredicate.Enforced(
+                new ElasticsearchRemotePredicate.Range("Numbers", Optional.of(new ElasticsearchRemotePredicate.Bound(10L, false)), Optional.empty()),
+                PREFILTER));
+    }
+
+    @Test
+    public void testAnyMatchCandidateInDocumentOrRetainsWholeOr()
+    {
+        Call expression = new Call(BOOLEAN, OR_FUNCTION_NAME, List.of(
+                partialAnyMatch(), contains("numbers", new ArrayType(INTEGER), 1)));
+        ElasticsearchPredicatePushdownPlanner.Result result = plan(expression, Map.of("numbers", integerArrayColumn("Numbers")));
+
+        assertThat(result.remainingConstraint().getExpression()).isEqualTo(TRUE);
+        assertThat(result.residualExpressions()).containsExactly(expression);
+        assertThat(result.remotePredicate()).isPresent();
+        assertThat(result.remotePredicate().orElseThrow()).isInstanceOf(ElasticsearchRemotePredicate.Or.class);
+        assertThat(result.remotePredicate().orElseThrow().isExact()).isFalse();
+    }
+
     @Test
     public void testExactArrayOrNormalizesToTerms()
     {
@@ -174,6 +206,17 @@ public class TestElasticsearchPredicateCompositionPlanner
         assertThat(result.remotePredicate()).isEmpty();
         assertThat(result.remainingConstraint().getExpression()).isEqualTo(TRUE);
         assertThat(result.residualExpressions()).containsExactly(expression);
+    }
+
+    private static Call partialAnyMatch()
+    {
+        Variable element = new Variable("element", INTEGER);
+        Call body = new Call(BOOLEAN, AND_FUNCTION_NAME, List.of(
+                new Call(BOOLEAN, GREATER_THAN_OPERATOR_FUNCTION_NAME, List.of(element, new Constant(10L, INTEGER))),
+                new Call(BOOLEAN, new FunctionName("unsupported_predicate"), List.of(element))));
+        return new Call(BOOLEAN, new FunctionName("any_match"), List.of(
+                new Variable("numbers", new ArrayType(INTEGER)),
+                new Lambda(new FunctionType(List.of(INTEGER), BOOLEAN), List.of(element), body)));
     }
 
     private static ElasticsearchPredicatePushdownPlanner.Result plan(

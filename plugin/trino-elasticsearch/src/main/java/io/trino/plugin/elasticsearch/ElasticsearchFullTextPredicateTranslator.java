@@ -462,7 +462,10 @@ final class ElasticsearchFullTextPredicateTranslator
             return ElasticsearchPredicateTranslation.residual(source, FULL_TEXT_SAFE_UNPROVEN);
         }
 
-        ElasticsearchRemotePredicate predicate = new ElasticsearchRemotePredicate.Regexp(column.predicateName(), translation.pattern());
+        // Trino's end anchor also matches before a final newline. Lucene matches the entire indexed term, so
+        // retain a lossless candidate by allowing a suffix and let the residual enforce the original anchor.
+        String remotePattern = fullTextMode == SAFE && pattern.toStringUtf8().endsWith("$") ? translation.pattern() + ".*" : translation.pattern();
+        ElasticsearchRemotePredicate predicate = new ElasticsearchRemotePredicate.Regexp(column.predicateName(), remotePattern);
         if (fullTextMode == SAFE) {
             if (!ElasticsearchPredicateComposer.isWithinRequestBudget(predicate, policy)) {
                 return ElasticsearchPredicateTranslation.residual(source, UNSUPPORTED_EXPRESSION);

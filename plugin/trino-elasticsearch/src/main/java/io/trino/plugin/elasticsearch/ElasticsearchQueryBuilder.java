@@ -62,8 +62,15 @@ public final class ElasticsearchQueryBuilder
     {
         requireNonNull(diagnostics, "diagnostics is null");
         JsonNode query = buildSearchQuery(table);
-        diagnostics.recordRenderedQuery(table.remotePredicate(), query.toString().getBytes(UTF_8).length);
+        ObjectNode runtimeMappings = runtimeMappings(table);
+        int runtimeBytes = runtimeMappings.isEmpty() ? 0 : runtimeMappings.toString().getBytes(UTF_8).length + 32;
+        diagnostics.recordRenderedQuery(table.remotePredicate(), query.toString().getBytes(UTF_8).length + runtimeBytes);
         return query;
+    }
+
+    public static ObjectNode runtimeMappings(ElasticsearchTableHandle table)
+    {
+        return ElasticsearchRemotePredicateQueryBuilder.runtimeMappings(table.remotePredicate());
     }
 
     public static JsonNode buildSearchQuery(ElasticsearchTableHandle table)
