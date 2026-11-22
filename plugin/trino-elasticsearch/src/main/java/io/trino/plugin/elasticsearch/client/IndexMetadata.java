@@ -16,9 +16,11 @@ package io.trino.plugin.elasticsearch.client;
 import com.fasterxml.jackson.annotation.JsonSubTypes;
 import com.fasterxml.jackson.annotation.JsonTypeInfo;
 import com.google.common.collect.ImmutableList;
+import com.google.common.collect.ImmutableSet;
 
 import java.util.List;
 import java.util.Optional;
+import java.util.Set;
 
 import static com.google.common.base.Preconditions.checkArgument;
 import static java.util.Objects.requireNonNull;
@@ -30,8 +32,13 @@ public record IndexMetadata(ObjectType schema)
         requireNonNull(schema, "schema is null");
     }
 
-    public record Field(boolean asRawJson, boolean isArray, String name, Type type, boolean supportsQueryShapes, boolean predicateMappingSafe)
+    public record Field(boolean asRawJson, boolean isArray, String name, Type type, boolean supportsQueryShapes, boolean predicateMappingSafe, Optional<InferredMapping> inferredMapping)
     {
+        public Field(boolean asRawJson, boolean isArray, String name, Type type, boolean supportsQueryShapes, boolean predicateMappingSafe)
+        {
+            this(asRawJson, isArray, name, type, supportsQueryShapes, predicateMappingSafe, Optional.empty());
+        }
+
         public Field(boolean asRawJson, boolean isArray, String name, Type type)
         {
             this(asRawJson, isArray, name, type, true, true);
@@ -50,6 +57,35 @@ public record IndexMetadata(ObjectType schema)
                     name);
             requireNonNull(name, "name is null");
             requireNonNull(type, "type is null");
+            requireNonNull(inferredMapping, "inferredMapping is null");
+        }
+    }
+
+    public enum InferredScalarMode
+    {
+        SOURCE,
+        MAPPED_SOURCE,
+        DOC_VALUES,
+        DOC_VALUES_IGNORE_MALFORMED;
+
+        public boolean usesDocValues()
+        {
+            return this == DOC_VALUES || this == DOC_VALUES_IGNORE_MALFORMED;
+        }
+    }
+
+    public record InferredMapping(int arrayDepth, Optional<String> primitiveType, Set<String> observedTypes, boolean integersFitDouble, InferredScalarMode scalarMode)
+    {
+        public InferredMapping(int arrayDepth, Optional<String> primitiveType, Set<String> observedTypes, boolean integersFitDouble)
+        {
+            this(arrayDepth, primitiveType, observedTypes, integersFitDouble, InferredScalarMode.SOURCE);
+        }
+
+        public InferredMapping
+        {
+            requireNonNull(primitiveType, "primitiveType is null");
+            requireNonNull(scalarMode, "scalarMode is null");
+            observedTypes = ImmutableSet.copyOf(requireNonNull(observedTypes, "observedTypes is null"));
         }
     }
 
@@ -102,7 +138,7 @@ public record IndexMetadata(ObjectType schema)
         public static boolean isDocValueType(String name)
         {
             return switch (name) {
-                case "byte", "short", "integer", "long", "float", "double", "keyword", "boolean", "ip" -> true;
+                case "byte", "short", "integer", "long", "float", "half_float", "double", "keyword", "boolean", "ip" -> true;
                 default -> false;
             };
         }
@@ -128,13 +164,26 @@ public record IndexMetadata(ObjectType schema)
         }
     }
 
-    public record ObjectType(List<Field> fields)
+    public record ObjectType(List<Field> fields, Optional<ObjectArrayMapping> arrayMapping)
             implements Type
     {
+        public ObjectType(List<Field> fields)
+        {
+            this(fields, Optional.empty());
+        }
+
         public ObjectType
         {
-            requireNonNull(fields, "fields is null");
-            fields = ImmutableList.copyOf(fields);
+            fields = ImmutableList.copyOf(requireNonNull(fields, "fields is null"));
+            requireNonNull(arrayMapping, "arrayMapping is null");
+        }
+    }
+
+    public record ObjectArrayMapping(boolean nested, Set<String> indexedFields)
+    {
+        public ObjectArrayMapping
+        {
+            indexedFields = ImmutableSet.copyOf(requireNonNull(indexedFields, "indexedFields is null"));
         }
     }
 

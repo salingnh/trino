@@ -332,6 +332,7 @@ final class ElasticsearchPredicateComposer
                 ResourceUsage child = resourceUsage(not.predicate());
                 yield new ResourceUsage(child.termValues(), child.queryLeaves(), child.booleanDepth() + 1);
             }
+            case ElasticsearchRemotePredicate.Nested nested -> booleanNodeUsage(List.of(nested.predicate()));
             case ElasticsearchRemotePredicate.Enforced enforced -> resourceUsage(enforced.predicate());
             case ElasticsearchRemotePredicate.Term _ -> new ResourceUsage(1, 1, 0);
             case ElasticsearchRemotePredicate.Terms terms -> new ResourceUsage(terms.values().size(), 1, 0);

@@ -45,6 +45,7 @@ final class ElasticsearchRemotePredicateSemantics
             case ElasticsearchRemotePredicate.And and -> effectiveEnforcement(and.predicates());
             case ElasticsearchRemotePredicate.Or or -> effectiveEnforcement(or.predicates());
             case ElasticsearchRemotePredicate.Not not -> effectiveEnforcement(not.predicate());
+            case ElasticsearchRemotePredicate.Nested nested -> effectiveEnforcement(nested.predicate());
             default -> EXACT;
         };
     }

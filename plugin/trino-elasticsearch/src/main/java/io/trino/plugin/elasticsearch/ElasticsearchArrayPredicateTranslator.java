@@ -14,6 +14,7 @@
 package io.trino.plugin.elasticsearch;
 
 import io.trino.plugin.elasticsearch.client.IndexMetadata.DateTimeType;
+import io.trino.plugin.elasticsearch.client.IndexMetadata.ObjectType;
 import io.trino.plugin.elasticsearch.client.IndexMetadata.PrimitiveType;
 import io.trino.plugin.elasticsearch.expression.ElasticsearchRemotePredicate;
 import io.trino.spi.block.Block;
@@ -61,7 +62,7 @@ import static io.trino.spi.type.TypeUtils.readNativeValue;
 import static java.util.Objects.requireNonNull;
 
 /**
- * Elasticsearch predicate translation for primitive arrays.
+ * Elasticsearch predicate translation for arrays.
  */
 final class ElasticsearchArrayPredicateTranslator
 {
@@ -204,6 +205,9 @@ final class ElasticsearchArrayPredicateTranslator
         }
 
         ElasticsearchColumnHandle column = column(assignments, arrayVariable);
+        if (column != null && column.elasticsearchType() instanceof ObjectType objectType) {
+            return ElasticsearchObjectArrayPredicateTranslator.translate(call, lambda, column, objectType, policy, arrayScriptPushdownEnabled);
+        }
         Optional<Type> elementType = arrayElementType(column);
         if (elementType.isEmpty()) {
             return ElasticsearchPredicateTranslation.unsupported(call, UNSUPPORTED_EXPRESSION);

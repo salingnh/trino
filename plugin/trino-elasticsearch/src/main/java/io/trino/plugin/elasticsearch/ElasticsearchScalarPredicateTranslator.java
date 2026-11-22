@@ -148,6 +148,7 @@ final class ElasticsearchScalarPredicateTranslator
             ElasticsearchPredicateCompositionPolicy policy)
     {
         if (!column.supportsPredicates()
+                || ElasticsearchMappedScalarPredicates.handles(column)
                 || (column.elasticsearchType() instanceof PrimitiveType mapping && !mapping.indexed() && !mapping.aggregatable())) {
             return Optional.empty();
         }

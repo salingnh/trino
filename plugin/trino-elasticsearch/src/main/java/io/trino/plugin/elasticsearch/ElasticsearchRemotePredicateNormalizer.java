@@ -101,6 +101,7 @@ final class ElasticsearchRemotePredicateNormalizer
             case ElasticsearchRemotePredicate.And and -> and(and.predicates(), events).orElseThrow();
             case ElasticsearchRemotePredicate.Or or -> or(or.predicates(), events).orElseThrow();
             case ElasticsearchRemotePredicate.Not not -> new ElasticsearchRemotePredicate.Not(normalize(not.predicate(), events));
+            case ElasticsearchRemotePredicate.Nested nested -> new ElasticsearchRemotePredicate.Nested(nested.path(), normalize(nested.predicate(), events));
             case ElasticsearchRemotePredicate.Enforced enforced -> new ElasticsearchRemotePredicate.Enforced(
                     normalize(enforced.predicate(), events),
                     enforced.enforcement());

@@ -160,6 +160,9 @@ final class TestElasticsearchProjectionPushdownPlans
     {
         String tableName = "test_simple_projection_pushdown" + randomNameSuffix();
         QualifiedObjectName completeTableName = new QualifiedObjectName(CATALOG, SCHEMA, tableName);
+        Request create = new Request("PUT", "/" + tableName);
+        create.setJsonEntity("{\"mappings\":{\"_meta\":{\"trino\":{}}}}");
+        client.performRequest(create);
 
         index(tableName, ImmutableMap.<String, Object>builder()
                 .put("col0", ImmutableMap.<String, Object>builder()

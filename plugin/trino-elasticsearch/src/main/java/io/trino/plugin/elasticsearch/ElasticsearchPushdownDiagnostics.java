@@ -190,6 +190,7 @@ public class ElasticsearchPushdownDiagnostics
                 notPredicates.increment();
                 recordRemotePredicateNode(not.predicate());
             }
+            case ElasticsearchRemotePredicate.Nested nested -> recordRemotePredicateNode(nested.predicate());
             case ElasticsearchRemotePredicate.Enforced enforced -> {
                 enforcementPredicates.increment();
                 recordRemotePredicateNode(enforced.predicate());

@@ -15,9 +15,12 @@ package io.trino.plugin.elasticsearch;
 
 import com.google.common.collect.ImmutableList;
 import io.trino.plugin.elasticsearch.client.ElasticsearchClient;
+import io.trino.plugin.elasticsearch.client.ElasticsearchClient.DocValueField;
 import io.trino.plugin.elasticsearch.client.SearchDocument;
 import io.trino.plugin.elasticsearch.decoders.Decoder;
+import io.trino.plugin.elasticsearch.decoders.InferredValueDecoder;
 import io.trino.spi.Page;
+import io.trino.spi.TrinoException;
 import io.trino.spi.block.Block;
 import io.trino.spi.block.BlockBuilder;
 import io.trino.spi.block.PageBuilderStatus;
@@ -33,11 +36,14 @@ import java.util.List;
 import java.util.Map;
 import java.util.Map.Entry;
 import java.util.Optional;
+import java.util.stream.Stream;
 
 import static com.google.common.collect.ImmutableList.toImmutableList;
 import static io.trino.plugin.elasticsearch.BuiltinColumns.SOURCE;
 import static io.trino.plugin.elasticsearch.BuiltinColumns.isBuiltinColumn;
+import static io.trino.spi.StandardErrorCode.TYPE_MISMATCH;
 import static io.trino.spi.type.TimestampType.TIMESTAMP_MILLIS;
+import static java.lang.String.format;
 import static java.util.Objects.requireNonNull;
 import static java.util.function.Predicate.isEqual;
 import static java.util.stream.Collectors.toList;
@@ -51,6 +57,7 @@ public class ScanQueryPageSource
     private final BlockBuilder[] columnBuilders;
     private final List<ElasticsearchColumnHandle> columns;
     private final ElasticsearchPushdownDiagnostics diagnostics;
+    private final String index;
     private long totalBytes;
 
     public ScanQueryPageSource(
@@ -75,6 +82,7 @@ public class ScanQueryPageSource
         requireNonNull(typeManager, "typeManager is null");
         requireNonNull(columns, "columns is null");
         this.diagnostics = requireNonNull(diagnostics, "diagnostics is null");
+        this.index = split.index();
 
         this.columns = ImmutableList.copyOf(columns);
 
@@ -88,9 +96,14 @@ public class ScanQueryPageSource
         // Columns to fetch as doc_fields instead of pulling them out of the JSON source
         // This is convenient for types such as DATE, TIMESTAMP, etc, which have multiple possible
         // representations in JSON, but a single normalized representation as doc_field.
-        List<String> documentFields = flattenFields(columns).entrySet().stream()
-                .filter(entry -> entry.getValue().equals(TIMESTAMP_MILLIS))
-                .map(Entry::getKey)
+        List<DocValueField> documentFields = Stream.concat(
+                        flattenFields(columns).entrySet().stream()
+                                .filter(entry -> entry.getValue().equals(TIMESTAMP_MILLIS))
+                                .map(entry -> new DocValueField(entry.getKey())),
+                        columns.stream()
+                                .filter(column -> column.decoderDescriptor() instanceof InferredValueDecoder.Descriptor inferred && inferred.scalarMode().usesDocValues())
+                                .map(column -> new DocValueField(column.name(), column.type().equals(TIMESTAMP_MILLIS) ? Optional.of("epoch_millis") : Optional.empty())))
+                .distinct()
                 .collect(toImmutableList());
 
         columnBuilders = columns.stream()
@@ -157,16 +170,19 @@ public class ScanQueryPageSource
 
             for (int i = 0; i < decoders.size(); i++) {
                 ElasticsearchColumnHandle columnHandle = columns.get(i);
-                if (columnHandle.path().size() == 1) {
-                    decoders.get(i).decode(document, () -> getField(source, columnHandle.path().getFirst()), columnBuilders[i]);
-                    continue;
+                try {
+                    Map<String, Object> parent = resolveField(source, columnHandle);
+                    decoders.get(i).decode(
+                            document,
+                            () -> parent == null ? null : getField(parent, columnHandle.path().getLast()),
+                            columnBuilders[i]);
                 }
-                Map<String, Object> resolvedField = resolveField(source, columnHandle);
-                decoders.get(i)
-                        .decode(
-                                document,
-                                () -> resolvedField == null ? null : getField(resolvedField, columnHandle.path().getLast()),
-                                columnBuilders[i]);
+                catch (TrinoException e) {
+                    if (!columnHandle.inferred() || !e.getErrorCode().equals(TYPE_MISMATCH.toErrorCode())) {
+                        throw e;
+                    }
+                    throw inferenceMismatch(index, document.id(), columnHandle, e);
+                }
             }
 
             totalBytes += document.sourceLength();
@@ -188,21 +204,30 @@ public class ScanQueryPageSource
         return SourcePage.create(new Page(blocks));
     }
 
+    private static TrinoException inferenceMismatch(String index, String documentId, ElasticsearchColumnHandle column, TrinoException cause)
+    {
+        return new TrinoException(TYPE_MISMATCH, format(
+                "Inferred schema for Elasticsearch index '%s', document '%s', column '%s' (%s) did not match _source. %s. Provide _meta.trino for this index (use asRawJson for mixed shapes).",
+                index,
+                documentId,
+                column.name(),
+                column.type(),
+                cause.getMessage()), cause);
+    }
+
+    @SuppressWarnings("unchecked")
     private static Map<String, Object> resolveField(Map<String, Object> document, ElasticsearchColumnHandle columnHandle)
     {
-        if (document == null) {
-            return null;
-        }
-        Map<String, Object> value = (Map<String, Object>) getField(document, columnHandle.path().getFirst());
-        if (value != null) {
-            for (int i = 1; i < columnHandle.path().size() - 1; i++) {
-                value = (Map<String, Object>) getField(value, columnHandle.path().get(i));
-                if (value == null) {
-                    break;
-                }
+        Map<String, Object> current = document;
+        for (int i = 0; current != null && i < columnHandle.path().size() - 1; i++) {
+            String name = columnHandle.path().get(i);
+            Object value = getField(current, name);
+            if (value != null && !(value instanceof Map<?, ?>)) {
+                throw new TrinoException(TYPE_MISMATCH, format("Expected object for field '%s', found %s", String.join(".", columnHandle.path().subList(0, i + 1)), value.getClass().getSimpleName()));
             }
+            current = (Map<String, Object>) value;
         }
-        return value;
+        return current;
     }
 
     public static Object getField(Map<String, Object> document, String field)
@@ -231,7 +256,9 @@ public class ScanQueryPageSource
         Map<String, Type> result = new HashMap<>();
 
         for (ElasticsearchColumnHandle column : columns) {
-            flattenFields(result, column.name(), column.type());
+            if (!column.inferred()) {
+                flattenFields(result, column.name(), column.type());
+            }
         }
 
         return result;

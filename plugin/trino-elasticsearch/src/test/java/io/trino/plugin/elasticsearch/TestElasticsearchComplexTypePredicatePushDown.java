@@ -62,6 +62,7 @@ final class TestElasticsearchComplexTypePredicatePushDown
         String properties =
                 """
                 {
+                    "_meta": {"trino": {}},
                     "properties": {
                         "col": {
                             "type": "long"
@@ -178,6 +179,7 @@ final class TestElasticsearchComplexTypePredicatePushDown
         String properties =
                 """
                 {
+                    "_meta": {"trino": {}},
                     "properties": {
                         "col1Row": {
                             "properties": {

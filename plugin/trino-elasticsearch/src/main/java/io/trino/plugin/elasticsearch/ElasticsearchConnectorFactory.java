@@ -20,6 +20,7 @@ import io.trino.plugin.base.ConnectorContextModule;
 import io.trino.plugin.base.TypeDeserializerModule;
 import io.trino.plugin.base.jmx.ConnectorObjectNameGeneratorModule;
 import io.trino.plugin.base.jmx.MBeanServerModule;
+import io.trino.plugin.elasticsearch.client.ElasticsearchClient;
 import io.trino.spi.connector.Connector;
 import io.trino.spi.connector.ConnectorContext;
 import io.trino.spi.connector.ConnectorFactory;
@@ -64,6 +65,10 @@ public class ElasticsearchConnectorFactory
                 .setRequiredConfigurationProperties(config)
                 .initialize();
 
-        return injector.getInstance(ElasticsearchConnector.class);
+        ElasticsearchConnector connector = injector.getInstance(ElasticsearchConnector.class);
+        if (context.getCurrentNode().isCoordinator()) {
+            injector.getInstance(ElasticsearchClient.class).initializeSchemaInference();
+        }
+        return connector;
     }
 }

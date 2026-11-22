@@ -168,6 +168,9 @@ final class ElasticsearchDynamicFilterPlanner
         if (!column.supportsPredicates() || !ElasticsearchRemotePredicateTranslator.canTranslateDomain(domain)) {
             return Optional.empty();
         }
+        if (ElasticsearchMappedScalarPredicates.handles(column)) {
+            return ElasticsearchRemotePredicateTranslator.translateDomain(column, domain);
+        }
         return planExactDomain(column, domain);
     }
 
@@ -239,6 +242,7 @@ final class ElasticsearchDynamicFilterPlanner
             case ElasticsearchRemotePredicate.And and -> and.predicates().stream().mapToLong(ElasticsearchDynamicFilterPlanner::countPushedValues).sum();
             case ElasticsearchRemotePredicate.Or or -> or.predicates().stream().mapToLong(ElasticsearchDynamicFilterPlanner::countPushedValues).sum();
             case ElasticsearchRemotePredicate.Not not -> countPushedValues(not.predicate());
+            case ElasticsearchRemotePredicate.Nested nested -> countPushedValues(nested.predicate());
             case ElasticsearchRemotePredicate.Enforced enforced -> countPushedValues(enforced.predicate());
             case ElasticsearchRemotePredicate.Term _ -> 1;
             case ElasticsearchRemotePredicate.Terms terms -> terms.values().size();
@@ -259,6 +263,7 @@ final class ElasticsearchDynamicFilterPlanner
             case ElasticsearchRemotePredicate.And and -> and.predicates().stream().mapToLong(ElasticsearchDynamicFilterPlanner::countTermsPredicates).sum();
             case ElasticsearchRemotePredicate.Or or -> or.predicates().stream().mapToLong(ElasticsearchDynamicFilterPlanner::countTermsPredicates).sum();
             case ElasticsearchRemotePredicate.Not not -> countTermsPredicates(not.predicate());
+            case ElasticsearchRemotePredicate.Nested nested -> countTermsPredicates(nested.predicate());
             case ElasticsearchRemotePredicate.Enforced enforced -> countTermsPredicates(enforced.predicate());
             case ElasticsearchRemotePredicate.Terms _ -> 1;
             case ElasticsearchRemotePredicate.Term _,

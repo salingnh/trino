@@ -71,6 +71,7 @@ public class ElasticsearchConfig
     private int port = 9200;
     private String defaultSchema = "default";
     private int scrollSize = 1_000;
+    private boolean schemaInferenceEnabled = true;
     private SearchStrategy searchStrategy = SearchStrategy.SCROLL;
     private ResponseDecoder responseDecoder = ResponseDecoder.MATERIALIZED;
     private Duration scrollTimeout = new Duration(1, MINUTES);
@@ -587,6 +588,19 @@ public class ElasticsearchConfig
     public ElasticsearchConfig setArrayScriptPushdownEnabled(boolean arrayScriptPushdownEnabled)
     {
         this.arrayScriptPushdownEnabled = arrayScriptPushdownEnabled;
+        return this;
+    }
+
+    public boolean isSchemaInferenceEnabled()
+    {
+        return schemaInferenceEnabled;
+    }
+
+    @Config("elasticsearch.schema-inference.enabled")
+    @ConfigDescription("Infer schema from source documents for indices without _meta.trino")
+    public ElasticsearchConfig setSchemaInferenceEnabled(boolean schemaInferenceEnabled)
+    {
+        this.schemaInferenceEnabled = schemaInferenceEnabled;
         return this;
     }
 

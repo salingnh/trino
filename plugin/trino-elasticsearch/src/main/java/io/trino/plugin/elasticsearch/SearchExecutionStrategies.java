@@ -31,7 +31,7 @@ final class SearchExecutionStrategies
             ElasticsearchTableHandle table,
             ElasticsearchSplit split,
             Optional<List<String>> fields,
-            List<String> documentFields,
+            List<ElasticsearchClient.DocValueField> documentFields,
             ElasticsearchPushdownDiagnostics diagnostics)
     {
         JsonNode query = buildSearchQuery(table, diagnostics);
