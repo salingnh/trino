@@ -18,6 +18,7 @@ import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.node.JsonNodeType;
 import com.fasterxml.jackson.databind.node.ObjectNode;
 import com.google.common.collect.ImmutableList;
+import com.google.common.collect.Lists;
 import io.trino.plugin.elasticsearch.client.IndexMetadata.Field;
 import io.trino.plugin.elasticsearch.client.IndexMetadata.InferredMapping;
 import io.trino.plugin.elasticsearch.client.IndexMetadata.InferredScalarMode;
@@ -43,6 +44,8 @@ import static io.trino.plugin.elasticsearch.client.IndexMetadata.InferredScalarM
 
 final class ElasticsearchSchemaInference
 {
+    private static final int MAX_SAMPLE_BATCH_SIZE = 16;
+
     private ElasticsearchSchemaInference() {}
 
     static boolean needsInference(JsonNode mappings)
@@ -52,7 +55,7 @@ final class ElasticsearchSchemaInference
     }
 
     // A query per missing path avoids drawing the same three documents for unrelated sparse fields.
-    static ObjectType infer(ObjectType schema, JsonNode index, Function<ObjectNode, List<Sample>> search)
+    static ObjectType infer(ObjectType schema, JsonNode index, List<Sample> initialSamples, Function<List<ObjectNode>, List<Sample>> search)
     {
         JsonNode mappings = index.path("mappings");
         JsonNode properties = mappings.path("properties");
@@ -72,12 +75,16 @@ final class ElasticsearchSchemaInference
                         ignoreMalformed))
                 .toList();
         Set<String> sampledIds = new HashSet<>();
-        observe(fields, sampledIds, search.apply(instance.objectNode().set("match_all", instance.objectNode())));
+        observe(fields, sampledIds, initialSamples);
         ImmutableList.Builder<SampleField> missing = ImmutableList.builder();
         fields.forEach(field -> field.collectMissing(missing));
-        for (SampleField field : missing.build()) {
-            if (!field.hasValueSample()) {
-                observe(fields, sampledIds, search.apply(field.existsQuery()));
+        for (List<SampleField> batch : Lists.partition(missing.build(), MAX_SAMPLE_BATCH_SIZE)) {
+            List<ObjectNode> queries = batch.stream()
+                    .filter(field -> !field.hasValueSample())
+                    .map(SampleField::existsQuery)
+                    .toList();
+            if (!queries.isEmpty()) {
+                observe(fields, sampledIds, search.apply(queries));
             }
         }
         return new ObjectType(fields.stream().map(SampleField::resolve).toList());

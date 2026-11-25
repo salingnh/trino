@@ -502,7 +502,6 @@ public abstract class BaseElasticsearchConnectorTest
         String properties =
                 """
                 {
-                  "_meta": {"trino": {}},
                   "properties": {
                     "text_bounded": { "type": "text", "fields": { "keyword": { "type": "keyword", "ignore_above": 256 } } },
                     "id": { "type": "keyword" }
@@ -1425,7 +1424,7 @@ public abstract class BaseElasticsearchConnectorTest
                 .buildOrThrow());
 
         assertThat(query("SELECT byte_column, short_column, integer_column, long_column, float_column, scaled_float_column, double_column FROM emptynumeric"))
-                .matches("VALUES (CAST(NULL AS TINYINT), CAST(NULL AS SMALLINT), CAST(NULL AS INTEGER), CAST(NULL AS BIGINT), CAST(NULL AS DOUBLE), CAST(NULL AS DOUBLE), CAST(NULL AS DOUBLE))");
+                .matches("VALUES (CAST(NULL AS TINYINT), CAST(NULL AS SMALLINT), CAST(NULL AS INTEGER), CAST(NULL AS BIGINT), CAST(NULL AS REAL), CAST(NULL AS DOUBLE), CAST(NULL AS DOUBLE))");
 
         deleteIndex(indexName);
     }
@@ -1730,7 +1729,7 @@ public abstract class BaseElasticsearchConnectorTest
         MaterializedResult expected = resultBuilder(rows.getTypes())
                 .row(
                         true,
-                        1.0d,
+                        1.0f,
                         1.0d,
                         1,
                         1L,
@@ -2009,7 +2008,7 @@ public abstract class BaseElasticsearchConnectorTest
                 """);
 
         MaterializedResult expected = resultBuilder(rows.getTypes())
-                .row(1.0d, 1.0d, 1, 1L)
+                .row(1.0f, 1.0d, 1, 1L)
                 .build();
 
         assertThat(rows.getMaterializedRows()).isEqualTo(expected.getMaterializedRows());

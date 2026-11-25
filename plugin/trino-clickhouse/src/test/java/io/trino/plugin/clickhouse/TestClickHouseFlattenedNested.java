@@ -32,16 +32,16 @@ class TestClickHouseFlattenedNested
     {
         List<NestedColumn> columns = group(
                 new PhysicalColumn("id", "UInt32"),
-                new PhysicalColumn("users.name", "Array(Nullable(String))"),
+                new PhysicalColumn("users.select", "Array(Nullable(String))"),
                 new PhysicalColumn("users.age", "Array(UInt32)"));
 
         assertThat(columns).hasSize(1);
         NestedColumn users = columns.getFirst();
         assertThat(users.handle().getColumnName()).isEqualTo("users");
         assertThat(users.handle().getColumnType()).isEqualTo(new ArrayType(RowType.rowType(
-                RowType.field("name", VARCHAR),
+                RowType.field("select", VARCHAR),
                 RowType.field("age", BIGINT))));
-        assertThat(users.definition()).isEqualTo("CAST(arrayZip(\"users.name\", \"users.age\") AS Array(Tuple(name Nullable(String), age UInt32))) AS \"users\"");
+        assertThat(users.definition()).isEqualTo("CAST(arrayZipUnaligned(\"users.select\", \"users.age\") AS Array(Tuple(\"select\" Nullable(String), \"age\" Nullable(UInt32)))) AS \"users\"");
     }
 
     @Test

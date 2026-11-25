@@ -378,7 +378,7 @@ public class ElasticsearchMetadata
                 mapping = new TypeAndDecoder(TIMESTAMP_MILLIS, new TimestampDecoder.Descriptor(path));
             }
             else if (inferred.scalarMode().usesDocValues() && decodedType instanceof PrimitiveType primitive &&
-                    (primitive.name().equals("float") || primitive.name().equals("half_float"))) {
+                    (primitive.name().equals("half_float") || (primitive.name().equals("float") && inferred.observedTypes().contains("INTEGER")))) {
                 mapping = new TypeAndDecoder(DOUBLE, new DoubleDecoder.Descriptor(path));
             }
             else {
@@ -703,14 +703,23 @@ public class ElasticsearchMetadata
                 .filter(column -> column.path().size() == 1)
                 // Array columns are excluded: value_count aggregates every array element and can exceed the row count
                 .filter(column -> !(column.type() instanceof ArrayType))
-                .filter(column -> !column.inferred())
                 .filter(column -> !BuiltinColumns.isBuiltinColumn(column.name()))
                 .filter(column -> isAggregatable(column.elasticsearchType()))
-                // Statistics must describe the values returned from _source, not rounded doc values.
-                .filter(column -> !(column.elasticsearchType() instanceof ScaledFloatType))
+                .filter(ElasticsearchMetadata::statisticsValuesMatchScan)
                 .filter(column -> referenced.contains(column.name()) || referenced.contains(column.predicateName()))
                 .limit(statisticsMaxColumns)
                 .collect(toImmutableList());
+    }
+
+    private static boolean statisticsValuesMatchScan(ElasticsearchColumnHandle column)
+    {
+        if (column.inferred()) {
+            return column.supportsQueryShapes()
+                    && column.decoderDescriptor() instanceof InferredValueDecoder.Descriptor inferred
+                    && inferred.scalarMode().usesDocValues();
+        }
+        // The explicit mapping path exposes the original source value for scaled_float.
+        return !(column.elasticsearchType() instanceof ScaledFloatType);
     }
 
     // Fields the query references directly — the columns whose per-column statistics the optimizer is most likely to use.

@@ -27,6 +27,7 @@ import java.math.BigDecimal;
 import java.util.Optional;
 
 import static io.trino.plugin.elasticsearch.ElasticsearchRemotePredicateTranslator.disjunction;
+import static io.trino.spi.type.DoubleType.DOUBLE;
 import static io.trino.spi.type.Timestamps.MICROSECONDS_PER_MILLISECOND;
 import static java.lang.Math.floorDiv;
 
@@ -40,7 +41,7 @@ final class ElasticsearchMappedScalarPredicates
                 column.decoderDescriptor() instanceof InferredValueDecoder.Descriptor inferred && inferred.scalarMode().usesDocValues() &&
                 switch (column.elasticsearchType()) {
                     case DateTimeType _, ScaledFloatType _ -> true;
-                    case PrimitiveType primitive -> primitive.name().equals("float") || primitive.name().equals("half_float");
+                    case PrimitiveType primitive -> column.type().equals(DOUBLE) && (primitive.name().equals("float") || primitive.name().equals("half_float"));
                     default -> false;
                 };
     }

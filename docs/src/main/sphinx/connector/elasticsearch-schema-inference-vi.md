@@ -177,9 +177,11 @@ Mỗi cột chỉ có thể bật một trong hai cờ `asRawJson` và `isArray`
 (elasticsearch-date-types-vi)=
 ### Kiểu ngày giờ
 
-Connector hỗ trợ `date` với định dạng mặc định. Các trường [ngày][date] có
-thuộc tính [`format`][format] bị bỏ qua, kể cả khi trường đó dùng một định dạng
-[có sẵn][built-in date formats] hoặc [tùy chỉnh][custom date formats].
+Connector hỗ trợ [`date`][date] với định dạng mặc định. Khi bật
+[suy luận schema](#elasticsearch-schema-inference-vi), trường có định dạng
+[có sẵn][built-in date formats] hoặc [tùy chỉnh][custom date formats] cũng có
+thể ánh xạ thành `TIMESTAMP(3)` nếu bật doc values. Với schema khai báo
+tường minh, connector bỏ qua trường có thuộc tính [`format`][format].
 
 (elasticsearch-raw-json-transform-vi)=
 ### Đọc dưới dạng JSON thô
@@ -274,13 +276,18 @@ elasticsearch.schema-inference.enabled=false
 
 #### Cách lấy mẫu
 
-1. Khi catalog khởi tạo, coordinator đọc mapping để xác định các trường
-   của index rồi lấy tối đa ba document.
-2. Với mỗi trường trong mapping vẫn thiếu giá trị mẫu và có thể tìm kiếm,
-   coordinator dùng truy vấn `exists` để lấy thêm tối đa ba document. Mỗi
-   document có thể cung cấp mẫu cho nhiều trường.
-3. Connector chọn kiểu Trino từ các giá trị trong `_source` rồi lưu schema vào
-   bộ nhớ đệm. Trino giữ cùng một schema trong suốt truy vấn.
+1. Ở lần đọc metadata đầu tiên của index, coordinator đọc mapping
+   và lấy tối đa ba document.
+2. Với mỗi trường còn thiếu mẫu và có thể tìm kiếm, coordinator dùng truy vấn
+   `exists` để lấy thêm tối đa ba document. Các truy vấn được gom theo lô
+   tối đa 16 truy vấn.
+3. Coordinator dùng `_source` để chọn kiểu Trino và lưu tối đa 512 mục schema
+   trong năm phút. Cache phân biệt theo thiết lập pushdown keyword subfield
+   có `ignore_above`. Khi mapping thay đổi, connector lấy mẫu lại. Trino giữ
+   cùng một schema trong suốt truy vấn.
+
+Với index rỗng, connector công bố kiểu theo mapping và thử lấy mẫu lại ở
+lần đọc metadata tiếp theo.
 
 Truy vấn `exists` kiểm tra giá trị đã được lập chỉ mục. Một trường có thể
 xuất hiện trong `_source` mà vẫn thiếu giá trị trong chỉ mục, chẳng hạn khi
@@ -334,9 +341,10 @@ hỗ trợ, kể cả chuỗi rỗng biểu thị false. Khi có doc values, con
 boolean đã lập chỉ mục. Với `date` có doc values, connector đọc
 `TIMESTAMP(3)` từ epoch mili giây theo UTC, kể cả khi mapping đặt định dạng
 tùy chỉnh như `yyyy/MM/dd HH:mm:ss||epoch_second`.
-Các trường suy luận từ `float`, `half_float` và `scaled_float` dùng
-`DOUBLE` theo độ chính xác của doc values. Ví dụ, `scaled_float` với hệ số
-100 đọc thành 2,34 từ giá trị đầu vào 2,341.
+Trường có mapping `float` dùng `REAL` nếu mẫu chưa thấy số nguyên. Khi mẫu
+có số nguyên, trường dùng `DOUBLE`. `half_float` và `scaled_float` dùng
+`DOUBLE`. Connector đọc độ chính xác đã lưu từ doc values. Ví dụ,
+`scaled_float` với hệ số 100 đọc thành 2,34 từ giá trị đầu vào 2,341.
 
 Khi chỉ thấy một kiểu giá trị, connector giữ kiểu từ mapping nếu tương
 thích và được hỗ trợ. Nếu mapping của trường nguyên thủy không tương
@@ -365,9 +373,8 @@ trị nguyên thủy trong cùng một trường đã được mapping.
 
 ##### Xung đột giữa các index
 
-Khi truy vấn alias hoặc wildcard có ít nhất một index thành viên cần suy
-luận, connector suy luận riêng các index đủ điều kiện và gộp kết quả với
-schema khai báo của các index khác. Trường chỉ xuất hiện trong một
+Khi truy vấn alias hoặc wildcard, connector gộp schema của tất cả index
+thành viên. Mỗi index đóng góp schema đã khai báo hoặc schema đã suy luận. Trường chỉ xuất hiện trong một
 schema giữ nguyên kiểu. Trường xuất hiện trong nhiều schema được gộp
 theo các quy tắc sau.
 

@@ -20,16 +20,19 @@ import com.fasterxml.jackson.databind.node.JsonNodeFactory;
 import com.fasterxml.jackson.databind.node.NullNode;
 import com.fasterxml.jackson.databind.node.ObjectNode;
 import com.google.common.annotations.VisibleForTesting;
+import com.google.common.cache.Cache;
 import com.google.common.collect.ImmutableList;
 import com.google.common.collect.ImmutableMap;
 import com.google.common.collect.ImmutableSet;
 import com.google.common.collect.Sets;
+import com.google.common.util.concurrent.UncheckedExecutionException;
 import com.google.inject.Inject;
 import io.airlift.json.JsonCodec;
 import io.airlift.json.JsonMapperProvider;
 import io.airlift.log.Logger;
 import io.airlift.stats.TimeStat;
 import io.airlift.units.Duration;
+import io.trino.cache.EvictableCacheBuilder;
 import io.trino.plugin.elasticsearch.AwsSecurityConfig;
 import io.trino.plugin.elasticsearch.ElasticsearchConfig;
 import io.trino.plugin.elasticsearch.ElasticsearchPushdownDiagnostics;
@@ -80,7 +83,6 @@ import java.util.Optional;
 import java.util.OptionalDouble;
 import java.util.OptionalLong;
 import java.util.Set;
-import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicReference;
@@ -90,9 +92,11 @@ import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 
 import static com.google.common.base.Preconditions.checkArgument;
+import static com.google.common.base.Throwables.throwIfUnchecked;
 import static com.google.common.collect.ImmutableMap.toImmutableMap;
 import static io.airlift.concurrent.Threads.daemonThreadsNamed;
 import static io.airlift.json.JsonCodec.jsonCodec;
+import static io.trino.cache.CacheUtils.uncheckedCacheGet;
 import static io.trino.plugin.base.ssl.SslUtils.createSSLContext;
 import static io.trino.plugin.elasticsearch.ElasticsearchErrorCode.ELASTICSEARCH_CONNECTION_ERROR;
 import static io.trino.plugin.elasticsearch.ElasticsearchErrorCode.ELASTICSEARCH_INVALID_METADATA;
@@ -136,7 +140,10 @@ public class ElasticsearchClient
     private final boolean ignorePublishAddress;
     private final boolean keywordSubfieldPushdownWithIgnoreAbove;
     private final boolean schemaInferenceEnabled;
-    private final Map<String, InferredSchema> inferredSchemas = new ConcurrentHashMap<>();
+    private final Cache<InferenceKey, Optional<IndexMetadata.ObjectType>> inferredSchemas = EvictableCacheBuilder.newBuilder()
+            .maximumSize(512)
+            .expireAfterWrite(java.time.Duration.ofMinutes(5))
+            .build();
 
     private final TimeStat searchStats = new TimeStat(MILLISECONDS);
     private final TimeStat nextPageStats = new TimeStat(MILLISECONDS);
@@ -175,30 +182,6 @@ public class ElasticsearchClient
         this.tlsEnabled = config.isTlsEnabled();
         this.keywordSubfieldPushdownWithIgnoreAbove = config.isKeywordSubfieldPushdownWithIgnoreAbove();
         this.schemaInferenceEnabled = config.isSchemaInferenceEnabled();
-    }
-
-    public void initializeSchemaInference()
-    {
-        if (!schemaInferenceEnabled) {
-            return;
-        }
-
-        List<String> indexes;
-        try {
-            indexes = getIndexes(false);
-        }
-        catch (TrinoException e) {
-            LOG.warn(e, "Could not list Elasticsearch indices for schema inference during catalog initialization");
-            return;
-        }
-        for (String index : indexes) {
-            try {
-                getIndexMetadata(index);
-            }
-            catch (TrinoException e) {
-                LOG.warn(e, "Could not initialize schema for Elasticsearch index '%s'", index);
-            }
-        }
     }
 
     @PostConstruct
@@ -533,18 +516,11 @@ public class ElasticsearchClient
                 if (indices.isEmpty()) {
                     return new IndexMetadata(new IndexMetadata.ObjectType(ImmutableList.of()));
                 }
-                IndexMetadata.ObjectType schema;
-                if (infer && indices.properties().stream().anyMatch(entry -> ElasticsearchSchemaInference.needsInference(entry.getValue().path("mappings")))) {
-                    schema = ElasticsearchSchemaInference.merge(indices.properties().stream()
-                            .map(entry -> schemaForIndex(entry.getKey(), entry.getValue(), useBoundedKeyword))
-                            .toList());
-                }
-                else {
-                    if (infer) {
-                        indices.properties().forEach(entry -> inferredSchemas.remove(entry.getKey()));
-                    }
-                    schema = mappedSchema(indices.elements().next().path("mappings"), useBoundedKeyword);
-                }
+                IndexMetadata.ObjectType schema = ElasticsearchSchemaInference.merge(indices.properties().stream()
+                        .map(entry -> infer
+                                ? schemaForIndex(entry.getKey(), entry.getValue(), useBoundedKeyword)
+                                : mappedSchema(entry.getValue().path("mappings"), useBoundedKeyword))
+                        .toList());
                 if (statisticsRequest) {
                     return new IndexMetadata(schema);
                 }
@@ -580,48 +556,96 @@ public class ElasticsearchClient
     {
         JsonNode mappings = definition.path("mappings");
         if (!ElasticsearchSchemaInference.needsInference(mappings)) {
-            inferredSchemas.remove(index);
             return mappedSchema(mappings, useBoundedKeyword);
         }
 
-        return inferredSchemas.compute(index, (_, existing) -> {
-            if (existing != null && existing.definition().equals(definition)) {
-                return existing;
-            }
-            IndexMetadata.ObjectType mapped = parseType(mappings.path("properties"), NullNode.getInstance(), false, true);
-            if (mapped.fields().isEmpty() || !mappings.path("_source").path("enabled").asBoolean(true)) {
-                return new InferredSchema(definition, mapped);
-            }
-            return new InferredSchema(definition, ElasticsearchSchemaInference.infer(mapped, definition, query -> fetchSchemaSample(index, query)));
-        }).schema();
+        InferenceKey key = new InferenceKey(index, useBoundedKeyword, definition);
+        Optional<IndexMetadata.ObjectType> cached;
+        try {
+            cached = uncheckedCacheGet(inferredSchemas, key, () -> inferSchema(index, definition, useBoundedKeyword));
+        }
+        catch (UncheckedExecutionException e) {
+            throwIfUnchecked(e.getCause());
+            throw e;
+        }
+        if (cached.isEmpty()) {
+            // Use mapping types for an empty index and retry on the next metadata lookup.
+            inferredSchemas.asMap().remove(key, cached);
+            return mappedSchema(mappings, useBoundedKeyword);
+        }
+        return cached.orElseThrow();
     }
 
-    private List<ElasticsearchSchemaInference.Sample> fetchSchemaSample(String index, ObjectNode query)
+    private Optional<IndexMetadata.ObjectType> inferSchema(String index, JsonNode definition, boolean useBoundedKeyword)
+    {
+        JsonNode mappings = definition.path("mappings");
+        IndexMetadata.ObjectType mapped = parseType(mappings.path("properties"), NullNode.getInstance(), useBoundedKeyword, true);
+        if (mapped.fields().isEmpty() || !mappings.path("_source").path("enabled").asBoolean(true)) {
+            return Optional.of(mapped);
+        }
+        List<ElasticsearchSchemaInference.Sample> samples = fetchSchemaSample(index, JSON.objectNode().set("match_all", JSON.objectNode()));
+        if (samples.isEmpty()) {
+            return Optional.empty();
+        }
+        return Optional.of(ElasticsearchSchemaInference.infer(mapped, definition, samples, queries -> fetchSchemaSamples(index, queries)));
+    }
+
+    private static ObjectNode schemaSampleRequest(ObjectNode query)
     {
         ObjectNode body = JSON.objectNode();
         body.put("size", 3);
         body.put("track_total_hits", false);
         body.putArray("sort").add("_doc");
         body.set("query", query);
+        return body;
+    }
 
+    private List<ElasticsearchSchemaInference.Sample> fetchSchemaSample(String index, ObjectNode query)
+    {
         try {
             Response response = client.performRequestWithTimeout(
                     "POST",
                     format("/%s/_search", index),
                     ImmutableMap.of("allow_partial_search_results", "false"),
-                    new StringEntity(body.toString(), UTF_8),
+                    new StringEntity(schemaSampleRequest(query).toString(), UTF_8),
                     requestTimeoutMillis,
                     new BasicHeader("Content-Type", "application/json"));
             try (InputStream stream = response.getEntity().getContent()) {
-                JsonNode result = JSON_MAPPER.readTree(stream);
-                if (result == null || result.path("timed_out").asBoolean() || result.path("_shards").path("failed").asInt() > 0 || !result.path("hits").path("hits").isArray()) {
-                    throw new TrinoException(ELASTICSEARCH_INVALID_METADATA, format("Incomplete schema sample for Elasticsearch index '%s'. Provide _meta.trino for this index or retry.", index));
+                return readSchemaSamples(index, JSON_MAPPER.readTree(stream));
+            }
+        }
+        catch (IOException e) {
+            throw new TrinoException(ELASTICSEARCH_INVALID_METADATA, format("Could not sample Elasticsearch index '%s' for schema inference. Provide _meta.trino for this index or retry.", index), e);
+        }
+    }
+
+    private List<ElasticsearchSchemaInference.Sample> fetchSchemaSamples(String index, List<ObjectNode> queries)
+    {
+        if (queries.size() == 1) {
+            return fetchSchemaSample(index, queries.getFirst());
+        }
+
+        StringBuilder payload = new StringBuilder();
+        for (ObjectNode query : queries) {
+            payload.append("{}\n").append(schemaSampleRequest(query)).append('\n');
+        }
+        try {
+            Response response = client.performRequestWithTimeout(
+                    "POST",
+                    format("/%s/_msearch", index),
+                    ImmutableMap.of("max_concurrent_searches", "2"),
+                    new StringEntity(payload.toString(), UTF_8),
+                    requestTimeoutMillis,
+                    new BasicHeader("Content-Type", "application/x-ndjson"));
+            try (InputStream stream = response.getEntity().getContent()) {
+                JsonNode responseBody = JSON_MAPPER.readTree(stream);
+                JsonNode results = responseBody == null ? null : responseBody.path("responses");
+                if (results == null || !results.isArray() || results.size() != queries.size()) {
+                    throw incompleteSchemaSample(index);
                 }
                 ImmutableList.Builder<ElasticsearchSchemaInference.Sample> samples = ImmutableList.builder();
-                for (JsonNode hit : result.path("hits").path("hits")) {
-                    if (hit.path("_source").isObject()) {
-                        samples.add(new ElasticsearchSchemaInference.Sample(hit.path("_id").asText(), hit.path("_source")));
-                    }
+                for (JsonNode result : results) {
+                    samples.addAll(readSchemaSamples(index, result));
                 }
                 return samples.build();
             }
@@ -631,7 +655,26 @@ public class ElasticsearchClient
         }
     }
 
-    private record InferredSchema(JsonNode definition, IndexMetadata.ObjectType schema) {}
+    private static List<ElasticsearchSchemaInference.Sample> readSchemaSamples(String index, JsonNode result)
+    {
+        if (result == null || result.path("timed_out").asBoolean() || result.path("_shards").path("failed").asInt() > 0 || !result.path("hits").path("hits").isArray()) {
+            throw incompleteSchemaSample(index);
+        }
+        ImmutableList.Builder<ElasticsearchSchemaInference.Sample> samples = ImmutableList.builder();
+        for (JsonNode hit : result.path("hits").path("hits")) {
+            if (hit.path("_source").isObject()) {
+                samples.add(new ElasticsearchSchemaInference.Sample(hit.path("_id").asText(), hit.path("_source")));
+            }
+        }
+        return samples.build();
+    }
+
+    private static TrinoException incompleteSchemaSample(String index)
+    {
+        return new TrinoException(ELASTICSEARCH_INVALID_METADATA, format("Incomplete schema sample for Elasticsearch index '%s'. Provide _meta.trino for this index or retry.", index));
+    }
+
+    private record InferenceKey(String index, boolean useBoundedKeyword, JsonNode definition) {}
 
     private Map<String, Set<String>> fetchIgnoredMalformedFields(String index)
     {

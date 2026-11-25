@@ -87,19 +87,19 @@ class TestElasticsearchInferredMetadata
             """;
 
     @Test
-    void testStartupSamplingMappingRefreshAndRead()
+    void testLazySamplingMappingRefreshAndRead()
             throws Exception
     {
         try (Server server = new Server(true)) {
-            server.client.initializeSchemaInference();
-            assertThat(server.samples).hasSize(2);
-            assertThat(server.samples).allSatisfy(request -> assertThat(request.path("size").asInt()).isEqualTo(3));
-            assertThat(server.samples.get(0).at("/query/match_all").isObject()).isTrue();
-            assertThat(server.samples.get(1).at("/query/exists/field").asText()).isEqualTo("users.license_plate");
+            assertThat(server.samples).isEmpty();
 
             server.metadata.beginQuery(server.session);
             var table = server.metadata.getTableHandle(server.session, new SchemaTableName("default", "events"), Optional.empty(), Optional.empty());
             assertThat(table).isNotNull();
+            assertThat(server.samples).hasSize(2);
+            assertThat(server.samples).allSatisfy(request -> assertThat(request.path("size").asInt()).isEqualTo(3));
+            assertThat(server.samples.get(0).at("/query/match_all").isObject()).isTrue();
+            assertThat(server.samples.get(1).at("/query/exists/field").asText()).isEqualTo("users.license_plate");
             Map<String, ColumnHandle> columns = server.metadata.getColumnHandles(server.session, table);
             ElasticsearchColumnHandle users = (ElasticsearchColumnHandle) columns.get("users");
             ElasticsearchColumnHandle flag = (ElasticsearchColumnHandle) columns.get("flag");
@@ -249,13 +249,11 @@ class TestElasticsearchInferredMetadata
             throws Exception
     {
         try (Server server = new Server(false)) {
-            server.client.initializeSchemaInference();
             assertThat(server.client.getIndexMetadata("events").schema().fields().getFirst().inferredMapping()).isEmpty();
             assertThat(server.samples).isEmpty();
         }
         try (Server server = new Server(true)) {
             server.explicit.set(true);
-            server.client.initializeSchemaInference();
             assertThat(server.client.getIndexMetadata("events").schema().fields().getFirst().inferredMapping()).isEmpty();
             assertThat(server.samples).isEmpty();
         }
@@ -266,8 +264,13 @@ class TestElasticsearchInferredMetadata
             throws Exception
     {
         try (Server server = new Server(true)) {
-            server.client.initializeSchemaInference();
-            assertThat(server.client.getIndexMetadata("empty").schema().fields().getFirst().asRawJson()).isTrue();
+            var empty = server.client.getIndexMetadata("empty").schema().fields().getFirst();
+            assertThat(empty.asRawJson()).isFalse();
+            assertThat(empty.inferredMapping()).isEmpty();
+            server.populated.set(true);
+            var populated = server.client.getIndexMetadata("empty").schema().fields().getFirst();
+            assertThat(populated.isArray()).isTrue();
+            assertThat(populated.inferredMapping()).isPresent();
             TrinoException failure = catchThrowableOfType(TrinoException.class, () -> server.client.getIndexMetadata("failed"));
             assertThat(failure.getErrorCode()).isEqualTo(ELASTICSEARCH_INVALID_METADATA.toErrorCode());
             assertThat(server.client.getIndexMetadata("events").schema().fields().getFirst().isArray()).isTrue();
@@ -282,6 +285,7 @@ class TestElasticsearchInferredMetadata
         private final ElasticsearchClient client;
         private final ElasticsearchMetadata metadata;
         private final TestingConnectorSession session;
+        private final AtomicBoolean populated = new AtomicBoolean();
         private final AtomicBoolean explicit = new AtomicBoolean();
         private final AtomicBoolean drift = new AtomicBoolean();
         private final AtomicBoolean scalarDrift = new AtomicBoolean();
@@ -307,9 +311,13 @@ class TestElasticsearchInferredMetadata
                         case "/failed" -> """
                                           {"failed":{"settings":{"index.uuid":"failed"},"mappings":{"properties":{"age":{"type":"long"}}}}}
                                           """;
-                        case "/empty/_search" -> """
-                                                 {"timed_out":false,"_shards":{"failed":0},"hits":{"hits":[]}}
-                                                 """;
+                        case "/empty/_search" -> populated.get()
+                                ? """
+                                  {"hits":{"hits":[{"_id":"1","_source":{"age":[1]}}]}}
+                                  """
+                                : """
+                                  {"timed_out":false,"_shards":{"failed":0},"hits":{"hits":[]}}
+                                  """;
                         case "/failed/_search" -> """
                                                   {"timed_out":true,"_shards":{"failed":0},"hits":{"hits":[]}}
                                                   """;

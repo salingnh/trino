@@ -85,16 +85,15 @@ class TestElasticsearchSchemaInference
                                 {"users":[{"city":["Hà Nội","Huế"]},{"age":28}]}
                                 """)),
                 List.of());
-        ObjectType result = ElasticsearchSchemaInference.infer(schema, mapping(properties), query -> {
-            queries.add(query);
-            return responses.get(queries.size() - 1);
+        ObjectType result = ElasticsearchSchemaInference.infer(schema, mapping(properties), responses.getFirst(), batch -> {
+            queries.addAll(batch);
+            return responses.get(1);
         });
 
-        assertThat(queries).hasSize(3);
-        assertThat(queries.get(0).has("match_all")).isTrue();
-        assertThat(queries.get(1).at("/nested/path").asText()).isEqualTo("users");
-        assertThat(queries.get(1).at("/nested/query/exists/field").asText()).isEqualTo("users.age");
-        assertThat(queries.get(2).at("/nested/query/exists/field").asText()).isEqualTo("users.missing");
+        assertThat(queries).hasSize(2);
+        assertThat(queries.get(0).at("/nested/path").asText()).isEqualTo("users");
+        assertThat(queries.get(0).at("/nested/query/exists/field").asText()).isEqualTo("users.age");
+        assertThat(queries.get(1).at("/nested/query/exists/field").asText()).isEqualTo("users.missing");
         Field users = result.fields().getFirst();
         assertThat(users.isArray()).isTrue();
         assertThat(users.asRawJson()).isFalse();
@@ -212,7 +211,7 @@ class TestElasticsearchSchemaInference
 
     private static ObjectType infer(ObjectType schema, List<Sample> samples)
     {
-        return ElasticsearchSchemaInference.infer(schema, mapping(JSON.createObjectNode()), query -> query.has("match_all") ? samples : List.of());
+        return ElasticsearchSchemaInference.infer(schema, mapping(JSON.createObjectNode()), samples, _ -> List.of());
     }
 
     private static String primitive(ObjectType result, int index)

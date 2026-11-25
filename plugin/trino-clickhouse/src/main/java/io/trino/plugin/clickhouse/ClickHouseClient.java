@@ -576,6 +576,13 @@ public class ClickHouseClient
     }
 
     @Override
+    public void renameColumn(ConnectorSession session, JdbcTableHandle handle, JdbcColumnHandle column, String newColumnName)
+    {
+        checkPhysicalColumn(session, handle, column);
+        super.renameColumn(session, handle, column, newColumnName);
+    }
+
+    @Override
     protected void renameColumn(ConnectorSession session, Connection connection, RemoteTableName remoteTableName, String remoteColumnName, String newRemoteColumnName)
             throws SQLException
     {
@@ -590,6 +597,7 @@ public class ClickHouseClient
     @Override
     public void dropColumn(ConnectorSession session, JdbcTableHandle handle, JdbcColumnHandle column)
     {
+        checkPhysicalColumn(session, handle, column);
         verify(handle.getAuthorization().isEmpty(), "Unexpected authorization is required for table: %s", handle);
         try (Connection connection = connectionFactory.openConnection(session)) {
             verify(connection.getAutoCommit());
@@ -620,6 +628,7 @@ public class ClickHouseClient
     @Override
     public void setColumnComment(ConnectorSession session, JdbcTableHandle handle, JdbcColumnHandle column, Optional<String> comment)
     {
+        checkPhysicalColumn(session, handle, column);
         String sql = format(
                 "ALTER TABLE %s%s COMMENT COLUMN %s %s",
                 quoted(handle.asPlainTable().getRemoteTableName()),
@@ -639,6 +648,16 @@ public class ClickHouseClient
     public void dropNotNullConstraint(ConnectorSession session, JdbcTableHandle handle, JdbcColumnHandle column)
     {
         throw new TrinoException(NOT_SUPPORTED, "This connector does not support dropping a not null constraint");
+    }
+
+    private void checkPhysicalColumn(ConnectorSession session, JdbcTableHandle table, JdbcColumnHandle column)
+    {
+        JdbcNamedRelationHandle relation = table.asPlainTable();
+        if (relation.getReadQueryPrefix().isPresent() && getFlattenedNestedColumns(session, relation.getRemoteTableName()).stream()
+                .map(NestedColumn::handle)
+                .anyMatch(column::equals)) {
+            throw new TrinoException(NOT_SUPPORTED, "Cannot alter reconstructed Nested column '%s'; alter its physical columns in ClickHouse".formatted(column.getColumnName()));
+        }
     }
 
     private static String clickhouseVarcharLiteral(String value)

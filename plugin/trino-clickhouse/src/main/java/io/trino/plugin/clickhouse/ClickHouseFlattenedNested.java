@@ -95,7 +95,8 @@ final class ClickHouseFlattenedNested
             if (type == null) {
                 return Optional.empty();
             }
-            tupleMembers.add(field + " " + (member.isNullable() ? "Nullable(" + type + ")" : type));
+            // Siblings added independently through ALTER can have their own default lengths.
+            tupleMembers.add(quote.apply(field) + " Nullable(" + type + ")");
         }
 
         String tupleArray = "Array(Tuple(" + String.join(", ", tupleMembers.build()) + "))";
@@ -111,7 +112,7 @@ final class ClickHouseFlattenedNested
                 .setNullable(false)
                 .build();
         String arrayArguments = members.stream().map(PhysicalColumn::name).map(quote).collect(joining(", "));
-        return Optional.of(new NestedColumn(handle, format("CAST(arrayZip(%s) AS %s) AS %s", arrayArguments, tupleArray, quote.apply(name))));
+        return Optional.of(new NestedColumn(handle, format("CAST(arrayZipUnaligned(%s) AS %s) AS %s", arrayArguments, tupleArray, quote.apply(name))));
     }
 
     record PhysicalColumn(String name, String type) {}
