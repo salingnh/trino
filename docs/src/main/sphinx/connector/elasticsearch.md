@@ -365,8 +365,7 @@ by Elasticsearch, including the empty string for false. With doc values, the
 connector reads the indexed boolean. A `date` field with doc values becomes
 `TIMESTAMP(3)` using UTC epoch milliseconds, including when its mapping
 defines custom formats such as `yyyy/MM/dd HH:mm:ss||epoch_second`.
-A mapped `float` uses `REAL` unless the sample contains integer input, in
-which case it uses `DOUBLE`. Mapped `half_float` and `scaled_float` use
+A mapped `float` uses `REAL`. Mapped `half_float` and `scaled_float` use
 `DOUBLE`. These fields read the stored precision from doc values. For example,
 a `scaled_float` field with a scaling factor of 100 exposes 2.34 for an input
 of 2.341.

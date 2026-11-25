@@ -627,7 +627,7 @@ public class ElasticsearchClient
 
         StringBuilder payload = new StringBuilder();
         for (ObjectNode query : queries) {
-            payload.append("{}\n").append(schemaSampleRequest(query)).append('\n');
+            payload.append("{\"allow_partial_search_results\":false}\n").append(schemaSampleRequest(query)).append('\n');
         }
         try {
             Response response = client.performRequestWithTimeout(

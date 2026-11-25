@@ -341,8 +341,7 @@ hỗ trợ, kể cả chuỗi rỗng biểu thị false. Khi có doc values, con
 boolean đã lập chỉ mục. Với `date` có doc values, connector đọc
 `TIMESTAMP(3)` từ epoch mili giây theo UTC, kể cả khi mapping đặt định dạng
 tùy chỉnh như `yyyy/MM/dd HH:mm:ss||epoch_second`.
-Trường có mapping `float` dùng `REAL` nếu mẫu chưa thấy số nguyên. Khi mẫu
-có số nguyên, trường dùng `DOUBLE`. `half_float` và `scaled_float` dùng
+Trường có mapping `float` dùng `REAL`. `half_float` và `scaled_float` dùng
 `DOUBLE`. Connector đọc độ chính xác đã lưu từ doc values. Ví dụ,
 `scaled_float` với hệ số 100 đọc thành 2,34 từ giá trị đầu vào 2,341.
 

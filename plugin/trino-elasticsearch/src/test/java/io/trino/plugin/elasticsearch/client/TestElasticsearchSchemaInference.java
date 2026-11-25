@@ -26,6 +26,7 @@ import org.junit.jupiter.api.Test;
 
 import java.util.ArrayList;
 import java.util.List;
+import java.util.Optional;
 import java.util.Set;
 
 import static org.assertj.core.api.Assertions.assertThat;
@@ -202,6 +203,35 @@ class TestElasticsearchSchemaInference
         assertThat(merged.type()).isEqualTo(new PrimitiveType("long"));
         assertThat(merged.inferredMapping().orElseThrow().scalarMode()).isEqualTo(IndexMetadata.InferredScalarMode.DOC_VALUES);
         assertThat(merged.inferredMapping().orElseThrow().primitiveType()).isEmpty();
+    }
+
+    @Test
+    void testMergePreservesExplicitNonInferredFields()
+    {
+        ObjectType first = new ObjectType(List.of(
+                new Field(false, false, "msg", new PrimitiveType("text", Optional.of("keyword"), true)),
+                new Field(false, false, "user", new ObjectType(List.of(field("name", "keyword")))),
+                field("amount", "long")));
+        ObjectType second = new ObjectType(List.of(
+                new Field(false, false, "msg", new PrimitiveType("text", Optional.empty(), false)),
+                new Field(false, false, "user", new ObjectType(List.of(field("age", "long")))),
+                field("amount", "double")));
+
+        ObjectType merged = ElasticsearchSchemaInference.merge(List.of(first, second));
+        Field msg = merged.fields().get(0);
+        assertThat(msg.asRawJson()).isFalse();
+        assertThat(msg.inferredMapping()).isEmpty();
+        assertThat(msg.type()).isEqualTo(new PrimitiveType("text", Optional.empty(), false));
+
+        Field user = merged.fields().get(1);
+        assertThat(user.asRawJson()).isFalse();
+        assertThat(user.inferredMapping()).isEmpty();
+        assertThat(((ObjectType) user.type()).fields()).extracting(Field::name).containsExactly("name", "age");
+        assertThat(((ObjectType) user.type()).fields()).allSatisfy(child -> assertThat(child.inferredMapping()).isEmpty());
+
+        Field amount = merged.fields().get(2);
+        assertThat(amount.asRawJson()).isTrue();
+        assertThat(amount.inferredMapping()).isEmpty();
     }
 
     private static JsonNode mapping(JsonNode properties)

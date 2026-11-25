@@ -107,6 +107,9 @@ final class ElasticsearchSchemaInference
         if (fields.stream().allMatch(first::equals)) {
             return first;
         }
+        if (fields.stream().allMatch(field -> field.inferredMapping().isEmpty())) {
+            return mergeExplicitField(fields);
+        }
 
         Set<String> observedTypes = new TreeSet<>();
         for (Field field : fields) {
@@ -148,6 +151,48 @@ final class ElasticsearchSchemaInference
             return resolved(first, first.type(), depth, inferredPrimitive(first), observedTypes);
         }
         return raw(first, observedTypes);
+    }
+
+    private static Field mergeExplicitField(List<Field> fields)
+    {
+        Field first = fields.getFirst();
+        if (fields.stream().anyMatch(field -> field.asRawJson() || field.isArray() != first.isArray())) {
+            return explicitRaw(first);
+        }
+        if (fields.stream().allMatch(field -> field.type() instanceof ObjectType)) {
+            ObjectType children = merge(fields.stream().map(field -> (ObjectType) field.type()).toList());
+            return new Field(false, first.isArray(), first.name(), children);
+        }
+        if (first.type() instanceof PrimitiveType firstPrimitive
+                && fields.stream().allMatch(field -> field.type() instanceof PrimitiveType primitive && primitive.name().equals(firstPrimitive.name()))) {
+            Optional<String> keyword = fields.stream()
+                    .map(field -> ((PrimitiveType) field.type()).keyword())
+                    .allMatch(firstPrimitive.keyword()::equals)
+                    ? firstPrimitive.keyword()
+                    : Optional.empty();
+            boolean aggregatable = fields.stream().allMatch(field -> ((PrimitiveType) field.type()).aggregatable());
+            boolean sourceExact = fields.stream().allMatch(field -> ((PrimitiveType) field.type()).sourceValueSemanticsExact());
+            boolean indexed = fields.stream().allMatch(field -> ((PrimitiveType) field.type()).indexed());
+            return new Field(false, first.isArray(), first.name(), new PrimitiveType(firstPrimitive.name(), keyword, aggregatable, sourceExact, indexed));
+        }
+        if (first.type() instanceof IndexMetadata.DateTimeType firstDate
+                && fields.stream().allMatch(field -> field.type() instanceof IndexMetadata.DateTimeType date && date.formats().equals(firstDate.formats()))) {
+            boolean aggregatable = fields.stream().allMatch(field -> ((IndexMetadata.DateTimeType) field.type()).aggregatable());
+            boolean sourceExact = fields.stream().allMatch(field -> ((IndexMetadata.DateTimeType) field.type()).sourceValueSemanticsExact());
+            return new Field(false, first.isArray(), first.name(), new IndexMetadata.DateTimeType(firstDate.formats(), aggregatable, sourceExact));
+        }
+        if (first.type() instanceof IndexMetadata.ScaledFloatType firstScaled
+                && fields.stream().allMatch(field -> field.type() instanceof IndexMetadata.ScaledFloatType scaled && Double.compare(scaled.scale(), firstScaled.scale()) == 0)) {
+            boolean aggregatable = fields.stream().allMatch(field -> ((IndexMetadata.ScaledFloatType) field.type()).aggregatable());
+            boolean sourceExact = fields.stream().allMatch(field -> ((IndexMetadata.ScaledFloatType) field.type()).sourceValueSemanticsExact());
+            return new Field(false, first.isArray(), first.name(), new IndexMetadata.ScaledFloatType(firstScaled.scale(), aggregatable, sourceExact));
+        }
+        return explicitRaw(first);
+    }
+
+    private static Field explicitRaw(Field field)
+    {
+        return new Field(true, false, field.name(), field.type(), false, false);
     }
 
     private static Optional<String> inferredPrimitive(Field field)

@@ -771,9 +771,11 @@ public class ClickHouseClient
         }
         // ClickHouse 26.4+ permits identically named array groups with independent offsets.
         // Catalog columns alone cannot distinguish those arrays from flattened Nested.
-        if (getClickHouseServerVersion(session).isNewerOrEqualTo("26.4")) {
+        ClickHouseVersionUtils version = getClickHouseServerVersion(session);
+        if (version.isNewerOrEqualTo("26.4")) {
             return ImmutableList.of();
         }
+        boolean unalignedZip = version.isNewerOrEqualTo("24.4");
         String sql =
                 """
                 SELECT c.name, c.type
@@ -796,7 +798,7 @@ public class ClickHouseClient
         catch (SQLException e) {
             throw new TrinoException(JDBC_ERROR, "Failed to read flattened Nested columns for " + table, e);
         }
-        return ClickHouseFlattenedNested.group(columns, isMapStringAsVarchar(session), this::quoted).stream()
+        return ClickHouseFlattenedNested.group(columns, isMapStringAsVarchar(session), unalignedZip, this::quoted).stream()
                 .filter(column -> getForcedMappingToVarchar(column.handle().getJdbcTypeHandle()).isEmpty())
                 .toList();
     }

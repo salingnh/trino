@@ -377,8 +377,7 @@ public class ElasticsearchMetadata
             if (inferred.scalarMode().usesDocValues() && decodedType instanceof DateTimeType) {
                 mapping = new TypeAndDecoder(TIMESTAMP_MILLIS, new TimestampDecoder.Descriptor(path));
             }
-            else if (inferred.scalarMode().usesDocValues() && decodedType instanceof PrimitiveType primitive &&
-                    (primitive.name().equals("half_float") || (primitive.name().equals("float") && inferred.observedTypes().contains("INTEGER")))) {
+            else if (inferred.scalarMode().usesDocValues() && decodedType instanceof PrimitiveType primitive && primitive.name().equals("half_float")) {
                 mapping = new TypeAndDecoder(DOUBLE, new DoubleDecoder.Descriptor(path));
             }
             else {
@@ -716,7 +715,7 @@ public class ElasticsearchMetadata
         if (column.inferred()) {
             return column.supportsQueryShapes()
                     && column.decoderDescriptor() instanceof InferredValueDecoder.Descriptor inferred
-                    && inferred.scalarMode().usesDocValues();
+                    && inferred.scalarMode() != InferredScalarMode.SOURCE;
         }
         // The explicit mapping path exposes the original source value for scaled_float.
         return !(column.elasticsearchType() instanceof ScaledFloatType);
