@@ -29,16 +29,24 @@ public class JdbcNamedRelationHandle
     private final SchemaTableName schemaTableName;
     private final RemoteTableName remoteTableName;
     private final Optional<String> comment;
+    private final Optional<String> readQueryPrefix;
+
+    public JdbcNamedRelationHandle(SchemaTableName schemaTableName, RemoteTableName remoteTableName, Optional<String> comment)
+    {
+        this(schemaTableName, remoteTableName, comment, Optional.empty());
+    }
 
     @JsonCreator
     public JdbcNamedRelationHandle(
             @JsonProperty("schemaTableName") SchemaTableName schemaTableName,
             @JsonProperty("remoteTableName") RemoteTableName remoteTableName,
-            @JsonProperty("comment") Optional<String> comment)
+            @JsonProperty("comment") Optional<String> comment,
+            @JsonProperty("readQueryPrefix") Optional<String> readQueryPrefix)
     {
         this.schemaTableName = requireNonNull(schemaTableName, "schemaTableName is null");
         this.remoteTableName = requireNonNull(remoteTableName, "remoteTableName is null");
         this.comment = requireNonNull(comment, "comment is null");
+        this.readQueryPrefix = requireNonNull(readQueryPrefix, "readQueryPrefix is null");
     }
 
     @JsonProperty
@@ -59,6 +67,12 @@ public class JdbcNamedRelationHandle
         return comment;
     }
 
+    @JsonProperty
+    public Optional<String> getReadQueryPrefix()
+    {
+        return readQueryPrefix;
+    }
+
     @Override
     public boolean equals(Object o)
     {
@@ -70,6 +84,7 @@ public class JdbcNamedRelationHandle
         }
         JdbcNamedRelationHandle that = (JdbcNamedRelationHandle) o;
         return Objects.equals(schemaTableName, that.schemaTableName)
+                && Objects.equals(readQueryPrefix, that.readQueryPrefix)
                 // remoteTableName is not compared here, as required by TestJdbcTableHandle#testEquivalence TODO document why this is important
                 /**/;
     }
@@ -77,7 +92,7 @@ public class JdbcNamedRelationHandle
     @Override
     public int hashCode()
     {
-        return Objects.hash(schemaTableName);
+        return Objects.hash(schemaTableName, readQueryPrefix);
     }
 
     @Override

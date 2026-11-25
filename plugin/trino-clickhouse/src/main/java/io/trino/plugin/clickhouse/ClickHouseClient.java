@@ -30,7 +30,10 @@ import io.trino.plugin.base.aggregation.AggregateFunctionRule;
 import io.trino.plugin.base.expression.ConnectorExpressionRewriter;
 import io.trino.plugin.base.expression.ConnectorExpressionRule.RewriteContext;
 import io.trino.plugin.base.mapping.IdentifierMapping;
+import io.trino.plugin.clickhouse.ClickHouseFlattenedNested.NestedColumn;
+import io.trino.plugin.clickhouse.ClickHouseFlattenedNested.PhysicalColumn;
 import io.trino.plugin.clickhouse.expression.RewriteLike;
+import io.trino.plugin.clickhouse.expression.RewriteObjectArrayAnyMatch;
 import io.trino.plugin.clickhouse.expression.RewriteStringComparison;
 import io.trino.plugin.clickhouse.expression.RewriteStringIn;
 import io.trino.plugin.jdbc.BaseJdbcClient;
@@ -39,12 +42,15 @@ import io.trino.plugin.jdbc.ColumnMapping;
 import io.trino.plugin.jdbc.ConnectionFactory;
 import io.trino.plugin.jdbc.JdbcColumnHandle;
 import io.trino.plugin.jdbc.JdbcExpression;
+import io.trino.plugin.jdbc.JdbcNamedRelationHandle;
 import io.trino.plugin.jdbc.JdbcSortItem;
+import io.trino.plugin.jdbc.JdbcSplit;
 import io.trino.plugin.jdbc.JdbcTableHandle;
 import io.trino.plugin.jdbc.JdbcTypeHandle;
 import io.trino.plugin.jdbc.LongReadFunction;
 import io.trino.plugin.jdbc.LongWriteFunction;
 import io.trino.plugin.jdbc.ObjectWriteFunction;
+import io.trino.plugin.jdbc.PreparedQuery;
 import io.trino.plugin.jdbc.QueryBuilder;
 import io.trino.plugin.jdbc.RemoteTableName;
 import io.trino.plugin.jdbc.SliceWriteFunction;
@@ -68,6 +74,8 @@ import io.trino.spi.connector.ColumnMetadata;
 import io.trino.spi.connector.ColumnPosition;
 import io.trino.spi.connector.ConnectorSession;
 import io.trino.spi.connector.ConnectorTableMetadata;
+import io.trino.spi.connector.SchemaTableName;
+import io.trino.spi.connector.TableNotFoundException;
 import io.trino.spi.expression.ConnectorExpression;
 import io.trino.spi.expression.Variable;
 import io.trino.spi.type.CharType;
@@ -102,6 +110,7 @@ import java.time.LocalDateTime;
 import java.time.ZonedDateTime;
 import java.time.format.DateTimeFormatter;
 import java.time.format.DateTimeFormatterBuilder;
+import java.util.ArrayList;
 import java.util.Collection;
 import java.util.List;
 import java.util.Map;
@@ -280,7 +289,8 @@ public class ClickHouseClient
     @Override
     public Optional<ParameterizedExpression> convertPredicate(ConnectorSession session, ConnectorExpression expression, Map<String, ColumnHandle> assignments)
     {
-        return connectorExpressionRewriter.rewrite(session, expression, assignments);
+        return RewriteObjectArrayAnyMatch.rewrite(expression, assignments, this::quoted)
+                .or(() -> connectorExpressionRewriter.rewrite(session, expression, assignments));
     }
 
     @Override
@@ -680,6 +690,116 @@ public class ClickHouseClient
     }
 
     @Override
+    public Optional<JdbcTableHandle> getTableHandle(ConnectorSession session, SchemaTableName schemaTableName)
+    {
+        return super.getTableHandle(session, schemaTableName).map(table -> {
+            JdbcNamedRelationHandle relation = table.getRequiredNamedRelation();
+            RemoteTableName remote = relation.getRemoteTableName();
+            List<NestedColumn> nested = getFlattenedNestedColumns(session, remote);
+            if (nested.isEmpty()) {
+                return table;
+            }
+            String prefix = nested.stream().map(NestedColumn::definition).collect(joining(", ", "WITH ", " "));
+            return new JdbcTableHandle(
+                    new JdbcNamedRelationHandle(schemaTableName, remote, relation.getComment(), Optional.of(prefix)),
+                    table.getConstraint(),
+                    table.getConstraintExpressions(),
+                    table.getSortOrder(),
+                    table.getLimit(),
+                    Optional.of(getColumns(session, schemaTableName, remote, nested)),
+                    table.getOtherReferencedTables(),
+                    table.getNextSyntheticColumnId(),
+                    table.getAuthorization(),
+                    table.getUpdateAssignments());
+        });
+    }
+
+    @Override
+    public List<JdbcColumnHandle> getColumns(ConnectorSession session, SchemaTableName schemaTableName, RemoteTableName remoteTableName)
+    {
+        return getColumns(session, schemaTableName, remoteTableName, getFlattenedNestedColumns(session, remoteTableName));
+    }
+
+    private List<JdbcColumnHandle> getColumns(
+            ConnectorSession session,
+            SchemaTableName schemaTableName,
+            RemoteTableName remoteTableName,
+            List<NestedColumn> nested)
+    {
+        if (nested.isEmpty()) {
+            return super.getColumns(session, schemaTableName, remoteTableName);
+        }
+
+        List<JdbcColumnHandle> physical;
+        try {
+            physical = super.getColumns(session, schemaTableName, remoteTableName);
+        }
+        catch (TableNotFoundException _) {
+            // Base JDBC filters out individually unsupported Array columns, possibly all of them.
+            physical = ImmutableList.of();
+        }
+        return ImmutableList.<JdbcColumnHandle>builder()
+                .addAll(physical)
+                .addAll(nested.stream().map(NestedColumn::handle).iterator())
+                .build();
+    }
+
+    private List<NestedColumn> getFlattenedNestedColumns(ConnectorSession session, RemoteTableName table)
+    {
+        Optional<String> database = table.getSchemaName().or(table::getCatalogName);
+        if (database.isEmpty()) {
+            return ImmutableList.of();
+        }
+        // ClickHouse 26.4+ permits identically named array groups with independent offsets.
+        // Catalog columns alone cannot distinguish those arrays from flattened Nested.
+        if (getClickHouseServerVersion(session).isNewerOrEqualTo("26.4")) {
+            return ImmutableList.of();
+        }
+        String sql =
+                """
+                SELECT c.name, c.type
+                FROM system.columns AS c
+                INNER JOIN system.tables AS t ON c.database = t.database AND c.table = t.name
+                WHERE c.database = ? AND c.table = ? AND endsWith(t.engine, 'MergeTree')
+                ORDER BY c.position
+                """;
+        List<PhysicalColumn> columns = new ArrayList<>();
+        try (Connection connection = connectionFactory.openConnection(session);
+                PreparedStatement statement = connection.prepareStatement(sql)) {
+            statement.setString(1, database.orElseThrow());
+            statement.setString(2, table.getTableName());
+            try (ResultSet rows = statement.executeQuery()) {
+                while (rows.next()) {
+                    columns.add(new PhysicalColumn(rows.getString(1), rows.getString(2)));
+                }
+            }
+        }
+        catch (SQLException e) {
+            throw new TrinoException(JDBC_ERROR, "Failed to read flattened Nested columns for " + table, e);
+        }
+        return ClickHouseFlattenedNested.group(columns, isMapStringAsVarchar(session), this::quoted).stream()
+                .filter(column -> getForcedMappingToVarchar(column.handle().getJdbcTypeHandle()).isEmpty())
+                .toList();
+    }
+
+    @Override
+    protected PreparedQuery prepareQuery(
+            ConnectorSession session,
+            Connection connection,
+            JdbcTableHandle table,
+            Optional<List<List<JdbcColumnHandle>>> groupingSets,
+            List<JdbcColumnHandle> columns,
+            Map<String, ParameterizedExpression> columnExpressions,
+            Optional<JdbcSplit> split)
+    {
+        PreparedQuery query = super.prepareQuery(session, connection, table, groupingSets, columns, columnExpressions, split);
+        if (table.getRelationHandle() instanceof JdbcNamedRelationHandle named && named.getReadQueryPrefix().isPresent()) {
+            return new PreparedQuery(named.getReadQueryPrefix().orElseThrow() + query.query(), query.parameters());
+        }
+        return query;
+    }
+
+    @Override
     public Optional<ColumnMapping> toColumnMapping(ConnectorSession session, Connection connection, JdbcTypeHandle typeHandle)
     {
         String jdbcTypeName = typeHandle.jdbcTypeName()
@@ -719,6 +839,7 @@ public class ClickHouseClient
                 }
                 yield Optional.of(varbinaryColumnMapping());
             }
+            case Array -> ClickHouseObjectArrayMapping.toColumnMapping(column, isMapStringAsVarchar(session));
             case UUID -> Optional.of(uuidColumnMapping());
             default -> Optional.empty();
         };
