@@ -41,7 +41,7 @@ final class ClickHouseFlattenedNested
 
     private ClickHouseFlattenedNested() {}
 
-    static List<NestedColumn> group(List<PhysicalColumn> columns, boolean mapStringAsVarchar, UnaryOperator<String> quote)
+    static List<NestedColumn> group(List<PhysicalColumn> columns, boolean mapStringAsVarchar, boolean unalignedZip, UnaryOperator<String> quote)
     {
         Set<String> physicalNames = columns.stream()
                 .map(column -> column.name().toLowerCase(ENGLISH))
@@ -64,13 +64,13 @@ final class ClickHouseFlattenedNested
         groups.forEach((name, members) -> {
             String normalizedName = name.toLowerCase(ENGLISH);
             if (!physicalNames.contains(normalizedName) && !collidingNames.contains(normalizedName)) {
-                nestedColumn(name, members, mapStringAsVarchar, quote).ifPresent(nestedColumns::add);
+                nestedColumn(name, members, mapStringAsVarchar, unalignedZip, quote).ifPresent(nestedColumns::add);
             }
         });
         return nestedColumns.build();
     }
 
-    private static Optional<NestedColumn> nestedColumn(String name, List<PhysicalColumn> members, boolean mapStringAsVarchar, UnaryOperator<String> quote)
+    private static Optional<NestedColumn> nestedColumn(String name, List<PhysicalColumn> members, boolean mapStringAsVarchar, boolean unalignedZip, UnaryOperator<String> quote)
     {
         Set<String> fieldNames = new HashSet<>();
         ImmutableList.Builder<String> tupleMembers = ImmutableList.builder();
@@ -95,7 +95,9 @@ final class ClickHouseFlattenedNested
             if (type == null) {
                 return Optional.empty();
             }
-            tupleMembers.add(field + " " + (member.isNullable() ? "Nullable(" + type + ")" : type));
+            // ClickHouse 24.4+ supports arrayZipUnaligned, padding shorter sibling arrays with NULLs.
+            String memberType = unalignedZip || member.isNullable() ? "Nullable(" + type + ")" : type;
+            tupleMembers.add(quote.apply(field) + " " + memberType);
         }
 
         String tupleArray = "Array(Tuple(" + String.join(", ", tupleMembers.build()) + "))";
@@ -111,7 +113,8 @@ final class ClickHouseFlattenedNested
                 .setNullable(false)
                 .build();
         String arrayArguments = members.stream().map(PhysicalColumn::name).map(quote).collect(joining(", "));
-        return Optional.of(new NestedColumn(handle, format("CAST(arrayZip(%s) AS %s) AS %s", arrayArguments, tupleArray, quote.apply(name))));
+        String zipFunction = unalignedZip ? "arrayZipUnaligned" : "arrayZip";
+        return Optional.of(new NestedColumn(handle, format("CAST(%s(%s) AS %s) AS %s", zipFunction, arrayArguments, tupleArray, quote.apply(name))));
     }
 
     record PhysicalColumn(String name, String type) {}

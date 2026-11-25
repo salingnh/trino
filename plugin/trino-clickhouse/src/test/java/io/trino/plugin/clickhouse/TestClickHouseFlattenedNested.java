@@ -31,31 +31,43 @@ class TestClickHouseFlattenedNested
     void testGroupedColumnsKeepMemberNamesAndOrder()
     {
         List<NestedColumn> columns = group(
+                true,
                 new PhysicalColumn("id", "UInt32"),
-                new PhysicalColumn("users.name", "Array(Nullable(String))"),
+                new PhysicalColumn("users.select", "Array(Nullable(String))"),
                 new PhysicalColumn("users.age", "Array(UInt32)"));
 
         assertThat(columns).hasSize(1);
         NestedColumn users = columns.getFirst();
         assertThat(users.handle().getColumnName()).isEqualTo("users");
         assertThat(users.handle().getColumnType()).isEqualTo(new ArrayType(RowType.rowType(
-                RowType.field("name", VARCHAR),
+                RowType.field("select", VARCHAR),
                 RowType.field("age", BIGINT))));
-        assertThat(users.definition()).isEqualTo("CAST(arrayZip(\"users.name\", \"users.age\") AS Array(Tuple(name Nullable(String), age UInt32))) AS \"users\"");
+        assertThat(users.definition()).isEqualTo("CAST(arrayZipUnaligned(\"users.select\", \"users.age\") AS Array(Tuple(\"select\" Nullable(String), \"age\" Nullable(UInt32)))) AS \"users\"");
+
+        List<NestedColumn> legacyColumns = group(
+                false,
+                new PhysicalColumn("id", "UInt32"),
+                new PhysicalColumn("users.select", "Array(Nullable(String))"),
+                new PhysicalColumn("users.age", "Array(UInt32)"));
+
+        assertThat(legacyColumns).hasSize(1);
+        NestedColumn legacyUsers = legacyColumns.getFirst();
+        assertThat(legacyUsers.handle().getColumnType()).isEqualTo(users.handle().getColumnType());
+        assertThat(legacyUsers.definition()).isEqualTo("CAST(arrayZip(\"users.select\", \"users.age\") AS Array(Tuple(\"select\" Nullable(String), \"age\" UInt32))) AS \"users\"");
     }
 
     @Test
     void testDoesNotExposeAmbiguousOrIncompleteGroups()
     {
-        assertThat(group(new PhysicalColumn("users", "String"), new PhysicalColumn("users.name", "Array(String)"))).isEmpty();
-        assertThat(group(new PhysicalColumn("Users.name", "Array(String)"), new PhysicalColumn("users.city", "Array(String)"))).isEmpty();
-        assertThat(group(new PhysicalColumn("users.Name", "Array(String)"), new PhysicalColumn("users.name", "Array(String)"))).isEmpty();
-        assertThat(group(new PhysicalColumn("users.name", "Array(String)"), new PhysicalColumn("users.details.zip", "Array(String)"))).isEmpty();
-        assertThat(group(new PhysicalColumn("users.name", "Array(String)"), new PhysicalColumn("users.score", "Array(Float64)"))).isEmpty();
+        assertThat(group(true, new PhysicalColumn("users", "String"), new PhysicalColumn("users.name", "Array(String)"))).isEmpty();
+        assertThat(group(true, new PhysicalColumn("Users.name", "Array(String)"), new PhysicalColumn("users.city", "Array(String)"))).isEmpty();
+        assertThat(group(true, new PhysicalColumn("users.Name", "Array(String)"), new PhysicalColumn("users.name", "Array(String)"))).isEmpty();
+        assertThat(group(true, new PhysicalColumn("users.name", "Array(String)"), new PhysicalColumn("users.details.zip", "Array(String)"))).isEmpty();
+        assertThat(group(true, new PhysicalColumn("users.name", "Array(String)"), new PhysicalColumn("users.score", "Array(Float64)"))).isEmpty();
     }
 
-    private static List<NestedColumn> group(PhysicalColumn... columns)
+    private static List<NestedColumn> group(boolean unalignedZip, PhysicalColumn... columns)
     {
-        return ClickHouseFlattenedNested.group(List.of(columns), true, name -> "\"" + name + "\"");
+        return ClickHouseFlattenedNested.group(List.of(columns), true, unalignedZip, name -> "\"" + name + "\"");
     }
 }

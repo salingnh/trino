@@ -26,6 +26,7 @@ import org.junit.jupiter.api.Test;
 
 import java.util.ArrayList;
 import java.util.List;
+import java.util.Optional;
 import java.util.Set;
 
 import static org.assertj.core.api.Assertions.assertThat;
@@ -85,16 +86,15 @@ class TestElasticsearchSchemaInference
                                 {"users":[{"city":["Hà Nội","Huế"]},{"age":28}]}
                                 """)),
                 List.of());
-        ObjectType result = ElasticsearchSchemaInference.infer(schema, mapping(properties), query -> {
-            queries.add(query);
-            return responses.get(queries.size() - 1);
+        ObjectType result = ElasticsearchSchemaInference.infer(schema, mapping(properties), responses.getFirst(), batch -> {
+            queries.addAll(batch);
+            return responses.get(1);
         });
 
-        assertThat(queries).hasSize(3);
-        assertThat(queries.get(0).has("match_all")).isTrue();
-        assertThat(queries.get(1).at("/nested/path").asText()).isEqualTo("users");
-        assertThat(queries.get(1).at("/nested/query/exists/field").asText()).isEqualTo("users.age");
-        assertThat(queries.get(2).at("/nested/query/exists/field").asText()).isEqualTo("users.missing");
+        assertThat(queries).hasSize(2);
+        assertThat(queries.get(0).at("/nested/path").asText()).isEqualTo("users");
+        assertThat(queries.get(0).at("/nested/query/exists/field").asText()).isEqualTo("users.age");
+        assertThat(queries.get(1).at("/nested/query/exists/field").asText()).isEqualTo("users.missing");
         Field users = result.fields().getFirst();
         assertThat(users.isArray()).isTrue();
         assertThat(users.asRawJson()).isFalse();
@@ -205,6 +205,35 @@ class TestElasticsearchSchemaInference
         assertThat(merged.inferredMapping().orElseThrow().primitiveType()).isEmpty();
     }
 
+    @Test
+    void testMergePreservesExplicitNonInferredFields()
+    {
+        ObjectType first = new ObjectType(List.of(
+                new Field(false, false, "msg", new PrimitiveType("text", Optional.of("keyword"), true)),
+                new Field(false, false, "user", new ObjectType(List.of(field("name", "keyword")))),
+                field("amount", "long")));
+        ObjectType second = new ObjectType(List.of(
+                new Field(false, false, "msg", new PrimitiveType("text", Optional.empty(), false)),
+                new Field(false, false, "user", new ObjectType(List.of(field("age", "long")))),
+                field("amount", "double")));
+
+        ObjectType merged = ElasticsearchSchemaInference.merge(List.of(first, second));
+        Field msg = merged.fields().get(0);
+        assertThat(msg.asRawJson()).isFalse();
+        assertThat(msg.inferredMapping()).isEmpty();
+        assertThat(msg.type()).isEqualTo(new PrimitiveType("text", Optional.empty(), false));
+
+        Field user = merged.fields().get(1);
+        assertThat(user.asRawJson()).isFalse();
+        assertThat(user.inferredMapping()).isEmpty();
+        assertThat(((ObjectType) user.type()).fields()).extracting(Field::name).containsExactly("name", "age");
+        assertThat(((ObjectType) user.type()).fields()).allSatisfy(child -> assertThat(child.inferredMapping()).isEmpty());
+
+        Field amount = merged.fields().get(2);
+        assertThat(amount.asRawJson()).isTrue();
+        assertThat(amount.inferredMapping()).isEmpty();
+    }
+
     private static JsonNode mapping(JsonNode properties)
     {
         return JSON.createObjectNode().set("mappings", JSON.createObjectNode().set("properties", properties));
@@ -212,7 +241,7 @@ class TestElasticsearchSchemaInference
 
     private static ObjectType infer(ObjectType schema, List<Sample> samples)
     {
-        return ElasticsearchSchemaInference.infer(schema, mapping(JSON.createObjectNode()), query -> query.has("match_all") ? samples : List.of());
+        return ElasticsearchSchemaInference.infer(schema, mapping(JSON.createObjectNode()), samples, _ -> List.of());
     }
 
     private static String primitive(ObjectType result, int index)

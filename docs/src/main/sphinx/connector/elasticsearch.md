@@ -194,9 +194,11 @@ It is not allowed to use `asRawJson` and `isArray` flags simultaneously for the 
 (elasticsearch-date-types)=
 ### Date types
 
-The Elasticsearch connector supports only the default `date` type. All other
-[date] formats including [built-in date formats] and [custom date formats] are
-not supported. Dates with the [format] property are ignored.
+The connector supports the default Elasticsearch [date] format. With
+[schema inference](elasticsearch-schema-inference), fields using a [built-in date format][built-in date formats]
+or [custom date format][custom date formats] can also map to `TIMESTAMP(3)` when doc values are
+enabled. For explicitly declared schemas, the connector skips fields with
+a [format] property.
 
 (elasticsearch-raw-json-transform)=
 ### Raw JSON transform
@@ -297,14 +299,18 @@ elasticsearch.schema-inference.enabled=false
 
 #### How sampling works
 
-1. When the catalog starts, the coordinator reads the index mapping to identify
-   the fields and requests up to three documents.
-2. For each mapped field that still lacks a sample value and can be searched,
-   the coordinator requests up to three additional documents using an
-   Elasticsearch `exists` query. Each returned document can supply examples
-   for several fields.
-3. The connector uses the values in `_source` to choose Trino types and caches
-   the schema. Trino uses a consistent schema throughout the query.
+1. On the first metadata lookup for an index, the coordinator reads its mapping
+   and requests up to three documents.
+2. For each searchable field that still lacks a sample, the coordinator requests
+   up to three additional documents with an `exists` query. It groups these
+   queries into batches of up to 16.
+3. The coordinator uses `_source` to choose Trino types and caches up to 512
+   schema entries for five minutes. The cache distinguishes sessions by their
+   bounded keyword subfield setting. A mapping change triggers a fresh sample.
+   Trino keeps a consistent schema throughout each query.
+
+For an empty index, the connector uses the mapping to expose column types and
+retries sampling at the next metadata lookup.
 
 Elasticsearch `exists` checks for indexed values. A field can appear in
 `_source` and still have no indexed value, for example when its value exceeds
@@ -359,9 +365,9 @@ by Elasticsearch, including the empty string for false. With doc values, the
 connector reads the indexed boolean. A `date` field with doc values becomes
 `TIMESTAMP(3)` using UTC epoch milliseconds, including when its mapping
 defines custom formats such as `yyyy/MM/dd HH:mm:ss||epoch_second`.
-For `float`, `half_float`, and `scaled_float`, the inferred column is
-`DOUBLE` and reads the stored precision from doc values. For example, a
-`scaled_float` field with a scaling factor of 100 exposes 2.34 for an input
+A mapped `float` uses `REAL`. Mapped `half_float` and `scaled_float` use
+`DOUBLE`. These fields read the stored precision from doc values. For example,
+a `scaled_float` field with a scaling factor of 100 exposes 2.34 for an input
 of 2.341.
 
 For one observed value type, the connector keeps a compatible, supported
@@ -391,9 +397,8 @@ and a primitive value in the same mapped field.
 
 ##### Conflicts across index mappings
 
-When an alias or wildcard requires inference for at least one backing index,
-the connector infers the eligible indices separately and merges their schemas
-with the declared schemas of other backing indices. A field present in just one
+For an alias or wildcard, the connector merges the schemas of all backing
+indices. Each index contributes its declared or inferred schema. A field present in just one
 schema keeps its type. For fields present in more than one schema, the connector
 applies the following rules.
 

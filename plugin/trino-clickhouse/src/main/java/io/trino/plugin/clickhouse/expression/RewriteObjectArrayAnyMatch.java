@@ -34,6 +34,7 @@ import io.trino.spi.type.VarcharType;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
+import java.util.Set;
 import java.util.function.UnaryOperator;
 
 import static io.trino.spi.expression.StandardFunctions.AND_FUNCTION_NAME;
@@ -47,6 +48,8 @@ import static io.trino.spi.type.BooleanType.BOOLEAN;
 import static io.trino.spi.type.IntegerType.INTEGER;
 import static io.trino.spi.type.SmallintType.SMALLINT;
 import static io.trino.spi.type.TinyintType.TINYINT;
+import static java.util.Locale.ENGLISH;
+import static java.util.stream.Collectors.toSet;
 
 public final class RewriteObjectArrayAnyMatch
 {
@@ -77,14 +80,29 @@ public final class RewriteObjectArrayAnyMatch
             return Optional.empty();
         }
 
+        String lambdaName = lambdaName(assignments);
         ImmutableList.Builder<QueryParameter> parameters = ImmutableList.builder();
-        return rewritePredicate(lambda.getBody(), lambda.getArguments().getFirst(), parameters)
+        return rewritePredicate(lambda.getBody(), lambda.getArguments().getFirst(), lambdaName, parameters)
                 .map(predicate -> new ParameterizedExpression(
-                        "arrayExists(item -> ifNull(" + predicate + ", 0), " + quoted.apply(column.getColumnName()) + ")",
+                        "arrayExists(" + lambdaName + " -> ifNull(" + predicate + ", 0), " + quoted.apply(column.getColumnName()) + ")",
                         parameters.build()));
     }
 
-    private static Optional<String> rewritePredicate(ConnectorExpression expression, Variable row, ImmutableList.Builder<QueryParameter> parameters)
+    private static String lambdaName(Map<String, ColumnHandle> assignments)
+    {
+        Set<String> columns = assignments.values().stream()
+                .filter(JdbcColumnHandle.class::isInstance)
+                .map(JdbcColumnHandle.class::cast)
+                .map(column -> column.getColumnName().toLowerCase(ENGLISH))
+                .collect(toSet());
+        String name = "__trino_array_item";
+        while (columns.contains(name)) {
+            name += "_";
+        }
+        return name;
+    }
+
+    private static Optional<String> rewritePredicate(ConnectorExpression expression, Variable row, String lambdaName, ImmutableList.Builder<QueryParameter> parameters)
     {
         if (!expression.getType().equals(BOOLEAN)) {
             return Optional.empty();
@@ -108,7 +126,7 @@ public final class RewriteObjectArrayAnyMatch
             }
             ImmutableList.Builder<String> predicates = ImmutableList.builder();
             for (ConnectorExpression argument : arguments) {
-                Optional<String> predicate = rewritePredicate(argument, row, parameters);
+                Optional<String> predicate = rewritePredicate(argument, row, lambdaName, parameters);
                 if (predicate.isEmpty()) {
                     return Optional.empty();
                 }
@@ -118,21 +136,21 @@ public final class RewriteObjectArrayAnyMatch
             return Optional.of("(" + String.join(operator, predicates.build()) + ")");
         }
         if (function.equals(IS_NULL_FUNCTION_NAME) && arguments.size() == 1) {
-            return fieldAccess(arguments.getFirst(), row).map(field -> "isNull(" + field + ")");
+            return fieldAccess(arguments.getFirst(), row, lambdaName).map(field -> "isNull(" + field + ")");
         }
         if (function.equals(NOT_FUNCTION_NAME) &&
                 arguments.size() == 1 &&
                 arguments.getFirst() instanceof Call nested &&
                 nested.getFunctionName().equals(IS_NULL_FUNCTION_NAME) &&
                 nested.getArguments().size() == 1) {
-            return fieldAccess(nested.getArguments().getFirst(), row).map(field -> "isNotNull(" + field + ")");
+            return fieldAccess(nested.getArguments().getFirst(), row, lambdaName).map(field -> "isNotNull(" + field + ")");
         }
         if (function.equals(EQUAL_OPERATOR_FUNCTION_NAME) && arguments.size() == 2) {
             if (arguments.get(1) instanceof Constant constant) {
-                return rewriteEquality(arguments.getFirst(), constant, row, parameters);
+                return rewriteEquality(arguments.getFirst(), constant, row, lambdaName, parameters);
             }
             if (arguments.getFirst() instanceof Constant constant) {
-                return rewriteEquality(arguments.get(1), constant, row, parameters);
+                return rewriteEquality(arguments.get(1), constant, row, lambdaName, parameters);
             }
         }
         return Optional.empty();
@@ -142,9 +160,10 @@ public final class RewriteObjectArrayAnyMatch
             ConnectorExpression expression,
             Constant constant,
             Variable row,
+            String lambdaName,
             ImmutableList.Builder<QueryParameter> parameters)
     {
-        Optional<String> field = fieldAccess(expression, row);
+        Optional<String> field = fieldAccess(expression, row, lambdaName);
         if (field.isEmpty()) {
             return Optional.empty();
         }
@@ -166,13 +185,13 @@ public final class RewriteObjectArrayAnyMatch
         return Optional.of("(" + field.get() + " = ?)");
     }
 
-    private static Optional<String> fieldAccess(ConnectorExpression expression, Variable row)
+    private static Optional<String> fieldAccess(ConnectorExpression expression, Variable row, String lambdaName)
     {
         if (expression instanceof Call cast && cast.getFunctionName().equals(CAST_FUNCTION_NAME) && cast.getArguments().size() == 1) {
             ConnectorExpression input = cast.getArguments().getFirst();
             int inputRank = INTEGER_TYPES.indexOf(input.getType());
             if (inputRank >= 0 && inputRank < INTEGER_TYPES.indexOf(cast.getType())) {
-                return fieldAccess(input, row);
+                return fieldAccess(input, row, lambdaName);
             }
         }
         if (!(expression instanceof FieldDereference field) || !field.getTarget().equals(row)) {
@@ -182,6 +201,6 @@ public final class RewriteObjectArrayAnyMatch
         if (!(type instanceof VarcharType) && !type.equals(BOOLEAN) && !INTEGER_TYPES.contains(type)) {
             return Optional.empty();
         }
-        return Optional.of("tupleElement(item, " + (field.getField() + 1) + ")");
+        return Optional.of("tupleElement(" + lambdaName + ", " + (field.getField() + 1) + ")");
     }
 }

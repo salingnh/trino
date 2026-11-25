@@ -48,14 +48,17 @@ import java.util.Optional;
 import java.util.concurrent.CopyOnWriteArrayList;
 import java.util.concurrent.atomic.AtomicBoolean;
 
+import static io.airlift.slice.Slices.utf8Slice;
 import static io.trino.plugin.elasticsearch.ElasticsearchErrorCode.ELASTICSEARCH_INVALID_METADATA;
 import static io.trino.spi.StandardErrorCode.TYPE_MISMATCH;
 import static io.trino.spi.type.BigintType.BIGINT;
 import static io.trino.spi.type.BooleanType.BOOLEAN;
 import static io.trino.spi.type.DoubleType.DOUBLE;
+import static io.trino.spi.type.RealType.REAL;
 import static io.trino.spi.type.TimestampType.TIMESTAMP_MILLIS;
 import static io.trino.spi.type.VarcharType.VARCHAR;
 import static io.trino.type.InternalTypeManager.TESTING_TYPE_MANAGER;
+import static java.lang.Math.toIntExact;
 import static java.nio.charset.StandardCharsets.UTF_8;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.catchThrowableOfType;
@@ -87,19 +90,19 @@ class TestElasticsearchInferredMetadata
             """;
 
     @Test
-    void testStartupSamplingMappingRefreshAndRead()
+    void testLazySamplingMappingRefreshAndRead()
             throws Exception
     {
         try (Server server = new Server(true)) {
-            server.client.initializeSchemaInference();
-            assertThat(server.samples).hasSize(2);
-            assertThat(server.samples).allSatisfy(request -> assertThat(request.path("size").asInt()).isEqualTo(3));
-            assertThat(server.samples.get(0).at("/query/match_all").isObject()).isTrue();
-            assertThat(server.samples.get(1).at("/query/exists/field").asText()).isEqualTo("users.license_plate");
+            assertThat(server.samples).isEmpty();
 
             server.metadata.beginQuery(server.session);
             var table = server.metadata.getTableHandle(server.session, new SchemaTableName("default", "events"), Optional.empty(), Optional.empty());
             assertThat(table).isNotNull();
+            assertThat(server.samples).hasSize(2);
+            assertThat(server.samples).allSatisfy(request -> assertThat(request.path("size").asInt()).isEqualTo(3));
+            assertThat(server.samples.get(0).at("/query/match_all").isObject()).isTrue();
+            assertThat(server.samples.get(1).at("/query/exists/field").asText()).isEqualTo("users.license_plate");
             Map<String, ColumnHandle> columns = server.metadata.getColumnHandles(server.session, table);
             ElasticsearchColumnHandle users = (ElasticsearchColumnHandle) columns.get("users");
             ElasticsearchColumnHandle flag = (ElasticsearchColumnHandle) columns.get("flag");
@@ -227,20 +230,60 @@ class TestElasticsearchInferredMetadata
             var price = (ElasticsearchColumnHandle) columns.get("price");
             var ratio = (ElasticsearchColumnHandle) columns.get("ratio");
             var halfRatio = (ElasticsearchColumnHandle) columns.get("half_ratio");
-            assertThat(List.of(price.type(), ratio.type(), halfRatio.type())).containsOnly(DOUBLE);
+            assertThat(price.type()).isEqualTo(DOUBLE);
+            assertThat(ratio.type()).isEqualTo(REAL);
+            assertThat(halfRatio.type()).isEqualTo(DOUBLE);
             var filter = server.metadata.applyFilter(
                     server.session,
                     table,
-                    new Constraint(TupleDomain.withColumnDomains(Map.of(price, Domain.singleValue(DOUBLE, 2.34))))).orElseThrow();
+                    new Constraint(TupleDomain.withColumnDomains(Map.of(
+                            price, Domain.singleValue(DOUBLE, 2.34),
+                            ratio, Domain.singleValue(REAL, (long) Float.floatToRawIntBits(0.1f)))))).orElseThrow();
             assertThat(filter.getRemainingFilter().isAll()).isTrue();
             var page = server.readDocuments((ElasticsearchTableHandle) filter.getHandle(), List.of(price, ratio, halfRatio));
             assertThat(DOUBLE.getDouble(page.getBlock(0), 0)).isEqualTo(2.34);
-            assertThat(DOUBLE.getDouble(page.getBlock(1), 0)).isEqualTo((double) 0.1f);
+            assertThat(Float.intBitsToFloat(toIntExact(REAL.getLong(page.getBlock(1), 0)))).isEqualTo(0.1f);
             assertThat(DOUBLE.getDouble(page.getBlock(2), 0)).isEqualTo((double) Float.float16ToFloat(Float.floatToFloat16(0.1f)));
             var request = server.scanRequests.getLast();
             assertThat(request.path("query").toString()).contains(
                     """
-                    "price":{"gte":2.335,"lte":2.345}""");
+                    "price":{"gte":2.335,"lte":2.345}""",
+                    """
+                    "term":{"ratio":0.1}""");
+        }
+    }
+
+    @Test
+    void testBatchedMsearchSamplingAndKeywordStatistics()
+            throws Exception
+    {
+        try (Server server = new Server(true)) {
+            server.metadata.beginQuery(server.session);
+            try {
+                var sparseTable = server.metadata.getTableHandle(server.session, new SchemaTableName("default", "sparse"), Optional.empty(), Optional.empty());
+                var columns = server.metadata.getColumnHandles(server.session, sparseTable);
+                var b = (ElasticsearchColumnHandle) columns.get("b");
+                assertThat(((ElasticsearchColumnHandle) columns.get("a")).type()).isEqualTo(BIGINT);
+                assertThat(b.type()).isEqualTo(VARCHAR);
+                assertThat(server.msearchQueries).containsExactly("max_concurrent_searches=2");
+                assertThat(server.msearchBodies)
+                        .singleElement()
+                        .satisfies(body -> assertThat(body).contains("{\"allow_partial_search_results\":false}\n"));
+
+                var filtered = server.metadata.applyFilter(
+                        server.session,
+                        sparseTable,
+                        new Constraint(TupleDomain.withColumnDomains(Map.of(b, Domain.singleValue(VARCHAR, utf8Slice("ok")))))).orElseThrow();
+                var stats = server.metadata.getTableStatistics(server.session, filtered.getHandle());
+                assertThat(stats.getColumnStatistics()).containsKey(b);
+            }
+            finally {
+                server.metadata.cleanupQuery(server.session);
+            }
+
+            server.msearchFail.set(true);
+            TrinoException failure = catchThrowableOfType(TrinoException.class, () -> server.client.getIndexMetadata("sparse_fail"));
+            assertThat(failure.getErrorCode()).isEqualTo(ELASTICSEARCH_INVALID_METADATA.toErrorCode());
         }
     }
 
@@ -249,13 +292,11 @@ class TestElasticsearchInferredMetadata
             throws Exception
     {
         try (Server server = new Server(false)) {
-            server.client.initializeSchemaInference();
             assertThat(server.client.getIndexMetadata("events").schema().fields().getFirst().inferredMapping()).isEmpty();
             assertThat(server.samples).isEmpty();
         }
         try (Server server = new Server(true)) {
             server.explicit.set(true);
-            server.client.initializeSchemaInference();
             assertThat(server.client.getIndexMetadata("events").schema().fields().getFirst().inferredMapping()).isEmpty();
             assertThat(server.samples).isEmpty();
         }
@@ -266,8 +307,13 @@ class TestElasticsearchInferredMetadata
             throws Exception
     {
         try (Server server = new Server(true)) {
-            server.client.initializeSchemaInference();
-            assertThat(server.client.getIndexMetadata("empty").schema().fields().getFirst().asRawJson()).isTrue();
+            var empty = server.client.getIndexMetadata("empty").schema().fields().getFirst();
+            assertThat(empty.asRawJson()).isFalse();
+            assertThat(empty.inferredMapping()).isEmpty();
+            server.populated.set(true);
+            var populated = server.client.getIndexMetadata("empty").schema().fields().getFirst();
+            assertThat(populated.isArray()).isTrue();
+            assertThat(populated.inferredMapping()).isPresent();
             TrinoException failure = catchThrowableOfType(TrinoException.class, () -> server.client.getIndexMetadata("failed"));
             assertThat(failure.getErrorCode()).isEqualTo(ELASTICSEARCH_INVALID_METADATA.toErrorCode());
             assertThat(server.client.getIndexMetadata("events").schema().fields().getFirst().isArray()).isTrue();
@@ -282,10 +328,14 @@ class TestElasticsearchInferredMetadata
         private final ElasticsearchClient client;
         private final ElasticsearchMetadata metadata;
         private final TestingConnectorSession session;
+        private final AtomicBoolean populated = new AtomicBoolean();
         private final AtomicBoolean explicit = new AtomicBoolean();
         private final AtomicBoolean drift = new AtomicBoolean();
         private final AtomicBoolean scalarDrift = new AtomicBoolean();
+        private final AtomicBoolean msearchFail = new AtomicBoolean();
         private final List<JsonNode> samples = new CopyOnWriteArrayList<>();
+        private final List<String> msearchQueries = new CopyOnWriteArrayList<>();
+        private final List<String> msearchBodies = new CopyOnWriteArrayList<>();
         private final List<JsonNode> scanRequests = new CopyOnWriteArrayList<>();
 
         private Server(boolean enabled)
@@ -307,18 +357,68 @@ class TestElasticsearchInferredMetadata
                         case "/failed" -> """
                                           {"failed":{"settings":{"index.uuid":"failed"},"mappings":{"properties":{"age":{"type":"long"}}}}}
                                           """;
-                        case "/empty/_search" -> """
-                                                 {"timed_out":false,"_shards":{"failed":0},"hits":{"hits":[]}}
-                                                 """;
+                        case "/sparse", "/sparse/_mappings" -> """
+                                                               {"sparse":{"settings":{"index.uuid":"sparse"},"mappings":{"properties":{"a":{"type":"long"},"b":{"type":"keyword"}}}}}
+                                                               """;
+                        case "/sparse_fail", "/sparse_fail/_mappings" -> """
+                                                                         {"sparse_fail":{"settings":{"index.uuid":"sparse_fail"},"mappings":{"properties":{"a":{"type":"long"},"b":{"type":"keyword"}}}}}
+                                                                         """;
+                        case "/empty/_search" -> populated.get()
+                                ? """
+                                  {"hits":{"hits":[{"_id":"1","_source":{"age":[1]}}]}}
+                                  """
+                                : """
+                                  {"timed_out":false,"_shards":{"failed":0},"hits":{"hits":[]}}
+                                  """;
                         case "/failed/_search" -> """
                                                   {"timed_out":true,"_shards":{"failed":0},"hits":{"hits":[]}}
                                                   """;
+                        case "/sparse/_search", "/sparse_fail/_search" -> {
+                            JsonNode request = JSON.readTree(exchange.getRequestBody());
+                            if (request.path("size").asInt(-1) == 0) {
+                                yield """
+                                      {"timed_out":false,"_shards":{"failed":0},"hits":{"total":{"value":2,"relation":"eq"}},"aggregations":{
+                                        "f0_card":{"value":2},
+                                        "f0_count":{"value":2}
+                                      }}
+                                      """;
+                            }
+                            yield """
+                                  {"timed_out":false,"_shards":{"failed":0},"hits":{"hits":[{"_id":"1","_source":{}}]}}
+                                  """;
+                        }
+                        case "/sparse/_msearch", "/sparse_fail/_msearch" -> {
+                            if (!msearchFail.get()) {
+                                msearchQueries.add(exchange.getRequestURI().getRawQuery());
+                                msearchBodies.add(new String(exchange.getRequestBody().readAllBytes(), UTF_8));
+                                yield """
+                                      {"responses":[
+                                        {"timed_out":false,"_shards":{"failed":0},"hits":{"hits":[{"_id":"2","_source":{"a":1}}]}},
+                                        {"timed_out":false,"_shards":{"failed":0},"hits":{"hits":[{"_id":"3","_source":{"b":"ok"}}]}}
+                                      ]}
+                                      """;
+                            }
+                            yield """
+                                  {"responses":[
+                                    {"timed_out":false,"_shards":{"failed":0},"hits":{"hits":[{"_id":"2","_source":{"a":1}}]}},
+                                    {"timed_out":true,"_shards":{"failed":0},"hits":{"hits":[]}}
+                                  ]}
+                                  """;
+                        }
                         case "/events", "/events/_mappings" -> """
                                                                {"events":{"settings":{"index.uuid":"a"},"mappings":{%s%s}}}
                                                                """.formatted(explicit.get() ? "\"_meta\":{\"trino\":{}}, " : "", PROPERTIES);
                         case "/events/_search" -> {
                             JsonNode request = JSON.readTree(exchange.getRequestBody());
-                            if (exchange.getRequestURI().getRawQuery().contains("scroll=")) {
+                            if (request.path("size").asInt(-1) == 0) {
+                                yield """
+                                      {"timed_out":false,"_shards":{"failed":0},"hits":{"total":{"value":2,"relation":"eq"}},"aggregations":{
+                                        "f0_card":{"value":2},
+                                        "f0_count":{"value":2}
+                                      }}
+                                      """;
+                            }
+                            if (exchange.getRequestURI().getRawQuery() != null && exchange.getRequestURI().getRawQuery().contains("scroll=")) {
                                 scanRequests.add(request);
                                 yield """
                                       {"hits":{"hits":[{"_id":"4","fields":{"age":[2],"flag":["true"],"published":[true],

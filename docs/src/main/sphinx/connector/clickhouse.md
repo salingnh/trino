@@ -260,7 +260,18 @@ to the following table:
   -
 :::
 
-No other types are supported.
+Named `Array(Tuple(...))` columns with supported scalar members map to
+`ARRAY(ROW(...))`. On ClickHouse versions before 26.4, the connector can
+also reconstruct flattened `Nested` groups on MergeTree tables. On
+ClickHouse 24.4 through 26.3, positions missing from a sibling array are
+returned as SQL `NULL` using `arrayZipUnaligned`; on versions before 24.4,
+`arrayZip` is used and sibling arrays must have equal lengths.
+Reconstructed columns are read-only. To change them, alter the physical
+columns in ClickHouse.
+
+For a `Distributed` table or a server using independent dotted array
+columns, expose the desired grouping in a ClickHouse view as a named
+`Array(Tuple(...))`.
 
 ### Trino type to ClickHouse type mapping
 

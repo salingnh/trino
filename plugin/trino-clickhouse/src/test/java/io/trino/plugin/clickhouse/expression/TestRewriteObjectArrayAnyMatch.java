@@ -74,7 +74,7 @@ class TestRewriteObjectArrayAnyMatch
         Constant city = string("Huế");
         assertThat(rewrite(anyMatch(predicate(AND_FUNCTION_NAME, predicate(EQUAL_OPERATOR_FUNCTION_NAME, NAME, name), predicate(EQUAL_OPERATOR_FUNCTION_NAME, CITY, city)))))
                 .contains(new ParameterizedExpression(
-                        "arrayExists(item -> ifNull(((tupleElement(item, 1) = ?) AND (tupleElement(item, 2) = ?)), 0), \"remote users\")",
+                        "arrayExists(__trino_array_item -> ifNull(((tupleElement(__trino_array_item, 1) = ?) AND (tupleElement(__trino_array_item, 2) = ?)), 0), \"remote users\")",
                         List.of(parameter(name), parameter(city))));
     }
 
@@ -87,7 +87,7 @@ class TestRewriteObjectArrayAnyMatch
         Call nameMatches = predicate(EQUAL_OPERATOR_FUNCTION_NAME, name, NAME);
         assertThat(rewrite(anyMatch(predicate(OR_FUNCTION_NAME, cityIsNull, predicate(AND_FUNCTION_NAME, nameIsNotNull, nameMatches)))))
                 .contains(new ParameterizedExpression(
-                        "arrayExists(item -> ifNull((isNull(tupleElement(item, 2)) OR (isNotNull(tupleElement(item, 1)) AND (tupleElement(item, 1) = ?))), 0), \"remote users\")",
+                        "arrayExists(__trino_array_item -> ifNull((isNull(tupleElement(__trino_array_item, 2)) OR (isNotNull(tupleElement(__trino_array_item, 1)) AND (tupleElement(__trino_array_item, 1) = ?))), 0), \"remote users\")",
                         List.of(parameter(name))));
     }
 
@@ -98,11 +98,11 @@ class TestRewriteObjectArrayAnyMatch
         Call equalityToNull = predicate(EQUAL_OPERATOR_FUNCTION_NAME, NAME, nullVarchar);
         assertThat(rewrite(anyMatch(predicate(OR_FUNCTION_NAME, equalityToNull, predicate(IS_NULL_FUNCTION_NAME, CITY)))))
                 .contains(new ParameterizedExpression(
-                        "arrayExists(item -> ifNull((CAST(NULL AS Nullable(UInt8)) OR isNull(tupleElement(item, 2))), 0), \"remote users\")",
+                        "arrayExists(__trino_array_item -> ifNull((CAST(NULL AS Nullable(UInt8)) OR isNull(tupleElement(__trino_array_item, 2))), 0), \"remote users\")",
                         List.of()));
         assertThat(rewrite(anyMatch(new Constant(null, BOOLEAN))))
                 .contains(new ParameterizedExpression(
-                        "arrayExists(item -> ifNull(CAST(NULL AS Nullable(UInt8)), 0), \"remote users\")",
+                        "arrayExists(__trino_array_item -> ifNull(CAST(NULL AS Nullable(UInt8)), 0), \"remote users\")",
                         List.of()));
     }
 
@@ -113,7 +113,7 @@ class TestRewriteObjectArrayAnyMatch
         Call widenPriority = new Call(INTEGER, CAST_FUNCTION_NAME, List.of(PRIORITY));
         assertThat(rewrite(anyMatch(predicate(EQUAL_OPERATOR_FUNCTION_NAME, widenPriority, value))))
                 .contains(new ParameterizedExpression(
-                        "arrayExists(item -> ifNull((tupleElement(item, 3) = ?), 0), \"remote users\")",
+                        "arrayExists(__trino_array_item -> ifNull((tupleElement(__trino_array_item, 3) = ?), 0), \"remote users\")",
                         List.of(parameter(value))));
     }
 
