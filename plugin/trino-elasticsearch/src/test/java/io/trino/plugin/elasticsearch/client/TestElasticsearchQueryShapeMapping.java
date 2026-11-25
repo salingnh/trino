@@ -18,8 +18,10 @@ import org.junit.jupiter.api.Test;
 
 import java.util.List;
 import java.util.Map;
+import java.util.Optional;
 import java.util.Set;
 
+import static io.airlift.json.JsonCodec.jsonCodec;
 import static org.assertj.core.api.Assertions.assertThat;
 
 class TestElasticsearchQueryShapeMapping
@@ -101,6 +103,55 @@ class TestElasticsearchQueryShapeMapping
         }
         assertThat(eligible("{\"type\":\"long\"}", "{}", ",\"_source\":{\"enabled\":false}")).isFalse();
         assertThat(eligible("{\"type\":\"long\"}", "{}", ",\"_meta\":{\"trino\":{\"value\":{\"isArray\":true}}}")).isFalse();
+    }
+
+    @Test
+    void testObjectArrayMappingProof()
+            throws Exception
+    {
+        for (String type : List.of("object", "nested")) {
+            String index = arrayIndex(type, "{}", "");
+            var field = objectArrayField(index, index);
+            assertThat(((IndexMetadata.ObjectType) field.type()).arrayMapping())
+                    .contains(new IndexMetadata.ObjectArrayMapping(type.equals("nested"), Set.of("city")));
+            // Predicate eligibility inside the array must not enable the old scalar or query-shape path.
+            assertThat(field.supportsQueryShapes()).isFalse();
+            var codec = jsonCodec(IndexMetadata.Field.class);
+            assertThat(codec.fromJson(codec.toJson(field))).isEqualTo(field);
+        }
+
+        String nested = arrayIndex("nested", "{}", "");
+        String object = arrayIndex("object", "{}", "");
+        assertThat(objectArrayMapping(nested, object)).isEmpty();
+        assertThat(objectArrayMapping(nested, arrayIndex("nested", "{\"index.mapping.source.mode\":\"synthetic\"}", ""))).isEmpty();
+        assertThat(objectArrayMapping(nested, arrayIndex("nested", "{}", ",\"null_value\":\"missing\"")))
+                .contains(new IndexMetadata.ObjectArrayMapping(true, Set.of()));
+        String ignoreAbove = arrayIndex("nested", "{\"index.mapping.ignore_above\":256}", "");
+        assertThat(objectArrayMapping(ignoreAbove, ignoreAbove)).contains(new IndexMetadata.ObjectArrayMapping(true, Set.of()));
+    }
+
+    private static Optional<IndexMetadata.ObjectArrayMapping> objectArrayMapping(String first, String second)
+            throws Exception
+    {
+        return ((IndexMetadata.ObjectType) objectArrayField(first, second).type()).arrayMapping();
+    }
+
+    private static IndexMetadata.Field objectArrayField(String first, String second)
+            throws Exception
+    {
+        var row = new IndexMetadata.ObjectType(List.of(new IndexMetadata.Field(false, false, "city", new IndexMetadata.PrimitiveType("keyword"))));
+        var schema = new IndexMetadata.ObjectType(List.of(new IndexMetadata.Field(false, true, "users", row)));
+        return ElasticsearchQueryShapeMapping.apply(schema, JSON.readTree("{\"a\":" + first + ",\"b\":" + second + "}")).fields().getFirst();
+    }
+
+    private static String arrayIndex(String type, String settings, String fieldOptions)
+    {
+        return """
+               {"settings":%s,"mappings":{
+                 "_meta":{"trino":{"users":{"isArray":true}}},
+                 "properties":{"users":{"type":"%s","properties":{"city":{"type":"keyword"%s}}}}
+               }}
+               """.formatted(settings, type, fieldOptions);
     }
 
     private static boolean eligible(String mapping, String settings, String extra)

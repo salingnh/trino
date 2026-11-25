@@ -80,6 +80,7 @@ import java.util.Optional;
 import java.util.OptionalDouble;
 import java.util.OptionalLong;
 import java.util.Set;
+import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicReference;
@@ -124,6 +125,7 @@ public class ElasticsearchClient
     private final boolean pointInTimeSearchEnabled;
     private volatile boolean pointInTimeSupported;
     private final Duration scrollTimeout;
+    private final int requestTimeoutMillis;
     private final int statisticsRequestTimeoutMillis;
 
     private final AtomicReference<Set<ElasticsearchNode>> nodes = new AtomicReference<>(ImmutableSet.of());
@@ -133,6 +135,8 @@ public class ElasticsearchClient
     private final boolean tlsEnabled;
     private final boolean ignorePublishAddress;
     private final boolean keywordSubfieldPushdownWithIgnoreAbove;
+    private final boolean schemaInferenceEnabled;
+    private final Map<String, InferredSchema> inferredSchemas = new ConcurrentHashMap<>();
 
     private final TimeStat searchStats = new TimeStat(MILLISECONDS);
     private final TimeStat nextPageStats = new TimeStat(MILLISECONDS);
@@ -165,10 +169,36 @@ public class ElasticsearchClient
             case STREAMING -> new StreamingSearchResponseDecoder();
         };
         this.scrollTimeout = config.getScrollTimeout();
+        this.requestTimeoutMillis = toIntExact(config.getRequestTimeout().toMillis());
         this.statisticsRequestTimeoutMillis = toIntExact(config.getStatisticsRequestTimeout().toMillis());
         this.refreshInterval = config.getNodeRefreshInterval();
         this.tlsEnabled = config.isTlsEnabled();
         this.keywordSubfieldPushdownWithIgnoreAbove = config.isKeywordSubfieldPushdownWithIgnoreAbove();
+        this.schemaInferenceEnabled = config.isSchemaInferenceEnabled();
+    }
+
+    public void initializeSchemaInference()
+    {
+        if (!schemaInferenceEnabled) {
+            return;
+        }
+
+        List<String> indexes;
+        try {
+            indexes = getIndexes(false);
+        }
+        catch (TrinoException e) {
+            LOG.warn(e, "Could not list Elasticsearch indices for schema inference during catalog initialization");
+            return;
+        }
+        for (String index : indexes) {
+            try {
+                getIndexMetadata(index);
+            }
+            catch (TrinoException e) {
+                LOG.warn(e, "Could not initialize schema for Elasticsearch index '%s'", index);
+            }
+        }
     }
 
     @PostConstruct
@@ -408,6 +438,11 @@ public class ElasticsearchClient
 
     public List<String> getIndexes()
     {
+        return getIndexes(true);
+    }
+
+    private List<String> getIndexes(boolean requireMappedFields)
+    {
         return doRequest("/_cat/indices?h=index,docs.count,docs.deleted&format=json&s=index:asc", body -> {
             try {
                 ImmutableList.Builder<String> result = ImmutableList.builder();
@@ -417,10 +452,10 @@ public class ElasticsearchClient
                     // make sure the index has mappings we can use to derive the schema
                     int docsCount = root.get(i).get("docs.count").asInt();
                     int deletedDocsCount = root.get(i).get("docs.deleted").asInt();
-                    if (docsCount == 0 && deletedDocsCount == 0) {
+                    if (requireMappedFields && docsCount == 0 && deletedDocsCount == 0) {
                         try {
                             // without documents, the index won't have any dynamic mappings, but maybe there are some explicit ones
-                            if (getIndexMetadata(index).schema().fields().isEmpty()) {
+                            if (getIndexMetadata(index, keywordSubfieldPushdownWithIgnoreAbove, false, false).schema().fields().isEmpty()) {
                                 continue;
                             }
                         }
@@ -478,15 +513,15 @@ public class ElasticsearchClient
 
     public IndexMetadata getIndexMetadata(String index, boolean useBoundedKeyword)
     {
-        return getIndexMetadata(index, useBoundedKeyword, false);
+        return getIndexMetadata(index, useBoundedKeyword, false, schemaInferenceEnabled);
     }
 
     public IndexMetadata getIndexMetadataForStatistics(String index, boolean useBoundedKeyword)
     {
-        return getIndexMetadata(index, useBoundedKeyword, true);
+        return getIndexMetadata(index, useBoundedKeyword, true, false);
     }
 
-    private IndexMetadata getIndexMetadata(String index, boolean useBoundedKeyword, boolean statisticsRequest)
+    private IndexMetadata getIndexMetadata(String index, boolean useBoundedKeyword, boolean statisticsRequest, boolean infer)
     {
         String path = statisticsRequest
                 ? format("/%s/_mappings", index)
@@ -495,33 +530,21 @@ public class ElasticsearchClient
         return doRequest(path, statisticsRequest, body -> {
             try {
                 JsonNode indices = JSON_MAPPER.readTree(body);
-                JsonNode mappings = indices.elements().next()
-                        .get("mappings");
-
-                if (!mappings.elements().hasNext()) {
+                if (indices.isEmpty()) {
                     return new IndexMetadata(new IndexMetadata.ObjectType(ImmutableList.of()));
                 }
-                if (!mappings.has("properties")) {
-                    // Older versions of ElasticSearch supported multiple "type" mappings
-                    // for a given index. Newer versions support only one and don't
-                    // expose it in the document. Here we skip it if it's present.
-                    mappings = mappings.elements().next();
-
-                    if (!mappings.has("properties")) {
-                        return new IndexMetadata(new IndexMetadata.ObjectType(ImmutableList.of()));
+                IndexMetadata.ObjectType schema;
+                if (infer && indices.properties().stream().anyMatch(entry -> ElasticsearchSchemaInference.needsInference(entry.getValue().path("mappings")))) {
+                    schema = ElasticsearchSchemaInference.merge(indices.properties().stream()
+                            .map(entry -> schemaForIndex(entry.getKey(), entry.getValue(), useBoundedKeyword))
+                            .toList());
+                }
+                else {
+                    if (infer) {
+                        indices.properties().forEach(entry -> inferredSchemas.remove(entry.getKey()));
                     }
+                    schema = mappedSchema(indices.elements().next().path("mappings"), useBoundedKeyword);
                 }
-
-                JsonNode metaNode = nullSafeNode(mappings, "_meta");
-
-                JsonNode metaProperties = nullSafeNode(metaNode, "trino");
-
-                // stay backwards compatible with _meta.presto namespace for meta properties for some releases
-                if (metaProperties.isNull()) {
-                    metaProperties = nullSafeNode(metaNode, "presto");
-                }
-
-                IndexMetadata.ObjectType schema = parseType(mappings.get("properties"), metaProperties, useBoundedKeyword);
                 if (statisticsRequest) {
                     return new IndexMetadata(schema);
                 }
@@ -539,6 +562,76 @@ public class ElasticsearchClient
             }
         });
     }
+
+    private IndexMetadata.ObjectType mappedSchema(JsonNode mappings, boolean useBoundedKeyword)
+    {
+        if (!mappings.has("properties") && mappings.elements().hasNext()) {
+            mappings = mappings.elements().next();
+        }
+        JsonNode meta = mappings.path("_meta");
+        JsonNode trino = nullSafeNode(meta, "trino");
+        if (trino.isNull()) {
+            trino = nullSafeNode(meta, "presto");
+        }
+        return parseType(mappings.path("properties"), trino, useBoundedKeyword, false);
+    }
+
+    private IndexMetadata.ObjectType schemaForIndex(String index, JsonNode definition, boolean useBoundedKeyword)
+    {
+        JsonNode mappings = definition.path("mappings");
+        if (!ElasticsearchSchemaInference.needsInference(mappings)) {
+            inferredSchemas.remove(index);
+            return mappedSchema(mappings, useBoundedKeyword);
+        }
+
+        return inferredSchemas.compute(index, (_, existing) -> {
+            if (existing != null && existing.definition().equals(definition)) {
+                return existing;
+            }
+            IndexMetadata.ObjectType mapped = parseType(mappings.path("properties"), NullNode.getInstance(), false, true);
+            if (mapped.fields().isEmpty() || !mappings.path("_source").path("enabled").asBoolean(true)) {
+                return new InferredSchema(definition, mapped);
+            }
+            return new InferredSchema(definition, ElasticsearchSchemaInference.infer(mapped, definition, query -> fetchSchemaSample(index, query)));
+        }).schema();
+    }
+
+    private List<ElasticsearchSchemaInference.Sample> fetchSchemaSample(String index, ObjectNode query)
+    {
+        ObjectNode body = JSON.objectNode();
+        body.put("size", 3);
+        body.put("track_total_hits", false);
+        body.putArray("sort").add("_doc");
+        body.set("query", query);
+
+        try {
+            Response response = client.performRequestWithTimeout(
+                    "POST",
+                    format("/%s/_search", index),
+                    ImmutableMap.of("allow_partial_search_results", "false"),
+                    new StringEntity(body.toString(), UTF_8),
+                    requestTimeoutMillis,
+                    new BasicHeader("Content-Type", "application/json"));
+            try (InputStream stream = response.getEntity().getContent()) {
+                JsonNode result = JSON_MAPPER.readTree(stream);
+                if (result == null || result.path("timed_out").asBoolean() || result.path("_shards").path("failed").asInt() > 0 || !result.path("hits").path("hits").isArray()) {
+                    throw new TrinoException(ELASTICSEARCH_INVALID_METADATA, format("Incomplete schema sample for Elasticsearch index '%s'. Provide _meta.trino for this index or retry.", index));
+                }
+                ImmutableList.Builder<ElasticsearchSchemaInference.Sample> samples = ImmutableList.builder();
+                for (JsonNode hit : result.path("hits").path("hits")) {
+                    if (hit.path("_source").isObject()) {
+                        samples.add(new ElasticsearchSchemaInference.Sample(hit.path("_id").asText(), hit.path("_source")));
+                    }
+                }
+                return samples.build();
+            }
+        }
+        catch (IOException e) {
+            throw new TrinoException(ELASTICSEARCH_INVALID_METADATA, format("Could not sample Elasticsearch index '%s' for schema inference. Provide _meta.trino for this index or retry.", index), e);
+        }
+    }
+
+    private record InferredSchema(JsonNode definition, IndexMetadata.ObjectType schema) {}
 
     private Map<String, Set<String>> fetchIgnoredMalformedFields(String index)
     {
@@ -573,7 +666,7 @@ public class ElasticsearchClient
         }
     }
 
-    private IndexMetadata.ObjectType parseType(JsonNode properties, JsonNode metaProperties, boolean useBoundedKeyword)
+    private IndexMetadata.ObjectType parseType(JsonNode properties, JsonNode metaProperties, boolean useBoundedKeyword, boolean includeEmptyObjects)
     {
         ImmutableList.Builder<IndexMetadata.Field> result = ImmutableList.builder();
         for (Entry<String, JsonNode> field : properties.properties()) {
@@ -614,8 +707,8 @@ public class ElasticsearchClient
                     result.add(new IndexMetadata.Field(asRawJson, isArray, name, new IndexMetadata.ScaledFloatType(value.get("scaling_factor").asDouble(), aggregatable, sourceValueSemanticsExact)));
                 }
                 case "nested", "object" -> {
-                    if (value.has("properties")) {
-                        result.add(new IndexMetadata.Field(asRawJson, isArray, name, parseType(value.get("properties"), metaNode, useBoundedKeyword)));
+                    if (value.has("properties") || includeEmptyObjects || asRawJson) {
+                        result.add(new IndexMetadata.Field(asRawJson, isArray, name, parseType(value.path("properties"), metaNode, useBoundedKeyword, includeEmptyObjects)));
                     }
                     else {
                         LOG.debug("Ignoring empty object field: %s", name);
@@ -747,17 +840,17 @@ public class ElasticsearchClient
         return body;
     }
 
-    public SearchResult beginSearch(String index, int shard, JsonNode query, Optional<List<String>> fields, List<String> documentFields, List<JsonNode> sort, OptionalLong limit)
+    public SearchResult beginSearch(String index, int shard, JsonNode query, Optional<List<String>> fields, List<DocValueField> documentFields, List<JsonNode> sort, OptionalLong limit)
     {
         return beginSearch(index, shard, query, fields, documentFields, sort, limit, _ -> {});
     }
 
-    public SearchResult beginSearch(String index, int shard, JsonNode query, Optional<List<String>> fields, List<String> documentFields, List<JsonNode> sort, OptionalLong limit, Consumer<String> context)
+    public SearchResult beginSearch(String index, int shard, JsonNode query, Optional<List<String>> fields, List<DocValueField> documentFields, List<JsonNode> sort, OptionalLong limit, Consumer<String> context)
     {
         return beginSearch(index, shard, query, fields, documentFields, sort, limit, context, JSON.objectNode());
     }
 
-    public SearchResult beginSearch(String index, int shard, JsonNode query, Optional<List<String>> fields, List<String> documentFields, List<JsonNode> sort, OptionalLong limit, Consumer<String> context, JsonNode runtimeMappings)
+    public SearchResult beginSearch(String index, int shard, JsonNode query, Optional<List<String>> fields, List<DocValueField> documentFields, List<JsonNode> sort, OptionalLong limit, Consumer<String> context, JsonNode runtimeMappings)
     {
         ObjectNode searchBody = searchBody(query, fields, documentFields, sort, limit);
         if (!runtimeMappings.isEmpty()) {
@@ -789,7 +882,7 @@ public class ElasticsearchClient
         }
     }
 
-    private ObjectNode searchBody(JsonNode query, Optional<List<String>> fields, List<String> documentFields, List<JsonNode> sort, OptionalLong limit)
+    private ObjectNode searchBody(JsonNode query, Optional<List<String>> fields, List<DocValueField> documentFields, List<JsonNode> sort, OptionalLong limit)
     {
         ObjectNode searchBody = JSON.objectNode();
         searchBody.set("query", query);
@@ -822,11 +915,32 @@ public class ElasticsearchClient
 
         if (!documentFields.isEmpty()) {
             ArrayNode docFields = JSON.arrayNode();
-            documentFields.forEach(docFields::add);
+            documentFields.forEach(field -> {
+                if (field.format().isPresent()) {
+                    docFields.addObject().put("field", field.name()).put("format", field.format().orElseThrow());
+                }
+                else {
+                    docFields.add(field.name());
+                }
+            });
             searchBody.set("docvalue_fields", docFields);
         }
 
         return searchBody;
+    }
+
+    public record DocValueField(String name, Optional<String> format)
+    {
+        public DocValueField(String name)
+        {
+            this(name, Optional.empty());
+        }
+
+        public DocValueField
+        {
+            requireNonNull(name, "name is null");
+            requireNonNull(format, "format is null");
+        }
     }
 
     public boolean isPointInTimeSearchEnabled()
@@ -859,7 +973,7 @@ public class ElasticsearchClient
             String id,
             JsonNode query,
             Optional<List<String>> fields,
-            List<String> documentFields,
+            List<DocValueField> documentFields,
             List<JsonNode> sort,
             OptionalLong limit,
             List<JsonNode> searchAfter,
@@ -872,7 +986,7 @@ public class ElasticsearchClient
             String id,
             JsonNode query,
             Optional<List<String>> fields,
-            List<String> documentFields,
+            List<DocValueField> documentFields,
             List<JsonNode> sort,
             OptionalLong limit,
             List<JsonNode> searchAfter,

@@ -46,6 +46,7 @@ import static java.util.Objects.requireNonNull;
         @JsonSubTypes.Type(value = ElasticsearchRemotePredicate.And.class, name = "and"),
         @JsonSubTypes.Type(value = ElasticsearchRemotePredicate.Or.class, name = "or"),
         @JsonSubTypes.Type(value = ElasticsearchRemotePredicate.Not.class, name = "not"),
+        @JsonSubTypes.Type(value = ElasticsearchRemotePredicate.Nested.class, name = "nested"),
         @JsonSubTypes.Type(value = ElasticsearchRemotePredicate.Enforced.class, name = "enforced"),
         @JsonSubTypes.Type(value = ElasticsearchRemotePredicate.Term.class, name = "term"),
         @JsonSubTypes.Type(value = ElasticsearchRemotePredicate.Terms.class, name = "terms"),
@@ -67,6 +68,7 @@ public sealed interface ElasticsearchRemotePredicate
                 ElasticsearchRemotePredicate.MatchNone,
                 ElasticsearchRemotePredicate.MatchPhrase,
                 ElasticsearchRemotePredicate.MatchPhrasePrefix,
+                ElasticsearchRemotePredicate.Nested,
                 ElasticsearchRemotePredicate.Not,
                 ElasticsearchRemotePredicate.Or,
                 ElasticsearchRemotePredicate.Prefix,
@@ -95,6 +97,7 @@ public sealed interface ElasticsearchRemotePredicate
             case And and -> and.predicates().stream().allMatch(ElasticsearchRemotePredicate::isExact);
             case Or or -> or.predicates().stream().allMatch(ElasticsearchRemotePredicate::isExact);
             case Not not -> not.predicate().isExact();
+            case Nested nested -> nested.predicate().isExact();
             case Enforced _ -> false;
             case Term _, Terms _, Range _, Prefix _, Regexp _, MatchPhrase _, MatchPhrasePrefix _, Exists _, ScriptPredicate _, MatchNone _ -> true;
         };
@@ -107,6 +110,7 @@ public sealed interface ElasticsearchRemotePredicate
             case And _ -> "and";
             case Or _ -> "or";
             case Not _ -> "not";
+            case Nested _ -> "nested";
             case Enforced _ -> "enforced";
             case Term _ -> "term";
             case Terms _ -> "terms";
@@ -241,6 +245,16 @@ public sealed interface ElasticsearchRemotePredicate
         }
     }
 
+    record Nested(String path, ElasticsearchRemotePredicate predicate)
+            implements ElasticsearchRemotePredicate
+    {
+        public Nested
+        {
+            path = requireField(path);
+            requireNonNull(predicate, "predicate is null");
+        }
+    }
+
     record Not(ElasticsearchRemotePredicate predicate)
             implements ElasticsearchRemotePredicate
     {
@@ -293,14 +307,20 @@ public sealed interface ElasticsearchRemotePredicate
         }
     }
 
-    record Range(String field, Optional<Bound> lower, Optional<Bound> upper)
+    record Range(String field, Optional<Bound> lower, Optional<Bound> upper, Optional<String> format)
             implements ElasticsearchRemotePredicate
     {
+        public Range(String field, Optional<Bound> lower, Optional<Bound> upper)
+        {
+            this(field, lower, upper, Optional.empty());
+        }
+
         public Range
         {
             field = requireField(field);
             requireNonNull(lower, "lower is null");
             requireNonNull(upper, "upper is null");
+            requireNonNull(format, "format is null");
             checkArgument(lower.isPresent() || upper.isPresent(), "range has no bounds");
         }
     }

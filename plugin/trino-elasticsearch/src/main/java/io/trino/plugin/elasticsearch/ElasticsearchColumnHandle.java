@@ -32,9 +32,15 @@ public record ElasticsearchColumnHandle(
         DecoderDescriptor decoderDescriptor,
         boolean supportsPredicates,
         boolean supportsQueryShapes,
-        boolean predicateMappingSafe)
+        boolean predicateMappingSafe,
+        boolean inferred)
         implements ColumnHandle
 {
+    public ElasticsearchColumnHandle(List<String> path, Type type, IndexMetadata.Type elasticsearchType, DecoderDescriptor decoderDescriptor, boolean supportsPredicates, boolean supportsQueryShapes, boolean predicateMappingSafe)
+    {
+        this(path, type, elasticsearchType, decoderDescriptor, supportsPredicates, supportsQueryShapes, predicateMappingSafe, false);
+    }
+
     public ElasticsearchColumnHandle(List<String> path, Type type, IndexMetadata.Type elasticsearchType, DecoderDescriptor decoderDescriptor, boolean supportsPredicates)
     {
         this(path, type, elasticsearchType, decoderDescriptor, supportsPredicates, true, true);

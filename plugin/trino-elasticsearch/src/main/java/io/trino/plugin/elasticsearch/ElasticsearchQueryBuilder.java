@@ -109,6 +109,11 @@ public final class ElasticsearchQueryBuilder
 
                 checkArgument(!domain.isNone(), "Unexpected NONE domain for %s", column.name());
                 if (!domain.isAll()) {
+                    if (ElasticsearchMappedScalarPredicates.handles(column)) {
+                        var predicate = ElasticsearchRemotePredicateTranslator.translateDomain(column, domain).orElseThrow();
+                        filterClauses.add(ElasticsearchRemotePredicateQueryBuilder.build(predicate));
+                        continue;
+                    }
                     // An analyzed text column that is not exact-match pushable is queried with a full-text match_phrase
                     boolean fullText = !column.supportsPredicates() && column.type() instanceof VarcharType;
                     addPredicateToClauses(filterClauses, mustNotClauses, column.predicateName(), domain, column.type(), fullText);

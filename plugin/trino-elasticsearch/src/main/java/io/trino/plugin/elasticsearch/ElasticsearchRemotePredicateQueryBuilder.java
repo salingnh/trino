@@ -40,6 +40,11 @@ final class ElasticsearchRemotePredicateQueryBuilder
             case ElasticsearchRemotePredicate.Not not -> JSON.objectNode().set(
                     "bool",
                     JSON.objectNode().set("must_not", JSON.arrayNode().add(build(not.predicate()))));
+            case ElasticsearchRemotePredicate.Nested nested -> {
+                ObjectNode body = JSON.objectNode().put("path", nested.path()).put("score_mode", "none");
+                body.set("query", build(nested.predicate()));
+                yield JSON.objectNode().set("nested", body);
+            }
             case ElasticsearchRemotePredicate.Enforced enforced -> build(enforced.predicate());
             case ElasticsearchRemotePredicate.SourceScript script -> JSON.objectNode().set(
                     "term", JSON.objectNode().put(script.runtimeField(), true));
@@ -64,6 +69,7 @@ final class ElasticsearchRemotePredicateQueryBuilder
                 ObjectNode bounds = JSON.objectNode();
                 range.lower().ifPresent(bound -> bounds.set(bound.inclusive() ? "gte" : "gt", toJsonValue(bound.value())));
                 range.upper().ifPresent(bound -> bounds.set(bound.inclusive() ? "lte" : "lt", toJsonValue(bound.value())));
+                range.format().ifPresent(format -> bounds.put("format", format));
                 yield JSON.objectNode().set("range", JSON.objectNode().set(range.field(), bounds));
             }
             case ElasticsearchRemotePredicate.Prefix prefix -> JSON.objectNode().set(
@@ -106,6 +112,7 @@ final class ElasticsearchRemotePredicateQueryBuilder
             case ElasticsearchRemotePredicate.And and -> and.predicates().forEach(value -> collectRuntimeMappings(value, mappings));
             case ElasticsearchRemotePredicate.Or or -> or.predicates().forEach(value -> collectRuntimeMappings(value, mappings));
             case ElasticsearchRemotePredicate.Not not -> collectRuntimeMappings(not.predicate(), mappings);
+            case ElasticsearchRemotePredicate.Nested nested -> collectRuntimeMappings(nested.predicate(), mappings);
             case ElasticsearchRemotePredicate.Enforced enforced -> collectRuntimeMappings(enforced.predicate(), mappings);
             default -> {}
         }

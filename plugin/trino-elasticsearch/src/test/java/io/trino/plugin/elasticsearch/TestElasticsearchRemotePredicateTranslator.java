@@ -13,7 +13,11 @@
  */
 package io.trino.plugin.elasticsearch;
 
+import io.trino.plugin.elasticsearch.client.IndexMetadata.InferredScalarMode;
 import io.trino.plugin.elasticsearch.client.IndexMetadata.PrimitiveType;
+import io.trino.plugin.elasticsearch.client.IndexMetadata.ScaledFloatType;
+import io.trino.plugin.elasticsearch.decoders.DoubleDecoder;
+import io.trino.plugin.elasticsearch.decoders.InferredValueDecoder;
 import io.trino.plugin.elasticsearch.decoders.IntegerDecoder;
 import io.trino.plugin.elasticsearch.expression.ElasticsearchRemotePredicate;
 import io.trino.spi.connector.ColumnHandle;
@@ -34,6 +38,7 @@ import static io.trino.plugin.elasticsearch.ElasticsearchRemotePredicateTranslat
 import static io.trino.plugin.elasticsearch.ElasticsearchRemotePredicateTranslator.conjunction;
 import static io.trino.plugin.elasticsearch.ElasticsearchTableHandle.Type.SCAN;
 import static io.trino.plugin.elasticsearch.expression.ElasticsearchRemotePredicate.Enforcement.PREFILTER;
+import static io.trino.spi.type.DoubleType.DOUBLE;
 import static io.trino.spi.type.IntegerType.INTEGER;
 import static org.assertj.core.api.Assertions.assertThat;
 
@@ -45,6 +50,56 @@ public class TestElasticsearchRemotePredicateTranslator
             new PrimitiveType("integer"),
             new IntegerDecoder.Descriptor("UserID"),
             true);
+
+    @Test
+    public void testScaledFloatDoesNotRoundTermLiteralToNearestStoredValue()
+    {
+        var scaled = new ElasticsearchColumnHandle(
+                List.of("price"),
+                DOUBLE,
+                new ScaledFloatType(100),
+                new InferredValueDecoder.Descriptor(
+                        "price",
+                        "DOUBLE",
+                        Set.of("INTEGER", "REAL", "STRING"),
+                        false,
+                        InferredScalarMode.DOC_VALUES,
+                        new DoubleDecoder.Descriptor("price")),
+                true,
+                true,
+                true,
+                true);
+        var predicate = ElasticsearchRemotePredicateTranslator.translateDomain(scaled, Domain.singleValue(DOUBLE, 2.344)).orElseThrow();
+        var bounds = ElasticsearchRemotePredicateQueryBuilder.build(predicate).at("/range/price");
+        assertThat(bounds.path("gte").asDouble()).isEqualTo(2.345);
+        assertThat(bounds.path("lte").asDouble()).isEqualTo(2.345);
+        // Elasticsearch computes ceil(234.5) and floor(234.5): no stored value can satisfy both.
+        assertThat(ElasticsearchRemotePredicateTranslator.translateDomain(scaled, Domain.singleValue(DOUBLE, 1e18))).isEmpty();
+    }
+
+    @Test
+    public void testWidenedFloatUsesTheActualStoredPrecision()
+    {
+        var floating = new ElasticsearchColumnHandle(
+                List.of("ratio"),
+                DOUBLE,
+                new PrimitiveType("float"),
+                new InferredValueDecoder.Descriptor(
+                        "ratio",
+                        "DOUBLE",
+                        Set.of("INTEGER", "REAL", "STRING"),
+                        false,
+                        InferredScalarMode.DOC_VALUES,
+                        new DoubleDecoder.Descriptor("ratio")),
+                true,
+                true,
+                true,
+                true);
+        var predicate = ElasticsearchRemotePredicateTranslator.translateDomain(floating, Domain.singleValue(DOUBLE, 0.1)).orElseThrow();
+        var bounds = ElasticsearchRemotePredicateQueryBuilder.build(predicate).at("/range/ratio");
+        assertThat(bounds.path("gte").asDouble()).isEqualTo((double) 0.1f);
+        assertThat(bounds.path("lt").asDouble()).isEqualTo((double) 0.1f);
+    }
 
     @Test
     public void testMultiplePredicatesOnSameFieldArePreserved()

@@ -28,6 +28,8 @@ import io.trino.plugin.elasticsearch.client.ElasticsearchClient;
 import io.trino.plugin.elasticsearch.client.FieldStatistics;
 import io.trino.plugin.elasticsearch.client.IndexMetadata;
 import io.trino.plugin.elasticsearch.client.IndexMetadata.DateTimeType;
+import io.trino.plugin.elasticsearch.client.IndexMetadata.InferredMapping;
+import io.trino.plugin.elasticsearch.client.IndexMetadata.InferredScalarMode;
 import io.trino.plugin.elasticsearch.client.IndexMetadata.ObjectType;
 import io.trino.plugin.elasticsearch.client.IndexMetadata.PrimitiveType;
 import io.trino.plugin.elasticsearch.client.IndexMetadata.ScaledFloatType;
@@ -36,6 +38,7 @@ import io.trino.plugin.elasticsearch.decoders.ArrayDecoder;
 import io.trino.plugin.elasticsearch.decoders.BigintDecoder;
 import io.trino.plugin.elasticsearch.decoders.BooleanDecoder;
 import io.trino.plugin.elasticsearch.decoders.DoubleDecoder;
+import io.trino.plugin.elasticsearch.decoders.InferredValueDecoder;
 import io.trino.plugin.elasticsearch.decoders.IntegerDecoder;
 import io.trino.plugin.elasticsearch.decoders.IpAddressDecoder;
 import io.trino.plugin.elasticsearch.decoders.RawJsonDecoder;
@@ -112,6 +115,7 @@ import java.util.Map.Entry;
 import java.util.Optional;
 import java.util.OptionalLong;
 import java.util.Set;
+import java.util.concurrent.ConcurrentHashMap;
 import java.util.function.UnaryOperator;
 import java.util.stream.Collectors;
 import java.util.stream.IntStream;
@@ -192,6 +196,7 @@ public class ElasticsearchMetadata
     private final boolean statisticsEnabled;
     private final long statisticsMaxIndexDocuments;
     private final int statisticsMaxColumns;
+    private final Map<String, Map<String, IndexMetadata>> querySchemas = new ConcurrentHashMap<>();
 
     @Inject
     public ElasticsearchMetadata(TypeManager typeManager, ElasticsearchClient client, ElasticsearchConfig config)
@@ -211,6 +216,18 @@ public class ElasticsearchMetadata
     }
 
     @Override
+    public void beginQuery(ConnectorSession session)
+    {
+        querySchemas.putIfAbsent(session.getQueryId(), new ConcurrentHashMap<>());
+    }
+
+    @Override
+    public void cleanupQuery(ConnectorSession session)
+    {
+        querySchemas.remove(session.getQueryId());
+    }
+
+    @Override
     public ElasticsearchTableHandle getTableHandle(ConnectorSession session, SchemaTableName tableName, Optional<ConnectorTableVersion> startVersion, Optional<ConnectorTableVersion> endVersion)
     {
         if (startVersion.isPresent() || endVersion.isPresent()) {
@@ -227,7 +244,7 @@ public class ElasticsearchMetadata
                 query = Optional.of(parts[1]);
             }
 
-            if (client.indexExists(table) && !client.getIndexMetadata(table).schema().fields().isEmpty()) {
+            if (client.indexExists(table) && !schema(session, table).schema().fields().isEmpty()) {
                 return new ElasticsearchTableHandle(SCAN, schemaName, table, query);
             }
         }
@@ -245,25 +262,28 @@ public class ElasticsearchMetadata
                     new SchemaTableName(handle.schema(), handle.index()),
                     ImmutableList.of(PASSTHROUGH_QUERY_RESULT_COLUMN_METADATA));
         }
-        return getTableMetadata(handle.schema(), handle.index(), getKeywordSubfieldPushdownWithIgnoreAbove(session));
+        return getTableMetadata(session, handle.schema(), handle.index());
     }
 
-    private ConnectorTableMetadata getTableMetadata(String schemaName, String tableName, boolean useBoundedKeyword)
+    private ConnectorTableMetadata getTableMetadata(ConnectorSession session, String schemaName, String tableName)
     {
-        InternalTableMetadata internalTableMetadata = makeInternalTableMetadata(schemaName, tableName, useBoundedKeyword);
+        InternalTableMetadata internalTableMetadata = makeInternalTableMetadata(session, schemaName, tableName);
         return new ConnectorTableMetadata(new SchemaTableName(schemaName, tableName), internalTableMetadata.columnMetadata());
     }
 
-    private InternalTableMetadata makeInternalTableMetadata(ConnectorTableHandle table, boolean useBoundedKeyword)
+    private IndexMetadata schema(ConnectorSession session, String tableName)
     {
-        ElasticsearchTableHandle handle = (ElasticsearchTableHandle) table;
-        return makeInternalTableMetadata(handle.schema(), handle.index(), useBoundedKeyword);
+        boolean useBoundedKeyword = getKeywordSubfieldPushdownWithIgnoreAbove(session);
+        Map<String, IndexMetadata> schemas = querySchemas.get(session.getQueryId());
+        if (schemas == null) {
+            return client.getIndexMetadata(tableName, useBoundedKeyword);
+        }
+        return schemas.computeIfAbsent(tableName, name -> client.getIndexMetadata(name, useBoundedKeyword));
     }
 
-    private InternalTableMetadata makeInternalTableMetadata(String schema, String tableName, boolean useBoundedKeyword)
+    private InternalTableMetadata makeInternalTableMetadata(ConnectorSession session, String schema, String tableName)
     {
-        IndexMetadata metadata = client.getIndexMetadata(tableName, useBoundedKeyword);
-        List<IndexMetadata.Field> fields = getColumnFields(metadata);
+        List<IndexMetadata.Field> fields = getColumnFields(schema(session, tableName));
         return new InternalTableMetadata(new SchemaTableName(schema, tableName), makeColumnMetadata(fields), makeColumnHandles(fields));
     }
 
@@ -310,9 +330,11 @@ public class ElasticsearchMetadata
                     converted.type(),
                     field.type(),
                     converted.decoderDescriptor(),
-                    supportsPredicates(field.type(), converted.type),
+                    supportsPredicates(field.type(), converted.type) ||
+                            (field.type() instanceof ScaledFloatType && field.inferredMapping().map(mapping -> mapping.scalarMode().usesDocValues()).orElse(false)),
                     field.supportsQueryShapes(),
-                    field.predicateMappingSafe()));
+                    field.predicateMappingSafe(),
+                    field.inferredMapping().isPresent()));
         }
 
         return result.buildOrThrow();
@@ -334,11 +356,62 @@ public class ElasticsearchMetadata
         }
 
         if (field.isArray()) {
-            TypeAndDecoder element = toTrino(path, elementField(field));
-            return new TypeAndDecoder(new ArrayType(element.type()), new ArrayDecoder.Descriptor(element.decoderDescriptor()));
+            TypeAndDecoder element = toTrino(prefix, elementField(field));
+            if (element == null) {
+                return null;
+            }
+            TypeAndDecoder array = new TypeAndDecoder(new ArrayType(element.type()), new ArrayDecoder.Descriptor(element.decoderDescriptor()));
+            if (field.inferredMapping().isPresent()) {
+                return withInferredDecoder(path, array, Set.of("ARRAY"), false);
+            }
+            return array;
         }
 
         IndexMetadata.Type type = field.type();
+        if (field.inferredMapping().isPresent() && !(type instanceof ObjectType)) {
+            InferredMapping inferred = field.inferredMapping().orElseThrow();
+            IndexMetadata.Type decodedType = inferred.primitiveType()
+                    .<IndexMetadata.Type>map(PrimitiveType::new)
+                    .orElse(type);
+            TypeAndDecoder mapping;
+            if (inferred.scalarMode().usesDocValues() && decodedType instanceof DateTimeType) {
+                mapping = new TypeAndDecoder(TIMESTAMP_MILLIS, new TimestampDecoder.Descriptor(path));
+            }
+            else if (inferred.scalarMode().usesDocValues() && decodedType instanceof PrimitiveType primitive &&
+                    (primitive.name().equals("float") || primitive.name().equals("half_float"))) {
+                mapping = new TypeAndDecoder(DOUBLE, new DoubleDecoder.Descriptor(path));
+            }
+            else {
+                mapping = toTrino(prefix, new IndexMetadata.Field(false, false, field.name(), decodedType));
+            }
+            if (mapping == null) {
+                return null;
+            }
+            Set<String> acceptedTypes = inferred.observedTypes();
+            if (decodedType instanceof DateTimeType) {
+                // Dates can alternate between strings and epoch milliseconds without changing the SQL type.
+                acceptedTypes = Set.of("INTEGER", "STRING");
+            }
+            else if (acceptedTypes.isEmpty()) {
+                acceptedTypes = switch (decodedType) {
+                    case PrimitiveType primitive -> switch (primitive.name()) {
+                        case "byte", "short", "integer", "long" -> Set.of("INTEGER");
+                        case "float", "double" -> Set.of("INTEGER", "REAL");
+                        case "boolean" -> Set.of("BOOLEAN");
+                        default -> Set.of("STRING");
+                    };
+                    case ScaledFloatType _ -> Set.of("INTEGER", "REAL");
+                    default -> throw new IllegalStateException("Unsupported inferred type: " + decodedType);
+                };
+            }
+            if (inferred.scalarMode() != InferredScalarMode.SOURCE) {
+                Set<String> mappedTypes = inferred.scalarMode().usesDocValues()
+                        ? Set.of("INTEGER", "REAL", "STRING", "BOOLEAN")
+                        : (mapping.type().equals(BOOLEAN) ? Set.of("BOOLEAN", "STRING") : Set.of("STRING"));
+                return withInferredDecoder(path, mapping, mappedTypes, false, inferred.scalarMode());
+            }
+            return withInferredDecoder(path, mapping, acceptedTypes, inferred.primitiveType().filter("keyword"::equals).isPresent());
+        }
         if (type instanceof PrimitiveType primitiveType) {
             return switch (primitiveType.name()) {
                 case "float" -> new TypeAndDecoder(REAL, new RealDecoder.Descriptor(path));
@@ -387,6 +460,17 @@ public class ElasticsearchMetadata
         return null;
     }
 
+    private static TypeAndDecoder withInferredDecoder(String path, TypeAndDecoder mapping, Set<String> acceptedTypes, boolean stringify)
+    {
+        return withInferredDecoder(path, mapping, acceptedTypes, stringify, InferredScalarMode.SOURCE);
+    }
+
+    private static TypeAndDecoder withInferredDecoder(String path, TypeAndDecoder mapping, Set<String> acceptedTypes, boolean stringify, InferredScalarMode scalarMode)
+    {
+        return new TypeAndDecoder(mapping.type(), new InferredValueDecoder.Descriptor(
+                path, mapping.type().getDisplayName().toUpperCase(ENGLISH), acceptedTypes, stringify, scalarMode, mapping.decoderDescriptor()));
+    }
+
     private static String appendPath(String base, String element)
     {
         if (base.isEmpty()) {
@@ -399,7 +483,13 @@ public class ElasticsearchMetadata
     public static IndexMetadata.Field elementField(IndexMetadata.Field field)
     {
         checkArgument(field.isArray(), "Cannot get element field from a non-array field");
-        return new IndexMetadata.Field(field.asRawJson(), false, field.name(), field.type(), field.supportsQueryShapes(), field.predicateMappingSafe());
+        Optional<InferredMapping> elementMapping = field.inferredMapping().map(inferred -> new InferredMapping(
+                inferred.arrayDepth() - 1,
+                inferred.primitiveType(),
+                inferred.observedTypes(),
+                inferred.integersFitDouble()));
+        boolean elementIsArray = elementMapping.map(inferred -> inferred.arrayDepth() > 0).orElse(false);
+        return new IndexMetadata.Field(field.asRawJson(), elementIsArray, field.name(), field.type(), field.supportsQueryShapes(), field.predicateMappingSafe(), elementMapping);
     }
 
     @Override
@@ -435,7 +525,7 @@ public class ElasticsearchMetadata
             return PASSTHROUGH_QUERY_COLUMNS;
         }
 
-        InternalTableMetadata tableMetadata = makeInternalTableMetadata(tableHandle, getKeywordSubfieldPushdownWithIgnoreAbove(session));
+        InternalTableMetadata tableMetadata = makeInternalTableMetadata(session, table.schema(), table.index());
         return tableMetadata.columnHandles();
     }
 
@@ -487,7 +577,7 @@ public class ElasticsearchMetadata
         listTables(session, schemaName).stream()
                 .flatMap(name -> {
                     try {
-                        ConnectorTableMetadata tableMetadata = getTableMetadata(name.getSchemaName(), name.getTableName(), getKeywordSubfieldPushdownWithIgnoreAbove(session));
+                        ConnectorTableMetadata tableMetadata = getTableMetadata(session, name.getSchemaName(), name.getTableName());
                         return Stream.of(TableColumnsMetadata.forTable(tableMetadata.getTable(), tableMetadata.getColumns()));
                     }
                     catch (TrinoException e) {
@@ -563,7 +653,7 @@ public class ElasticsearchMetadata
         // blocking planning for minutes.
         List<ElasticsearchColumnHandle> columns;
         try {
-            columns = statisticsColumns(handle, getKeywordSubfieldPushdownWithIgnoreAbove(session));
+            columns = statisticsColumns(session, handle);
         }
         catch (RuntimeException e) {
             return tableStatistics.build();
@@ -593,7 +683,7 @@ public class ElasticsearchMetadata
         return tableStatistics.build();
     }
 
-    private List<ElasticsearchColumnHandle> statisticsColumns(ElasticsearchTableHandle handle, boolean useBoundedKeyword)
+    private List<ElasticsearchColumnHandle> statisticsColumns(ConnectorSession session, ElasticsearchTableHandle handle)
     {
         // Only collect per-column statistics for columns the query references (filters, GROUP BY, sort). Those are the
         // columns whose distinct-count / null-fraction / range the optimizer actually consults; output-only columns
@@ -603,12 +693,17 @@ public class ElasticsearchMetadata
         if (referenced.isEmpty()) {
             return ImmutableList.of();
         }
-        IndexMetadata metadata = client.getIndexMetadataForStatistics(handle.index(), useBoundedKeyword);
+        Map<String, IndexMetadata> schemas = querySchemas.get(session.getQueryId());
+        IndexMetadata metadata = schemas == null ? null : schemas.get(handle.index());
+        if (metadata == null) {
+            metadata = client.getIndexMetadataForStatistics(handle.index(), getKeywordSubfieldPushdownWithIgnoreAbove(session));
+        }
         return makeColumnHandles(getColumnFields(metadata)).values().stream()
                 .map(ElasticsearchColumnHandle.class::cast)
                 .filter(column -> column.path().size() == 1)
                 // Array columns are excluded: value_count aggregates every array element and can exceed the row count
                 .filter(column -> !(column.type() instanceof ArrayType))
+                .filter(column -> !column.inferred())
                 .filter(column -> !BuiltinColumns.isBuiltinColumn(column.name()))
                 .filter(column -> isAggregatable(column.elasticsearchType()))
                 // Statistics must describe the values returned from _source, not rounded doc values.
@@ -646,6 +741,7 @@ public class ElasticsearchMetadata
             case ElasticsearchRemotePredicate.And and -> and.predicates().forEach(child -> addReferencedFields(child, fields));
             case ElasticsearchRemotePredicate.Or or -> or.predicates().forEach(child -> addReferencedFields(child, fields));
             case ElasticsearchRemotePredicate.Not not -> addReferencedFields(not.predicate(), fields);
+            case ElasticsearchRemotePredicate.Nested nested -> addReferencedFields(nested.predicate(), fields);
             case ElasticsearchRemotePredicate.Enforced enforced -> addReferencedFields(enforced.predicate(), fields);
             case ElasticsearchRemotePredicate.Term term -> fields.add(term.field());
             case ElasticsearchRemotePredicate.Terms terms -> fields.add(terms.field());
@@ -1003,7 +1099,8 @@ public class ElasticsearchMetadata
         for (Entry<ColumnHandle, Domain> entry : domains.entrySet()) {
             ElasticsearchColumnHandle column = (ElasticsearchColumnHandle) entry.getKey();
 
-            if (column.supportsPredicates() && ElasticsearchRemotePredicateTranslator.canTranslateDomain(entry.getValue())) {
+            if (column.supportsPredicates() && ElasticsearchRemotePredicateTranslator.canTranslateDomain(entry.getValue()) &&
+                    (!ElasticsearchMappedScalarPredicates.handles(column) || ElasticsearchRemotePredicateTranslator.translateDomain(column, entry.getValue()).isPresent())) {
                 supported.put(column, entry.getValue());
             }
             else if (column.predicateMappingSafe() && fullTextMode != FullTextPushdownMode.DISABLED && isFullTextCandidate(column, entry.getValue())) {
@@ -1290,7 +1387,7 @@ public class ElasticsearchMetadata
         // Create projected column representations for supported sub expressions. Simple column references and chain of
         // dereferences on a variable are supported right now.
         Set<ConnectorExpression> projectedExpressions = projections.stream()
-                .flatMap(expression -> isSupportedIntegerWidening(expression)
+                .flatMap(expression -> isSupportedIntegerWidening(expression) && !isInferredProjection(expression, assignments)
                         ? Stream.of(expression)
                         : extractSupportedProjectedColumns(expression, ElasticsearchMetadata::isSupportedForPushdown).stream())
                 .collect(toImmutableSet());
@@ -1344,7 +1441,8 @@ public class ElasticsearchMetadata
                         new BigintDecoder.Descriptor(projectedColumnHandle.name()),
                         projectedColumnHandle.supportsPredicates(),
                         projectedColumnHandle.supportsQueryShapes(),
-                        projectedColumnHandle.predicateMappingSafe());
+                        projectedColumnHandle.predicateMappingSafe(),
+                        projectedColumnHandle.inferred());
                 projectedColumnName += "$bigint";
             }
             while (newAssignments.containsKey(projectedColumnName)
@@ -1377,6 +1475,12 @@ public class ElasticsearchMetadata
     private static ConnectorExpression projectionInput(ConnectorExpression expression)
     {
         return isSupportedIntegerWidening(expression) ? ((Call) expression).getArguments().getFirst() : expression;
+    }
+
+    private static boolean isInferredProjection(ConnectorExpression expression, Map<String, ColumnHandle> assignments)
+    {
+        ProjectedColumnRepresentation input = ApplyProjectionUtil.createProjectedColumnRepresentation(projectionInput(expression));
+        return assignments.get(input.getVariable().getName()) instanceof ElasticsearchColumnHandle column && column.inferred();
     }
 
     private static boolean isSupportedIntegerWidening(ConnectorExpression expression)
@@ -1443,7 +1547,8 @@ public class ElasticsearchMetadata
                 decoderDescriptor,
                 supportsPredicates(elasticsearchType, projectedColumnType),
                 supportsQueryShapes,
-                predicateMappingSafe);
+                predicateMappingSafe,
+                baseColumn.inferred());
     }
 
     @Override

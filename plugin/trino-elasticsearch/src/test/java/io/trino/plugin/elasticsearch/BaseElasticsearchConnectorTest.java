@@ -204,7 +204,7 @@ public abstract class BaseElasticsearchConnectorTest
         String tableName = "field_ignore_malformed_" + randomNameSuffix();
         createIndex(tableName,
                 """
-                {"properties": {"value": {"type": "integer", "ignore_malformed": true}}}
+                {"_meta": {"trino": {}}, "properties": {"value": {"type": "integer", "ignore_malformed": true}}}
                 """);
         try {
             index(tableName, ImmutableMap.of("value", 1));
@@ -237,6 +237,7 @@ public abstract class BaseElasticsearchConnectorTest
                 {
                     "settings": {"index.mapping.ignore_malformed": true},
                     "mappings": {
+                        "_meta": {"trino": {}},
                         "properties": {
                             "id": {"type": "long", "ignore_malformed": false},
                             "value": {"type": "long"},
@@ -326,7 +327,7 @@ public abstract class BaseElasticsearchConnectorTest
         Request create = new Request("PUT", "/" + name);
         create.setJsonEntity(
                 """
-                {"settings":{"number_of_shards":3},"mappings":{"properties":{
+                {"settings":{"number_of_shards":3},"mappings":{"_meta":{"trino":{}},"properties":{
                   "b":{"type":"byte"},"s":{"type":"short"},"i":{"type":"integer"},"l":{"type":"long"},
                   "ts":{"type":"date"},"flag":{"type":"boolean"},"agg_0":{"type":"long"}}}}
                 """);
@@ -501,6 +502,7 @@ public abstract class BaseElasticsearchConnectorTest
         String properties =
                 """
                 {
+                  "_meta": {"trino": {}},
                   "properties": {
                     "text_bounded": { "type": "text", "fields": { "keyword": { "type": "keyword", "ignore_above": 256 } } },
                     "id": { "type": "keyword" }
@@ -1423,7 +1425,7 @@ public abstract class BaseElasticsearchConnectorTest
                 .buildOrThrow());
 
         assertThat(query("SELECT byte_column, short_column, integer_column, long_column, float_column, scaled_float_column, double_column FROM emptynumeric"))
-                .matches("VALUES (CAST(NULL AS TINYINT), CAST(NULL AS SMALLINT), CAST(NULL AS INTEGER), CAST(NULL AS BIGINT), CAST(NULL AS REAL), CAST(NULL AS DOUBLE), CAST(NULL AS DOUBLE))");
+                .matches("VALUES (CAST(NULL AS TINYINT), CAST(NULL AS SMALLINT), CAST(NULL AS INTEGER), CAST(NULL AS BIGINT), CAST(NULL AS DOUBLE), CAST(NULL AS DOUBLE), CAST(NULL AS DOUBLE))");
 
         deleteIndex(indexName);
     }
@@ -1728,7 +1730,7 @@ public abstract class BaseElasticsearchConnectorTest
         MaterializedResult expected = resultBuilder(rows.getTypes())
                 .row(
                         true,
-                        1.0f,
+                        1.0d,
                         1.0d,
                         1,
                         1L,
@@ -1754,6 +1756,7 @@ public abstract class BaseElasticsearchConnectorTest
         String mappings =
                 """
                 {
+                  "_meta": {"trino": {}},
                   "properties": {
                     "long_column":      { "type": "long" },
                     "unsupported_type": { "type": "completion"}
@@ -1879,7 +1882,7 @@ public abstract class BaseElasticsearchConnectorTest
 
         index(indexName, ImmutableMap.of("field", ImmutableMap.of("timestamp_column", 0)));
         index(indexName, ImmutableMap.of("field", ImmutableMap.of("timestamp_column", "1")));
-        index(indexName, ImmutableMap.of("field", ImmutableMap.of("timestamp_column", "1970-01-01T01:01:00+0000")));
+        index(indexName, ImmutableMap.of("field", ImmutableMap.of("timestamp_column", "1970-01-01T02:01:00+0100")));
 
         assertThat(query("SELECT field.timestamp_column FROM " + indexName))
                 .matches("VALUES " +
@@ -1894,7 +1897,7 @@ public abstract class BaseElasticsearchConnectorTest
             throws IOException
     {
         String indexName = "scaled_float_query_shapes";
-        createIndex(indexName, "{\"properties\":{\"amount\":{\"type\":\"scaled_float\",\"scaling_factor\":10},\"id\":{\"type\":\"integer\"}}}");
+        createIndex(indexName, "{\"_meta\":{\"trino\":{}},\"properties\":{\"amount\":{\"type\":\"scaled_float\",\"scaling_factor\":10},\"id\":{\"type\":\"integer\"}}}");
         try {
             // Distinct source values collapse to the same doc value (2.3). A second sort key makes
             // remote TopN select the wrong row deterministically, even if Trino sorts the result again.
@@ -1930,6 +1933,7 @@ public abstract class BaseElasticsearchConnectorTest
         String mappings =
                 """
                 {
+                  "_meta": {"trino": {}},
                   "properties": {
                     "text_column":         { "type": "text" },
                     "scaled_float_column": { "type": "scaled_float", "scaling_factor": 100 }
@@ -2005,7 +2009,7 @@ public abstract class BaseElasticsearchConnectorTest
                 """);
 
         MaterializedResult expected = resultBuilder(rows.getTypes())
-                .row(1.0f, 1.0d, 1, 1L)
+                .row(1.0d, 1.0d, 1, 1L)
                 .build();
 
         assertThat(rows.getMaterializedRows()).isEqualTo(expected.getMaterializedRows());

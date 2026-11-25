@@ -37,7 +37,7 @@ final class PointInTimeSearchExecutionStrategy
     private final JsonNode query;
     private final JsonNode runtimeMappings;
     private final Optional<List<String>> fields;
-    private final List<String> documentFields;
+    private final List<ElasticsearchClient.DocValueField> documentFields;
     private final List<JsonNode> sort;
     private final OptionalLong limit;
     private final ElasticsearchPushdownDiagnostics diagnostics;
@@ -51,7 +51,7 @@ final class PointInTimeSearchExecutionStrategy
             int shard,
             JsonNode query,
             Optional<List<String>> fields,
-            List<String> documentFields,
+            List<ElasticsearchClient.DocValueField> documentFields,
             List<JsonNode> sort,
             OptionalLong limit,
             ElasticsearchPushdownDiagnostics diagnostics)
@@ -65,7 +65,7 @@ final class PointInTimeSearchExecutionStrategy
             int shard,
             JsonNode query,
             Optional<List<String>> fields,
-            List<String> documentFields,
+            List<ElasticsearchClient.DocValueField> documentFields,
             List<JsonNode> sort,
             OptionalLong limit,
             ElasticsearchPushdownDiagnostics diagnostics,

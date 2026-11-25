@@ -4,10 +4,18 @@
 <img src="../_static/img/elasticsearch.png" class="connector-logo">
 ```
 
+```{toctree}
+:hidden:
+
+elasticsearch-schema-inference-vi
+```
+
 The Elasticsearch connector allows access to
 [Elasticsearch](https://www.elastic.co/products/elasticsearch) data from Trino.
 This document describes how to configure a catalog with the Elasticsearch
 connector to run SQL queries against Elasticsearch.
+
+[Tiếng Việt](elasticsearch-schema-inference-vi.md)
 
 ## Requirements
 
@@ -29,126 +37,33 @@ elasticsearch.default-schema-name=default
 
 The following table details all general configuration properties:
 
-:::{list-table} Elasticsearch configuration properties
-:widths: 35, 55, 10
-:header-rows: 1
-
-* - Property name
-  - Description
-  - Default
-* - `elasticsearch.host`
-  - The comma-separated list of host names for the Elasticsearch node to connect
-    to. This property is required.
-  -
-* - `elasticsearch.port`
-  - Port to use to connect to Elasticsearch.
-  - `9200`
-* - `elasticsearch.default-schema-name`
-  - The schema that contains all tables defined without a qualifying schema
-    name.
-  - `default`
-* - `elasticsearch.scroll-size`
-  - Sets the maximum number of hits that can be returned with each
-    [Elasticsearch scroll
-    request](https://www.elastic.co/guide/en/elasticsearch/reference/current/search-request-scroll.html#scroll-search-context).
-  - `1000`
-* - `elasticsearch.search-strategy`
-  - Pagination strategy: `SCROLL` or opt-in `PIT`. PIT requires Elasticsearch
-    7.17 or 8.x and permission to open and close point-in-time contexts.
-  - `SCROLL`
-* - `elasticsearch.response-decoder`
-  - Search response decoder: `MATERIALIZED` or opt-in `STREAMING`. Streaming
-    materializes one hit tree at a time, independently of pagination strategy.
-  - `MATERIALIZED`
-* - `elasticsearch.scroll-timeout`
-  - [Duration](prop-type-duration) for Elasticsearch to keep the search context
-    alive for scroll requests.
-  - `1m`
-* - `elasticsearch.request-timeout`
-  - Timeout [duration](prop-type-duration) for all Elasticsearch requests.
-  - `10s`
-* - `elasticsearch.connect-timeout`
-  - Timeout [duration](prop-type-duration) for all Elasticsearch connection
-    attempts.
-  - `1s`
-* - `elasticsearch.backoff-init-delay`
-  - The minimum [duration](prop-type-duration) between backpressure retry
-    attempts for a single request to Elasticsearch. Setting it too low can
-    overwhelm an already struggling cluster.
-  - `500ms`
-* - `elasticsearch.backoff-max-delay`
-  - The maximum [duration](prop-type-duration) between backpressure retry
-    attempts for a single request to Elasticsearch.
-  - `20s`
-* - `elasticsearch.max-retry-time`
-  - The maximum [duration](prop-type-duration) across all retry attempts for a
-    single request to Elasticsearch.
-  - `30s`
-* - `elasticsearch.node-refresh-interval`
-  - [Duration](prop-type-duration) between requests to refresh the list of
-    available Elasticsearch nodes.
-  - `1m`
-* - `elasticsearch.statistics.enabled`
-  - Enable collecting table statistics by querying Elasticsearch aggregations
-    (document count, distinct values, null fractions, and min/max ranges) so the
-    cost-based optimizer can better plan joins and other operations.
-  - `true`
-* - `elasticsearch.statistics.max-index-documents`
-  - Collect per-column statistics only for indices with at most this many
-    documents. Larger indices report the row count only, avoiding a per-column
-    aggregation over every document that can time out during planning.
-  - `20000000`
-* - `elasticsearch.statistics.max-statistics-columns`
-  - Maximum number of columns to collect per-column statistics for. Statistics are
-    collected only for columns the query references (filter, `GROUP BY`, and sort
-    columns); this bounds that set.
-  - `32`
-* - `elasticsearch.statistics.request-timeout`
-  - Socket timeout for a single per-column statistics request. A slow aggregation
-    fails fast, with no retry, and falls back to the row count instead of blocking
-    query planning.
-  - `5s`
-* - `elasticsearch.dynamic-filtering.wait-timeout`
-  - Maximum [duration](prop-type-duration) to wait for the collection of dynamic
-    filters, such as join keys, before generating splits. Dynamic filters are
-    applied within the Elasticsearch query to reduce the number of scanned
-    documents. Can be overridden per query with the
-    `dynamic_filtering_wait_timeout` session property.
-  - `5s`
-* - `elasticsearch.keyword-subfield-pushdown-with-ignore-above`
-  - Push predicates and aggregations for a `text` field down to its exact-match
-    `keyword` sub-field even when that sub-field defines `ignore_above`. This is
-    disabled by default because `ignore_above` omits longer values from the
-    sub-field index, so pushed-down predicates could return incomplete results.
-    Enable it only when all indexed string values are shorter than the
-    `ignore_above` limit. Can be overridden per query with the
-    `keyword_subfield_pushdown_with_ignore_above` session property.
-  - `false`
-* - `elasticsearch.aggregation-page-size`
-  - Maximum composite aggregation buckets per response. Must be at least 1.
-    Larger pages reduce requests but can increase memory per response.
-  - `10000`
-* - `elasticsearch.aggregation-pushdown.enabled`
-  - Enable pushing down aggregations to Elasticsearch. Can be overridden per
-    query with the `aggregation_pushdown_enabled` session property.
-  - `true`
-* - `elasticsearch.scalar-script-pushdown.enabled`
-  - Enable Painless pushdown for supported scalar expressions on source-equivalent
-    fields with doc values. Can be overridden with the
-    `scalar_script_pushdown_enabled` session property.
-  - `false`
-* - `elasticsearch.full-text-pushdown`
-  - Push predicates and dynamic filters on analyzed `text` fields to
-    Elasticsearch as full-text queries. One of `DISABLED`, `SAFE`, or `UNSAFE`.
-    A `text` field is tokenized, so this does not have exact SQL semantics. Can
-    be overridden per query with the `full_text_pushdown_mode` session property.
-  - `DISABLED`
-* - `elasticsearch.ignore-publish-address`
-  - Disable using the address published by the Elasticsearch API to connect for
-    queries. Some deployments map Elasticsearch ports to a random public port
-    and enabling this property can help in these cases.
-  - `false`
-:::
+| Property name | Description | Default |
+| --- | --- | --- |
+| `elasticsearch.host` | The comma-separated list of host names for the Elasticsearch node to connect to. This property is required. |  |
+| `elasticsearch.port` | Port to use to connect to Elasticsearch. | `9200` |
+| `elasticsearch.default-schema-name` | The schema that contains all tables defined without a qualifying schema name. | `default` |
+| `elasticsearch.scroll-size` | Sets the maximum number of hits that can be returned with each [Elasticsearch scroll request](https://www.elastic.co/guide/en/elasticsearch/reference/current/search-request-scroll.html#scroll-search-context). | `1000` |
+| `elasticsearch.search-strategy` | Pagination strategy: `SCROLL` or opt-in `PIT`. PIT requires Elasticsearch 7.17 or 8.x and permission to open and close point-in-time contexts. | `SCROLL` |
+| `elasticsearch.response-decoder` | Search response decoder: `MATERIALIZED` or opt-in `STREAMING`. Streaming materializes one hit tree at a time, independently of pagination strategy. | `MATERIALIZED` |
+| `elasticsearch.scroll-timeout` | [Duration](prop-type-duration) for Elasticsearch to keep the search context alive for scroll requests. | `1m` |
+| `elasticsearch.request-timeout` | Timeout [duration](prop-type-duration) for all Elasticsearch requests. | `10s` |
+| `elasticsearch.connect-timeout` | Timeout [duration](prop-type-duration) for all Elasticsearch connection attempts. | `1s` |
+| `elasticsearch.backoff-init-delay` | The minimum [duration](prop-type-duration) between backpressure retry attempts for a single request to Elasticsearch. Setting it too low can overwhelm an already struggling cluster. | `500ms` |
+| `elasticsearch.backoff-max-delay` | The maximum [duration](prop-type-duration) between backpressure retry attempts for a single request to Elasticsearch. | `20s` |
+| `elasticsearch.max-retry-time` | The maximum [duration](prop-type-duration) across all retry attempts for a single request to Elasticsearch. | `30s` |
+| `elasticsearch.node-refresh-interval` | [Duration](prop-type-duration) between requests to refresh the list of available Elasticsearch nodes. | `1m` |
+| `elasticsearch.schema-inference.enabled` | Enable [schema inference](#elasticsearch-schema-inference) for indices without Trino metadata. | `true` |
+| `elasticsearch.statistics.enabled` | Enable collecting table statistics by querying Elasticsearch aggregations (document count, distinct values, null fractions, and min/max ranges) so the cost-based optimizer can better plan joins and other operations. | `true` |
+| `elasticsearch.statistics.max-index-documents` | Collect per-column statistics only for indices with at most this many documents. Larger indices report the row count only, avoiding a per-column aggregation over every document that can time out during planning. | `20000000` |
+| `elasticsearch.statistics.max-statistics-columns` | Maximum number of columns to collect per-column statistics for. Statistics are collected only for columns the query references (filter, `GROUP BY`, and sort columns); this bounds that set. | `32` |
+| `elasticsearch.statistics.request-timeout` | Socket timeout for a single per-column statistics request. A slow aggregation fails fast, with no retry, and falls back to the row count instead of blocking query planning. | `5s` |
+| `elasticsearch.dynamic-filtering.wait-timeout` | Maximum [duration](prop-type-duration) to wait for the collection of dynamic filters, such as join keys, before generating splits. Dynamic filters are applied within the Elasticsearch query to reduce the number of scanned documents. Can be overridden per query with the `dynamic_filtering_wait_timeout` session property. | `5s` |
+| `elasticsearch.keyword-subfield-pushdown-with-ignore-above` | Push predicates and aggregations for a `text` field down to its exact-match `keyword` sub-field even when that sub-field defines `ignore_above`. This is disabled by default because `ignore_above` omits longer values from the sub-field index, so pushed-down predicates could return incomplete results. Enable it only when all indexed string values are shorter than the `ignore_above` limit. Can be overridden per query with the `keyword_subfield_pushdown_with_ignore_above` session property. | `false` |
+| `elasticsearch.aggregation-page-size` | Maximum composite aggregation buckets per response. Must be at least 1. Larger pages reduce requests but can increase memory per response. | `10000` |
+| `elasticsearch.aggregation-pushdown.enabled` | Enable pushing down aggregations to Elasticsearch. Can be overridden per query with the `aggregation_pushdown_enabled` session property. | `true` |
+| `elasticsearch.scalar-script-pushdown.enabled` | Enable Painless pushdown for supported scalar expressions on source-equivalent fields with doc values. Can be overridden with the `scalar_script_pushdown_enabled` session property. | `false` |
+| `elasticsearch.full-text-pushdown` | Push predicates and dynamic filters on analyzed `text` fields to Elasticsearch as full-text queries. One of `DISABLED`, `SAFE`, or `UNSAFE`. A `text` field is tokenized, so this does not have exact SQL semantics. Can be overridden per query with the `full_text_pushdown_mode` session property. | `DISABLED` |
+| `elasticsearch.ignore-publish-address` | Disable using the address published by the Elasticsearch API to connect for queries. Some deployments map Elasticsearch ports to a random public port and enabling this property can help in these cases. | `false` |
 
 ### Authentication
 
@@ -158,41 +73,21 @@ To enable AWS authentication and authorization using IAM policies, the
 `elasticsearch.security` option must be set to `AWS`. Additionally, the
 following options must be configured:
 
-:::{list-table}
-:widths: 40, 60
-:header-rows: 1
-
-* - Property name
-  - Description
-* - `elasticsearch.aws.region`
-  - AWS region of the Elasticsearch endpoint. This option is required.
-* - `elasticsearch.aws.access-key`
-  - AWS access key to use to connect to the Elasticsearch domain. If not set, the
-    default AWS credentials provider chain is used.
-* - `elasticsearch.aws.secret-key`
-  - AWS secret key to use to connect to the Elasticsearch domain. If not set, the
-    default AWS credentials provider chain is used.
-* - `elasticsearch.aws.iam-role`
-  - Optional ARN of an IAM role to assume to connect to Elasticsearch. Note that
-    the configured IAM user must be able to assume this role.
-* - `elasticsearch.aws.external-id`
-  - Optional external ID to pass while assuming an AWS IAM role.
-:::
+| Property name | Description |
+| --- | --- |
+| `elasticsearch.aws.region` | AWS region of the Elasticsearch endpoint. This option is required. |
+| `elasticsearch.aws.access-key` | AWS access key to use to connect to the Elasticsearch domain. If not set, the default AWS credentials provider chain is used. |
+| `elasticsearch.aws.secret-key` | AWS secret key to use to connect to the Elasticsearch domain. If not set, the default AWS credentials provider chain is used. |
+| `elasticsearch.aws.iam-role` | Optional ARN of an IAM role to assume to connect to Elasticsearch. Note that the configured IAM user must be able to assume this role. |
+| `elasticsearch.aws.external-id` | Optional external ID to pass while assuming an AWS IAM role. |
 
 To enable password authentication, the `elasticsearch.security` option must be set
 to `PASSWORD`. Additionally the following options must be configured:
 
-:::{list-table}
-:widths: 45, 55
-:header-rows: 1
-
-* - Property name
-  - Description
-* - `elasticsearch.auth.user`
-  - Username to use to connect to Elasticsearch.
-* - `elasticsearch.auth.password`
-  - Password to use to connect to Elasticsearch.
-:::
+| Property name | Description |
+| --- | --- |
+| `elasticsearch.auth.user` | Username to use to connect to Elasticsearch. |
+| `elasticsearch.auth.password` | Password to use to connect to Elasticsearch. |
 
 ### Connection security with TLS
 
@@ -205,30 +100,14 @@ supports key stores and trust stores in P12 (PKCS) or Java Key Store (JKS) forma
 
 The available configuration values are listed in the following table:
 
-:::{list-table} TLS Security Properties
-:widths: 40, 60
-:header-rows: 1
-
-* - Property name
-  - Description
-* - `elasticsearch.tls.enabled`
-  - Enables TLS security.
-* - `elasticsearch.tls.keystore-path`
-  - The path to the P12 (PKCS) or [JKS](/security/inspect-jks)
-    key store.
-* - `elasticsearch.tls.truststore-path`
-  - The path to P12 (PKCS) or [JKS](/security/inspect-jks)
-    trust store.
-* - `elasticsearch.tls.keystore-password`
-  - The key password for the key store specified by
-    `elasticsearch.tls.keystore-path`.
-* - `elasticsearch.tls.truststore-password`
-  - The key password for the trust store specified by
-    `elasticsearch.tls.truststore-path`.
-* - `elasticsearch.tls.verify-hostnames`
-  - Flag to determine if the hostnames in the certificates must be verified. Defaults
-    to `true`.
-:::
+| Property name | Description |
+| --- | --- |
+| `elasticsearch.tls.enabled` | Enables TLS security. |
+| `elasticsearch.tls.keystore-path` | The path to the P12 (PKCS) or [JKS](/security/inspect-jks) key store. |
+| `elasticsearch.tls.truststore-path` | The path to P12 (PKCS) or [JKS](/security/inspect-jks) trust store. |
+| `elasticsearch.tls.keystore-password` | The key password for the key store specified by `elasticsearch.tls.keystore-path`. |
+| `elasticsearch.tls.truststore-password` | The key password for the trust store specified by `elasticsearch.tls.truststore-path`. |
+| `elasticsearch.tls.verify-hostnames` | Flag to determine if the hostnames in the certificates must be verified. Defaults to `true`. |
 
 (elasticsearch-type-mapping)=
 ## Type mapping
@@ -241,47 +120,19 @@ connector {ref}`maps some types <type-mapping-overview>` when reading data.
 The connector maps Elasticsearch types to the corresponding Trino types
 according to the following table:
 
-:::{list-table} Elasticsearch type to Trino type mapping
-:widths: 30, 30, 50
-:header-rows: 1
-
-* - Elasticsearch type
-  - Trino type
-  - Notes
-* - `BOOLEAN`
-  - `BOOLEAN`
-  -
-* - `DOUBLE`
-  - `DOUBLE`
-  -
-* - `FLOAT`
-  - `REAL`
-  -
-* - `BYTE`
-  - `TINYINT`
-  -
-* - `SHORT`
-  - `SMALLINT`
-  -
-* - `INTEGER`
-  - `INTEGER`
-  -
-* - `LONG`
-  - `BIGINT`
-  -
-* - `KEYWORD`
-  - `VARCHAR`
-  -
-* - `TEXT`
-  - `VARCHAR`
-  -
-* - `DATE`
-  - `TIMESTAMP`
-  - For more information, see [](elasticsearch-date-types).
-* - `IPADDRESS`
-  - `IP`
-  -
-:::
+| Elasticsearch type | Trino type | Notes |
+| --- | --- | --- |
+| `BOOLEAN` | `BOOLEAN` |  |
+| `DOUBLE` | `DOUBLE` |  |
+| `FLOAT` | `REAL` |  |
+| `BYTE` | `TINYINT` |  |
+| `SHORT` | `SMALLINT` |  |
+| `INTEGER` | `INTEGER` |  |
+| `LONG` | `BIGINT` |  |
+| `KEYWORD` | `VARCHAR` |  |
+| `TEXT` | `VARCHAR` |  |
+| `DATE` | `TIMESTAMP` | For more information, see [Date types](#elasticsearch-date-types). |
+| `IPADDRESS` | `IP` |  |
 
 No other types are supported.
 
@@ -299,39 +150,41 @@ For example, you can have an Elasticsearch index that contains documents with th
 
 ```json
 {
-    "array_string_field": ["trino","the","lean","machine-ohs"],
+    "array_string_field": ["trino", "the", "lean", "machine-ohs"],
     "long_field": 314159265359,
     "id_field": "564e6982-88ee-4498-aa98-df9e3f6b6109",
     "timestamp_field": "2025-09-17T06:22:48.000Z",
     "object_field": {
-        "array_int_field": [86,75,309],
+        "array_int_field": [86, 75, 309],
         "int_field": 2
     }
 }
 ```
 
-The array fields of this structure can be defined by using the following command to add the field
-property definition to the `_meta.trino` property of the target index mapping with Elasticsearch available at `search.example.com:9200`:
+To declare the array fields explicitly, add them to `_meta.trino` in the mapping
+for the existing `doc` index. Include any metadata you want to retain when
+updating `_meta`.
 
 ```shell
 curl --request PUT \
-    --url search.example.com:9200/doc/_mapping \
-    --header 'content-type: application/json' \
-    --data '
+    --url http://search.example.com:9200/doc/_mapping \
+    --header 'Content-Type: application/json' \
+    --data-binary @- <<'JSON'
 {
     "_meta": {
-        "trino":{
-            "array_string_field":{
-                "isArray":true
+        "trino": {
+            "array_string_field": {
+                "isArray": true
             },
-            "object_field":{
-                "array_int_field":{
-                    "isArray":true
+            "object_field": {
+                "array_int_field": {
+                    "isArray": true
                 }
-            },
+            }
         }
     }
-}'
+}
+JSON
 ```
 
 :::{note}
@@ -345,6 +198,7 @@ The Elasticsearch connector supports only the default `date` type. All other
 [date] formats including [built-in date formats] and [custom date formats] are
 not supported. Dates with the [format] property are ignored.
 
+(elasticsearch-raw-json-transform)=
 ### Raw JSON transform
 
 Documents in Elasticsearch can include more complex structures that are not
@@ -357,16 +211,17 @@ available at `search.example.com:9200`:
 
 ```shell
 curl --request PUT \
-    --url search.example.com:9200/doc/_mapping \
-    --header 'content-type: application/json' \
-    --data '
+    --url http://search.example.com:9200/doc/_mapping \
+    --header 'Content-Type: application/json' \
+    --data-binary @- <<'JSON'
 {
     "properties": {
-        "array_string_field":{
+        "array_string_field": {
             "type": "keyword"
         }
     }
-}'
+}
+JSON
 ```
 
 All the following documents are legal for Elasticsearch with
@@ -378,13 +233,13 @@ All the following documents are legal for Elasticsearch with
         "array_string_field": "trino"
     },
     {
-        "array_string_field": ["trino","is","the","best"]
+        "array_string_field": ["trino", "is", "the", "best"]
     },
     {
-        "array_string_field": ["trino",["is","the","best"]]
+        "array_string_field": ["trino", ["is", "the", "best"]]
     },
     {
-        "array_string_field": ["trino",["is",["the","best"]]]
+        "array_string_field": ["trino", ["is", ["the", "best"]]]
     }
 ]
 ```
@@ -393,33 +248,30 @@ See the [Elasticsearch array
 documentation](https://www.elastic.co/guide/en/elasticsearch/reference/current/array.html)
 for more details.
 
-Further, Elasticsearch supports types, such as
-[dense_vector](https://www.elastic.co/guide/en/elasticsearch/reference/current/dense-vector.html),
-that are not supported in Trino. These and other types can cause parsing
-exceptions for users that use of these types in Elasticsearch. To manage all of
-these scenarios, you can transform fields to raw JSON by annotating it in a
-Trino-specific structure in the
-[\_meta](https://www.elastic.co/guide/en/elasticsearch/reference/current/mapping-meta-field.html)
-section of the index mapping. This indicates to Trino that the field, and all
-nested fields beneath, need to be cast to a `VARCHAR` field that contains the
-raw JSON content. These fields can be defined by using the following command to
-add the field property definition to the `_meta.trino` property of the target
-index mapping.
+Set `asRawJson: true` in `_meta.trino` to read a field and its children as
+`VARCHAR` containing raw JSON. This is useful for mixed shapes and for
+Elasticsearch types such as
+[`dense_vector`](https://www.elastic.co/guide/en/elasticsearch/reference/current/dense-vector.html)
+that have no direct Trino type mapping.
+
+The following command sets `asRawJson` for `array_string_field` in the existing
+`doc` index. Include any metadata you want to retain when updating `_meta`.
 
 ```shell
 curl --request PUT \
-    --url search.example.com:9200/doc/_mapping \
-    --header 'content-type: application/json' \
-    --data '
+    --url http://search.example.com:9200/doc/_mapping \
+    --header 'Content-Type: application/json' \
+    --data-binary @- <<'JSON'
 {
     "_meta": {
-        "trino":{
-            "array_string_field":{
-                "asRawJson":true
+        "trino": {
+            "array_string_field": {
+                "asRawJson": true
             }
         }
     }
-}'
+}
+JSON
 ```
 
 This preceding configuration causes Trino to return the `array_string_field`
@@ -430,23 +282,174 @@ field as a `VARCHAR` containing raw JSON. You can parse these fields with the
 It is not allowed to use `asRawJson` and `isArray` flags simultaneously for the same column.
 :::
 
+(elasticsearch-schema-inference)=
+### Schema inference
+
+Schema inference is enabled by default. The connector infers types for an index
+when its mapping contains neither `_meta.trino` nor legacy `_meta.presto`
+metadata. If `_meta.trino` exists, the connector skips sampling for the index and
+uses the declared settings and defaults. To disable inference for the catalog,
+add the following property to its properties file.
+
+```properties
+elasticsearch.schema-inference.enabled=false
+```
+
+#### How sampling works
+
+1. When the catalog starts, the coordinator reads the index mapping to identify
+   the fields and requests up to three documents.
+2. For each mapped field that still lacks a sample value and can be searched,
+   the coordinator requests up to three additional documents using an
+   Elasticsearch `exists` query. Each returned document can supply examples
+   for several fields.
+3. The connector uses the values in `_source` to choose Trino types and caches
+   the schema. Trino uses a consistent schema throughout the query.
+
+Elasticsearch `exists` checks for indexed values. A field can appear in
+`_source` and still have no indexed value, for example when its value exceeds
+`ignore_above`. [Elasticsearch `exists` query](https://www.elastic.co/docs/reference/query-languages/query-dsl/query-dsl-exists-query)
+
+#### How values map to Trino types
+
+Inference examines each field in `_source`, including fields inside objects.
+It checks array depth and the types of values inside the arrays separately.
+The observed value types are string, integer, floating-point number, boolean,
+and object. Missing fields and `null` do not count as observed types.
+Empty arrays and arrays containing only `null` provide evidence about array
+depth. The connector can use a supported mapping to determine the element
+type when no non-null elements are found.
+
+In the tables below, **raw JSON** means the connector exposes the entire
+affected field as `VARCHAR` containing JSON. For example, a string becomes
+the JSON text `"Hà Nội"` with quotes, and an array becomes JSON text with
+brackets. A field promoted to plain `VARCHAR` uses the text value without
+adding JSON quotes.
+
+##### Value type conflicts within one index
+
+For top-level scalar fields with supported numeric, boolean, or `date`
+mappings and doc values, the connector prefers the mapped type. For example,
+Elasticsearch can index `"02"` as the integer `2` in a `long` field. Trino
+reads the indexed value as `BIGINT` and validates the shape of `_source`.
+When `ignore_malformed` is enabled on a field using this mode, Trino
+reads an ignored value as SQL `NULL`. A `keyword` field with mixed number
+or boolean values can also use its indexed strings when the mapping supports
+this.
+
+The following promotion rules apply to array elements and fields that do
+not use the mapped type. The field must have a consistent array depth. A supported
+promotion at the element level keeps that depth. For example, arrays
+`[1]` and `["02"]` infer to `ARRAY(VARCHAR)` with values `["1"]` and
+`["02"]`.
+
+| Observed value types | Example | Inferred Trino type |
+| --- | --- | --- |
+| Integer and string | `1` and `"02"` | `VARCHAR`. The integer becomes `"1"` and `"02"` keeps its leading zero. |
+| Floating-point number and string | `1.5` and `"2.5"` | `VARCHAR`. The number becomes text. |
+| Boolean and string | `true` and `"false"` | `VARCHAR`. The boolean becomes `"true"`. |
+| Integer and floating-point number | `1` and `2.5` | `DOUBLE` when every sampled integer can be represented exactly. Otherwise, raw JSON. |
+| Integer and boolean | `1` and `true` | Raw JSON. |
+| Floating-point number and boolean | `1.5` and `true` | Raw JSON. |
+| Object and any primitive value | `{"name": "An"}` and `"An"` | Raw JSON. |
+| Three or more value types | `1`, `2.5`, and `"3"` | Raw JSON, even if each pair could be promoted on its own. |
+
+A mapped `boolean` field accepts JSON booleans and the string forms accepted
+by Elasticsearch, including the empty string for false. With doc values, the
+connector reads the indexed boolean. A `date` field with doc values becomes
+`TIMESTAMP(3)` using UTC epoch milliseconds, including when its mapping
+defines custom formats such as `yyyy/MM/dd HH:mm:ss||epoch_second`.
+For `float`, `half_float`, and `scaled_float`, the inferred column is
+`DOUBLE` and reads the stored precision from doc values. For example, a
+`scaled_float` field with a scaling factor of 100 exposes 2.34 for an input
+of 2.341.
+
+For one observed value type, the connector keeps a compatible, supported
+mapping. If a primitive mapping is incompatible or unsupported, the connector
+can infer `VARCHAR` for a string, `BIGINT` for an integer that fits, `DOUBLE`
+for a floating-point number, or `BOOLEAN` for a boolean. It uses raw JSON
+when no such rule applies.
+
+##### Conflicting shapes
+
+| Observed shapes | Example | Inferred Trino type |
+| --- | --- | --- |
+| A primitive value and an array | `"Hà Nội"` and `["Hà Nội", "Huế"]` | Raw JSON for the field. |
+| An object and an array of objects | `{"name": "An"}` and `[{"name": "Bình"}]` | Raw JSON for the field. |
+| Different array depths across documents or within one array | `["29"]` and `[["30"]]`, or `["29", ["30"]]` | Raw JSON for the field. |
+| Consistent array depth | `[["29", "30"]]` and `[["31"]]` | Keep the array depth. In this example the type is `ARRAY(ARRAY(VARCHAR))`. |
+| Objects with mapped child fields at the same depth | `{"name": "An"}` and `{"age": 28}` under an object mapping that defines both children | Infer each child separately. The object becomes `ROW`, wrapped in `ARRAY` at each observed array level. Missing children read as SQL `NULL`. |
+| Shape still unknown after sampling, or an object with no mapped child fields | Only missing or `null` values, or an empty object whose mapping has no children | Raw JSON for the field. |
+
+Fallback applies at the conflicting field. If `users` is an array of
+objects and only `users.city` mixes strings and arrays, `users` stays an
+`ARRAY(ROW(...))` and `city` becomes raw JSON inside the row.
+
+These examples describe values the connector can encounter in `_source`.
+An Elasticsearch mapping can reject some combinations, such as an object
+and a primitive value in the same mapped field.
+
+##### Conflicts across index mappings
+
+When an alias or wildcard requires inference for at least one backing index,
+the connector infers the eligible indices separately and merges their schemas
+with the declared schemas of other backing indices. A field present in just one
+schema keeps its type. For fields present in more than one schema, the connector
+applies the following rules.
+
+- Identical field definitions keep their type. If the definitions differ, a
+  raw JSON field, different array depths, or more than two combined value types
+  cause raw JSON fallback.
+- Object fields at the same depth merge their children recursively. In a
+  declared schema, the mapping supplies the value type for the merge rather
+  than a document sample.
+- String plus integer, floating-point number, or boolean can merge to
+  `VARCHAR` for primitive mappings. Integer plus floating-point number
+  can merge to `DOUBLE` when inference established that the sampled integers
+  can be represented exactly for every contributing field.
+- Otherwise, the connector keeps the type if the underlying type and inferred
+  type override agree. Other conflicts use raw JSON.
+
+Use the following statement to check the inferred schema. Replace
+`elasticsearch` and `events` with the catalog and index names.
+
+```sql
+DESCRIBE elasticsearch.default.events;
+```
+
+#### Pushdown
+
+Mapped scalar types can use predicate pushdown under the connector's normal
+rules. For example, `age > 1` on a `long` field uses the indexed numeric
+value. Trino evaluates filters on fields with `index: false`, incompatible
+mappings across indices, or raw JSON fallback. Existing guards such as
+`ignore_above` and `normalizer` for string fields also apply. Date predicates
+use native ranges with `format: epoch_millis`. Predicates on inferred
+`float`, `half_float`, and `scaled_float` use native range bounds adjusted
+for the indexed precision where an exact translation is available.
+[Elasticsearch type coercion](https://www.elastic.co/docs/reference/elasticsearch/mapping-reference/coerce)
+
+#### Troubleshoot type mismatches
+
+A document outside the sample can still trigger `TYPE_MISMATCH` when Trino
+decodes it. Queries evaluated entirely by Elasticsearch skip that decoding
+step. The error
+includes the index, document ID, and field information. Provide `_meta.trino`
+for the index to control how Trino reads the affected field. Use `isArray` for
+a supported array type or `asRawJson` to read mixed shapes as raw JSON. See
+[](elasticsearch-array-types) and [](elasticsearch-raw-json-transform).
+
+Read this section in {ref}`Vietnamese <elasticsearch-schema-inference-vi>`.
+
 ## Special columns
 
 The following hidden columns are available:
 
-:::{list-table}
-:widths: 25, 75
-:header-rows: 1
-
-* - Column
-  - Description
-* - `_id`
-  - The Elasticsearch document ID.
-* - `_score`
-  - The document score returned by the Elasticsearch query.
-* - `_source`
-  - The source of the original document.
-:::
+| Column | Description |
+| --- | --- |
+| `_id` | The Elasticsearch document ID. |
+| `_score` | The document score returned by the Elasticsearch query. |
+| `_source` | The source of the original document. |
 
 
 (elasticsearch-full-text-queries)=
@@ -547,31 +550,17 @@ query processing in parallel.
 The connector supports [predicate push down](predicate-pushdown) for the
 following data types:
 
-:::{list-table}
-:widths: 50, 50
-:header-rows: 1
-
-* - Elasticsearch
-  - Trino
-* - `boolean`
-  - `BOOLEAN`
-* - `double`
-  - `DOUBLE`
-* - `float`
-  - `REAL`
-* - `byte`
-  - `TINYINT`
-* - `short`
-  - `SMALLINT`
-* - `integer`
-  - `INTEGER`
-* - `long`
-  - `BIGINT`
-* - `keyword`
-  - `VARCHAR`
-* - `date`
-  - `TIMESTAMP`
-:::
+| Elasticsearch | Trino |
+| --- | --- |
+| `boolean` | `BOOLEAN` |
+| `double` | `DOUBLE` |
+| `float` | `REAL` |
+| `byte` | `TINYINT` |
+| `short` | `SMALLINT` |
+| `integer` | `INTEGER` |
+| `long` | `BIGINT` |
+| `keyword` | `VARCHAR` |
+| `date` | `TIMESTAMP` |
 
 No other data types are supported for predicate push down.
 

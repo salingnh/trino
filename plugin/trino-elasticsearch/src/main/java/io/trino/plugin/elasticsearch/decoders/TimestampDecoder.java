@@ -22,7 +22,12 @@ import io.trino.spi.TrinoException;
 import io.trino.spi.block.BlockBuilder;
 
 import java.time.Instant;
+import java.time.LocalDate;
 import java.time.LocalDateTime;
+import java.time.format.DateTimeFormatter;
+import java.time.format.DateTimeFormatterBuilder;
+import java.time.format.DateTimeParseException;
+import java.time.temporal.TemporalAccessor;
 import java.util.List;
 import java.util.Objects;
 import java.util.function.Supplier;
@@ -31,14 +36,24 @@ import static io.trino.spi.StandardErrorCode.NOT_SUPPORTED;
 import static io.trino.spi.StandardErrorCode.TYPE_MISMATCH;
 import static io.trino.spi.type.TimestampType.TIMESTAMP_MILLIS;
 import static io.trino.spi.type.Timestamps.MICROSECONDS_PER_MILLISECOND;
+import static java.lang.Math.multiplyExact;
 import static java.lang.String.format;
 import static java.time.ZoneOffset.UTC;
 import static java.time.format.DateTimeFormatter.ISO_DATE_TIME;
+import static java.time.format.DateTimeFormatter.ISO_LOCAL_DATE;
+import static java.time.format.DateTimeFormatter.ISO_LOCAL_DATE_TIME;
+import static java.time.temporal.ChronoField.INSTANT_SECONDS;
+import static java.util.Locale.ROOT;
 import static java.util.Objects.requireNonNull;
 
 public class TimestampDecoder
         implements Decoder
 {
+    private static final DateTimeFormatter BASIC_OFFSET_DATE_TIME = new DateTimeFormatterBuilder()
+            .append(ISO_LOCAL_DATE_TIME)
+            .appendOffset("+HHMM", "Z")
+            .toFormatter(ROOT);
+
     private final String path;
 
     public TimestampDecoder(String path)
@@ -73,7 +88,7 @@ public class TimestampDecoder
                     timestamp = LocalDateTime.ofInstant(Instant.ofEpochMilli(epochMillis), UTC);
                 }
                 else {
-                    timestamp = ISO_DATE_TIME.parse(valueString, LocalDateTime::from);
+                    timestamp = parseSourceTimestamp(valueString);
                 }
             }
             else if (value instanceof Number number) {
@@ -87,10 +102,32 @@ public class TimestampDecoder
                         value.getClass().getSimpleName()));
             }
 
-            long epochMicros = timestamp.atOffset(UTC).toInstant().toEpochMilli() * MICROSECONDS_PER_MILLISECOND;
-
-            TIMESTAMP_MILLIS.writeLong(output, epochMicros);
+            try {
+                long epochMicros = multiplyExact(timestamp.atOffset(UTC).toInstant().toEpochMilli(), MICROSECONDS_PER_MILLISECOND);
+                TIMESTAMP_MILLIS.writeLong(output, epochMicros);
+            }
+            catch (ArithmeticException e) {
+                throw new TrinoException(TYPE_MISMATCH, format("Timestamp for field '%s' is outside Trino's supported range", path), e);
+            }
         }
+    }
+
+    private static LocalDateTime parseSourceTimestamp(String value)
+    {
+        if (value.indexOf('T') < 0) {
+            return LocalDate.parse(value, ISO_LOCAL_DATE).atStartOfDay();
+        }
+        TemporalAccessor timestamp;
+        try {
+            timestamp = ISO_DATE_TIME.parse(value);
+        }
+        catch (DateTimeParseException e) {
+            timestamp = BASIC_OFFSET_DATE_TIME.parse(value);
+        }
+        if (timestamp.isSupported(INSTANT_SECONDS)) {
+            return LocalDateTime.ofInstant(Instant.from(timestamp), UTC);
+        }
+        return LocalDateTime.from(timestamp);
     }
 
     public static class Descriptor

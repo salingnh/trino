@@ -604,7 +604,7 @@ public abstract class BaseElasticsearchAnyMatchPushdownTest
         String indexName = "scalar_expressions_" + randomNameSuffix();
         createIndex(indexName,
                 """
-                {"properties":{
+                {"_meta":{"trino":{}},"properties":{
                   "id":{"type":"keyword"},"word":{"type":"keyword"},
                   "number":{"type":"integer"},"double_value":{"type":"double"},"real_value":{"type":"float"},
                   "date_value":{"type":"date"},"flag":{"type":"boolean"},

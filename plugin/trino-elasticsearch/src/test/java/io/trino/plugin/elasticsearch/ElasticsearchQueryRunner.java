@@ -26,9 +26,11 @@ import io.trino.testing.DistributedQueryRunner;
 import io.trino.testing.QueryRunner;
 import io.trino.testing.TestingTrinoClient;
 import io.trino.tpch.TpchTable;
+import org.elasticsearch.client.Request;
 import org.elasticsearch.client.RestClient;
 
 import java.io.File;
+import java.io.IOException;
 import java.net.URISyntaxException;
 import java.util.HashMap;
 import java.util.List;
@@ -154,10 +156,16 @@ public final class ElasticsearchQueryRunner
     }
 
     private static void loadTpchTopic(RestClient client, TestingTrinoClient trinoClient, TpchTable<?> table)
+            throws IOException
     {
         long start = System.nanoTime();
         LOG.info("Running import for %s", table.getTableName());
-        ElasticsearchLoader loader = new ElasticsearchLoader(client, table.getTableName().toLowerCase(ENGLISH), trinoClient.getServer(), trinoClient.getDefaultSession());
+        String indexName = table.getTableName().toLowerCase(ENGLISH);
+        // Preserve the mapping-based types expected by the shared TPC-H query tests.
+        Request create = new Request("PUT", "/" + indexName);
+        create.setJsonEntity("{\"mappings\":{\"_meta\":{\"trino\":{}}}}");
+        client.performRequest(create);
+        ElasticsearchLoader loader = new ElasticsearchLoader(client, indexName, trinoClient.getServer(), trinoClient.getDefaultSession());
         loader.execute(format("SELECT * from %s", new QualifiedObjectName(TPCH_SCHEMA, TINY_SCHEMA_NAME, table.getTableName().toLowerCase(ENGLISH))));
         LOG.info("Imported %s in %s", table.getTableName(), nanosSince(start).convertToMostSuccinctTimeUnit());
     }

@@ -131,6 +131,10 @@ final class ElasticsearchRemotePredicateTranslator
             return Optional.empty();
         }
 
+        if (ElasticsearchMappedScalarPredicates.handles(column)) {
+            return ElasticsearchMappedScalarPredicates.translate(column, domain);
+        }
+
         String field = column.predicateName();
         if (domain.getValues().isNone()) {
             if (domain.isNullAllowed()) {
