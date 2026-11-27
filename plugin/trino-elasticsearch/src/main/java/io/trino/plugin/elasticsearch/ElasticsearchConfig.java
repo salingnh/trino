@@ -104,7 +104,7 @@ public class ElasticsearchConfig
     private boolean keywordSubfieldPushdownWithIgnoreAbove;
     private boolean aggregationPushdownEnabled = true;
     private boolean arrayScriptPushdownEnabled;
-    private boolean scalarScriptPushdownEnabled;
+    private boolean scalarScriptPushdownEnabled = true;
     private int aggregationPageSize = 10_000;
     private FullTextPushdownMode fullTextPushdownMode = FullTextPushdownMode.DISABLED;
 

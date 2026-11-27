@@ -53,7 +53,7 @@ Bảng sau liệt kê các thuộc tính cấu hình chung.
 | `elasticsearch.keyword-subfield-pushdown-with-ignore-above` | Cho phép đẩy điều kiện lọc và tổng hợp của trường `text` xuống trường con `keyword` dùng để khớp chính xác, kể cả khi trường con có `ignore_above`. Mặc định tắt vì các giá trị dài bị loại khỏi chỉ mục của trường con và điều kiện được đẩy xuống có thể trả thiếu kết quả. Chỉ bật khi mọi chuỗi được lập chỉ mục đều ngắn hơn giới hạn `ignore_above`. Có thể ghi đè theo truy vấn bằng thuộc tính phiên `keyword_subfield_pushdown_with_ignore_above`. | `false` |
 | `elasticsearch.aggregation-page-size` | Số nhóm tối đa trong mỗi phản hồi của phép tổng hợp composite. Giá trị tối thiểu là 1. Trang lớn giảm số yêu cầu và có thể tốn thêm bộ nhớ cho mỗi phản hồi. | `10000` |
 | `elasticsearch.aggregation-pushdown.enabled` | Bật pushdown phép tổng hợp. Có thể ghi đè theo truy vấn bằng thuộc tính phiên `aggregation_pushdown_enabled`. | `true` |
-| `elasticsearch.scalar-script-pushdown.enabled` | Dùng Painless để đẩy xuống các biểu thức vô hướng được hỗ trợ trên trường có doc values và giữ đúng ngữ nghĩa của `_source`. Có thể ghi đè bằng thuộc tính phiên `scalar_script_pushdown_enabled`. | `false` |
+| `elasticsearch.scalar-script-pushdown.enabled` | Dùng Painless để đẩy xuống các biểu thức vô hướng được hỗ trợ trên trường có doc values và giữ đúng ngữ nghĩa của `_source`. Có thể ghi đè bằng thuộc tính phiên `scalar_script_pushdown_enabled`. | `true` |
 | `elasticsearch.full-text-pushdown` | Đẩy điều kiện lọc và bộ lọc động trên trường `text` đã phân tích xuống Elasticsearch dưới dạng truy vấn toàn văn. Chọn `DISABLED`, `SAFE` hoặc `UNSAFE`. Elasticsearch tách `text` thành token nên kết quả có thể khác ngữ nghĩa SQL. Ghi đè theo truy vấn bằng `full_text_pushdown_mode`. | `DISABLED` |
 | `elasticsearch.ignore-publish-address` | Bỏ qua địa chỉ do API Elasticsearch công bố khi kết nối để truy vấn. Tùy chọn này hữu ích khi cổng Elasticsearch được ánh xạ sang một cổng công khai được cấp ngẫu nhiên. | `false` |
 
@@ -709,11 +709,11 @@ lọc sơ bộ mảng như bình thường.
 ### Script cho biểu thức vô hướng
 
 Biểu thức vô hướng trong `WHERE` dùng cùng bộ biên dịch theo kiểu với
-lambda trên mảng. Đặt `elasticsearch.scalar-script-pushdown.enabled=true`
-trong catalog hoặc đặt `scalar_script_pushdown_enabled` thành `true` trong
-phiên catalog. Tùy chọn này mặc định tắt và độc lập với
-`array_script_pushdown_enabled`. Connector ưu tiên truy vấn gốc, vốn hoạt
-động độc lập với cả hai tùy chọn script.
+lambda trên mảng. Tùy chọn này mặc định bật và độc lập với
+`array_script_pushdown_enabled`. Để tắt, đặt
+`elasticsearch.scalar-script-pushdown.enabled=false` trong catalog hoặc đặt
+`scalar_script_pushdown_enabled` thành `false` trong phiên catalog. Connector
+ưu tiên truy vấn gốc, vốn hoạt động độc lập với cả hai tùy chọn script.
 
 ```sql
 SET SESSION elasticsearch.scalar_script_pushdown_enabled = true;
@@ -810,9 +810,9 @@ SQL. Tùy bộ phân tích, truy vấn có thể khớp cả `SÁCH rất tốt`
 
 Với biểu thức văn bản chưa có cách dịch sang truy vấn gốc, bật thuộc tính
 phiên `scalar_script_pushdown_enabled` hoặc `array_script_pushdown_enabled`
-tương ứng để cho phép dùng trường runtime. Hai cờ hoạt động độc lập và
-mặc định tắt. Script đọc giá trị đầy đủ từ `_source`, nên hoạt động trên
-chuỗi gốc. Định nghĩa trường runtime nằm trong yêu cầu tìm kiếm, nên có
+tương ứng để cho phép dùng trường runtime. Hai cờ hoạt động độc lập:
+script vô hướng mặc định bật, còn script mảng mặc định tắt. Script đọc
+giá trị đầy đủ từ `_source`, nên hoạt động trên chuỗi gốc. Định nghĩa trường runtime nằm trong yêu cầu tìm kiếm, nên có
 thể dùng ngay với dữ liệu hiện tại. Cơ chế này cần truy cập `_source` và
 yêu cầu cụm cho phép script runtime.
 
