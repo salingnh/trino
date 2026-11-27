@@ -61,7 +61,7 @@ The following table details all general configuration properties:
 | `elasticsearch.keyword-subfield-pushdown-with-ignore-above` | Push predicates and aggregations for a `text` field down to its exact-match `keyword` sub-field even when that sub-field defines `ignore_above`. This is disabled by default because `ignore_above` omits longer values from the sub-field index, so pushed-down predicates could return incomplete results. Enable it only when all indexed string values are shorter than the `ignore_above` limit. Can be overridden per query with the `keyword_subfield_pushdown_with_ignore_above` session property. | `false` |
 | `elasticsearch.aggregation-page-size` | Maximum composite aggregation buckets per response. Must be at least 1. Larger pages reduce requests but can increase memory per response. | `10000` |
 | `elasticsearch.aggregation-pushdown.enabled` | Enable pushing down aggregations to Elasticsearch. Can be overridden per query with the `aggregation_pushdown_enabled` session property. | `true` |
-| `elasticsearch.scalar-script-pushdown.enabled` | Enable Painless pushdown for supported scalar expressions on source-equivalent fields with doc values. Can be overridden with the `scalar_script_pushdown_enabled` session property. | `false` |
+| `elasticsearch.scalar-script-pushdown.enabled` | Enable Painless pushdown for supported scalar expressions on source-equivalent fields with doc values. Can be overridden with the `scalar_script_pushdown_enabled` session property. | `true` |
 | `elasticsearch.full-text-pushdown` | Push predicates and dynamic filters on analyzed `text` fields to Elasticsearch as full-text queries. One of `DISABLED`, `SAFE`, or `UNSAFE`. A `text` field is tokenized, so this does not have exact SQL semantics. Can be overridden per query with the `full_text_pushdown_mode` session property. | `DISABLED` |
 | `elasticsearch.ignore-publish-address` | Disable using the address published by the Elasticsearch API to connect for queries. Some deployments map Elasticsearch ports to a random public port and enabling this property can help in these cases. | `false` |
 
@@ -709,9 +709,10 @@ without scripts.
 ### Scalar expression scripts
 
 Scalar `WHERE` expressions use the same typed expression compiler as array
-lambdas. Enable `elasticsearch.scalar-script-pushdown.enabled=true` in the catalog,
-or set the `scalar_script_pushdown_enabled` catalog session property to `true`.
-It is disabled by default and independent of `array_script_pushdown_enabled`.
+lambdas. Scalar script pushdown is enabled by default and independent of
+`array_script_pushdown_enabled`. To disable it, set
+`elasticsearch.scalar-script-pushdown.enabled=false` in the catalog, or set the
+`scalar_script_pushdown_enabled` catalog session property to `false`.
 Native predicates are preferred and do not require either script option.
 
 ```sql
@@ -803,9 +804,10 @@ Painless or an exact SQL residual. It can match both `SÁCH rất tốt` and
 
 For text expressions without a native translation, enable the corresponding
 `scalar_script_pushdown_enabled` or `array_script_pushdown_enabled` session
-property to allow a runtime-field fallback. These flags remain independent and
-default to false. The fallback reads the complete value from `_source`; it does
-not treat analyzed tokens as the original string. Runtime definitions exist only
+property to allow a runtime-field fallback. These flags remain independent:
+scalar scripts default to true, and array scripts default to false. The fallback
+reads the complete value from `_source`; it does not treat analyzed tokens as the
+original string. Runtime definitions exist only
 in the search request, so no reindexing or persistent mapping change is required.
 This requires `_source` to be available and the cluster to permit runtime scripts.
 

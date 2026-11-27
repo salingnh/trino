@@ -24,7 +24,7 @@ WHERE LOWER(raw_review_comment) LIKE '%sá%'
 LIMIT 20;
 ```
 
-Trong `SET SESSION`, thay tiền tố `elasticsearch` bằng tên catalog thực tế, ví dụ `osint_profiling_3517.scalar_script_pushdown_enabled`. Catalog có thể bật mặc định bằng `elasticsearch.scalar-script-pushdown.enabled=true`. Mặc định false; độc lập với cờ array. Cột chuỗi cần mapping keyword trực tiếp, doc values và bằng chứng tương đương nguồn giống compiler array. Đây là yêu cầu của đường doc values. Với text, khi bật `full_text_pushdown_mode=UNSAFE`, connector có thể dùng native analyzer hoặc runtime `_source` như mục mở rộng text phía trên; không dùng token của text làm chuỗi SQL gốc. Keyword bị ignore_above/normalizer hoặc mapping không đủ bằng chứng vẫn không được coi là nguồn doc values tương đương SQL.
+Trong `SET SESSION`, thay tiền tố `elasticsearch` bằng tên catalog thực tế, ví dụ `osint_profiling_3517.scalar_script_pushdown_enabled`. Scalar script mặc định bật; có thể tắt bằng `elasticsearch.scalar-script-pushdown.enabled=false` hoặc session property tương ứng. Cờ này độc lập với cờ array, vốn mặc định tắt. Cột chuỗi cần mapping keyword trực tiếp, doc values và bằng chứng tương đương nguồn giống compiler array. Đây là yêu cầu của đường doc values. Với text, khi bật `full_text_pushdown_mode=UNSAFE`, connector có thể dùng native analyzer hoặc runtime `_source` như mục mở rộng text phía trên; không dùng token của text làm chuỗi SQL gốc. Keyword bị ignore_above/normalizer hoặc mapping không đủ bằng chứng vẫn không được coi là nguồn doc values tương đương SQL.
 
 | Trường hợp | Scalar | Array `any_match` |
 | --- | --- | --- |
