@@ -75,9 +75,14 @@ final class ElasticsearchRemotePredicateQueryBuilder
             case ElasticsearchRemotePredicate.Prefix prefix -> JSON.objectNode().set(
                     "prefix",
                     JSON.objectNode().put(prefix.field(), prefix.value()));
-            case ElasticsearchRemotePredicate.Regexp regexp -> JSON.objectNode().set(
-                    "regexp",
-                    JSON.objectNode().put(regexp.field(), regexp.value()));
+            case ElasticsearchRemotePredicate.Regexp regexp -> {
+                if (regexp.caseInsensitive()) {
+                    yield JSON.objectNode().set("regexp", JSON.objectNode().set(
+                            regexp.field(),
+                            JSON.objectNode().put("value", regexp.value()).put("case_insensitive", true)));
+                }
+                yield JSON.objectNode().set("regexp", JSON.objectNode().put(regexp.field(), regexp.value()));
+            }
             case ElasticsearchRemotePredicate.MatchPhrase matchPhrase -> JSON.objectNode().set(
                     "match_phrase",
                     JSON.objectNode().put(matchPhrase.field(), matchPhrase.value()));

@@ -72,6 +72,7 @@ record ElasticsearchPredicateTranslation<R>(
         FULL_TEXT_SAFE_PREFILTER,
         FULL_TEXT_SAFE_UNPROVEN,
         FULL_TEXT_UNSAFE_APPROXIMATE,
+        KEYWORD_CASE_UNSAFE_APPROXIMATE,
         BOOLEAN_AND,
         BOOLEAN_OR,
         BOOLEAN_NOT_UNPROVEN,

@@ -51,6 +51,11 @@ public abstract class BaseElasticsearchFullTextPushdownTest
         this.client = server.getClient();
     }
 
+    protected final RestClient fullTextClient()
+    {
+        return client;
+    }
+
     @Override
     @Test
     public void testRegexpLikeIsNotPushedDown()

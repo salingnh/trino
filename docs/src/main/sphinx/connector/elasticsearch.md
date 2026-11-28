@@ -61,7 +61,7 @@ The following table details all general configuration properties:
 | `elasticsearch.keyword-subfield-pushdown-with-ignore-above` | Push predicates and aggregations for a `text` field down to its exact-match `keyword` sub-field even when that sub-field defines `ignore_above`. This is disabled by default because `ignore_above` omits longer values from the sub-field index, so pushed-down predicates could return incomplete results. Enable it only when all indexed string values are shorter than the `ignore_above` limit. Can be overridden per query with the `keyword_subfield_pushdown_with_ignore_above` session property. | `false` |
 | `elasticsearch.aggregation-page-size` | Maximum composite aggregation buckets per response. Must be at least 1. Larger pages reduce requests but can increase memory per response. | `10000` |
 | `elasticsearch.aggregation-pushdown.enabled` | Enable pushing down aggregations to Elasticsearch. Can be overridden per query with the `aggregation_pushdown_enabled` session property. | `true` |
-| `elasticsearch.scalar-script-pushdown.enabled` | Enable Painless pushdown for supported scalar expressions on source-equivalent fields with doc values. Can be overridden with the `scalar_script_pushdown_enabled` session property. | `false` |
+| `elasticsearch.scalar-script-pushdown.enabled` | Enable Painless pushdown for supported scalar expressions on source-equivalent fields with doc values. Can be overridden with the `scalar_script_pushdown_enabled` session property. | `true` |
 | `elasticsearch.full-text-pushdown` | Push predicates and dynamic filters on analyzed `text` fields to Elasticsearch as full-text queries. One of `DISABLED`, `SAFE`, or `UNSAFE`. A `text` field is tokenized, so this does not have exact SQL semantics. Can be overridden per query with the `full_text_pushdown_mode` session property. | `DISABLED` |
 | `elasticsearch.ignore-publish-address` | Disable using the address published by the Elasticsearch API to connect for queries. Some deployments map Elasticsearch ports to a random public port and enabling this property can help in these cases. | `false` |
 
@@ -709,9 +709,10 @@ without scripts.
 ### Scalar expression scripts
 
 Scalar `WHERE` expressions use the same typed expression compiler as array
-lambdas. Enable `elasticsearch.scalar-script-pushdown.enabled=true` in the catalog,
-or set the `scalar_script_pushdown_enabled` catalog session property to `true`.
-It is disabled by default and independent of `array_script_pushdown_enabled`.
+lambdas. Scalar script pushdown is enabled by default and independent of
+`array_script_pushdown_enabled`. To disable it, set
+`elasticsearch.scalar-script-pushdown.enabled=false` in the catalog, or set the
+`scalar_script_pushdown_enabled` catalog session property to `false`.
 Native predicates are preferred and do not require either script option.
 
 ```sql
@@ -753,6 +754,21 @@ conversion remain prefilters with the original SQL predicate retained. Thus
 when the column is eligible, but non-ASCII strings still require Trino's Unicode
 case conversion and LIKE check. LIMIT remains above this residual filter; a
 remote candidate count must not be mistaken for the requested SQL result count.
+
+With `full_text_pushdown_mode=UNSAFE`, scalar predicates of the form
+`lower(keyword_column) LIKE constant_pattern` or
+`upper(keyword_column) LIKE constant_pattern` instead use a native Elasticsearch
+`regexp` query with `case_insensitive=true`. Constant `ESCAPE` clauses are
+supported. This path requires an indexed, source-equivalent direct `keyword`
+mapping and is preferred even when scalar scripts are disabled. An analyzed
+text subfield does not change the target: the query reads the keyword parent.
+It requires Elasticsearch 7.10 or later.
+
+These predicates are marked `APPROXIMATE` and do not retain the SQL residual.
+Elasticsearch case matching can differ from Trino's `lower` or `upper`, including
+for Unicode and uppercase letters in the pattern. `SAFE` and `DISABLED` retain
+the existing scalar script or local evaluation behavior. Plain `column LIKE
+pattern` predicates retain their existing case-sensitive native translation.
 
 ### Prefix predicate push down
 
@@ -803,9 +819,10 @@ Painless or an exact SQL residual. It can match both `SÁCH rất tốt` and
 
 For text expressions without a native translation, enable the corresponding
 `scalar_script_pushdown_enabled` or `array_script_pushdown_enabled` session
-property to allow a runtime-field fallback. These flags remain independent and
-default to false. The fallback reads the complete value from `_source`; it does
-not treat analyzed tokens as the original string. Runtime definitions exist only
+property to allow a runtime-field fallback. These flags remain independent:
+scalar scripts default to true, and array scripts default to false. The fallback
+reads the complete value from `_source`; it does not treat analyzed tokens as the
+original string. Runtime definitions exist only
 in the search request, so no reindexing or persistent mapping change is required.
 This requires `_source` to be available and the cluster to permit runtime scripts.
 

@@ -348,9 +348,14 @@ public sealed interface ElasticsearchRemotePredicate
         }
     }
 
-    record Regexp(String field, String value)
+    record Regexp(String field, String value, boolean caseInsensitive)
             implements ElasticsearchRemotePredicate
     {
+        public Regexp(String field, String value)
+        {
+            this(field, value, false);
+        }
+
         public Regexp
         {
             field = requireField(field);
