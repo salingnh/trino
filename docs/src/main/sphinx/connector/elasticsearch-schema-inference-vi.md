@@ -758,6 +758,21 @@ khi cột đủ điều kiện. Trino vẫn phải đổi hoa thường Unicode 
 LIKE trên chuỗi ngoài ASCII. Trino áp dụng `LIMIT` sau bước kiểm tra để
 đếm đúng số dòng kết quả SQL.
 
+Khi `full_text_pushdown_mode=UNSAFE`, điều kiện vô hướng dạng
+`lower(cột_keyword) LIKE mẫu_hằng` hoặc `upper(cột_keyword) LIKE mẫu_hằng`
+dùng truy vấn Elasticsearch `regexp` với `case_insensitive=true`. Hỗ trợ
+`ESCAPE` hằng. Đường này cần mapping `keyword` trực tiếp có chỉ mục và giữ
+nguyên giá trị nguồn, được ưu tiên kể cả khi tắt scalar script. Trường con
+`text` không đổi đích truy vấn: connector vẫn dùng trường cha `keyword`.
+Cần Elasticsearch 7.10 trở lên.
+
+Các điều kiện này được đánh dấu `APPROXIMATE`, không dùng Painless và không
+giữ bước Trino kiểm tra lại SQL. Quy tắc hoa thường của Elasticsearch có
+thể khác `lower` hoặc `upper` của Trino, kể cả với Unicode và chữ hoa trong
+mẫu. Chế độ `SAFE` và `DISABLED` giữ cách dùng scalar script hoặc đánh giá
+cục bộ hiện tại. Điều kiện `cột LIKE mẫu` không có hàm đổi hoa thường vẫn
+giữ cách dịch native phân biệt hoa thường hiện tại.
+
 ### Pushdown điều kiện tiền tố
 
 Connector đẩy điều kiện khớp tiền tố xuống dưới dạng truy vấn `prefix`

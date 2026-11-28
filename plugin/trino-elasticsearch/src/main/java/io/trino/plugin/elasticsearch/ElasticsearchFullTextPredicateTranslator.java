@@ -27,6 +27,7 @@ import io.trino.spi.expression.Constant;
 import io.trino.spi.expression.Variable;
 import io.trino.spi.type.VarcharType;
 
+import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
@@ -38,11 +39,15 @@ import static io.trino.plugin.elasticsearch.ElasticsearchPredicateTranslation.Re
 import static io.trino.plugin.elasticsearch.ElasticsearchPredicateTranslation.Reason.FULL_TEXT_SAFE_PREFILTER;
 import static io.trino.plugin.elasticsearch.ElasticsearchPredicateTranslation.Reason.FULL_TEXT_SAFE_UNPROVEN;
 import static io.trino.plugin.elasticsearch.ElasticsearchPredicateTranslation.Reason.FULL_TEXT_UNSAFE_APPROXIMATE;
+import static io.trino.plugin.elasticsearch.ElasticsearchPredicateTranslation.Reason.KEYWORD_CASE_UNSAFE_APPROXIMATE;
 import static io.trino.plugin.elasticsearch.ElasticsearchPredicateTranslation.Reason.UNSUPPORTED_EXPRESSION;
 import static io.trino.plugin.elasticsearch.FullTextPushdownMode.DISABLED;
 import static io.trino.plugin.elasticsearch.FullTextPushdownMode.SAFE;
+import static io.trino.plugin.elasticsearch.FullTextPushdownMode.UNSAFE;
+import static io.trino.spi.expression.StandardFunctions.AND_FUNCTION_NAME;
 import static io.trino.spi.expression.StandardFunctions.EQUAL_OPERATOR_FUNCTION_NAME;
 import static io.trino.spi.expression.StandardFunctions.LIKE_FUNCTION_NAME;
+import static io.trino.spi.expression.StandardFunctions.OR_FUNCTION_NAME;
 import static java.util.Objects.requireNonNull;
 
 /**
@@ -57,6 +62,90 @@ final class ElasticsearchFullTextPredicateTranslator
     private static final ElasticsearchExpressionTranslator EXPRESSION_TRANSLATOR = new ElasticsearchExpressionTranslator();
 
     private ElasticsearchFullTextPredicateTranslator() {}
+
+    static Optional<ElasticsearchPredicateTranslation<ConnectorExpression>> translateKeywordCaseLike(
+            ConnectorSession session,
+            ConnectorExpression expression,
+            Map<String, ColumnHandle> assignments,
+            FullTextPushdownMode fullTextMode,
+            ElasticsearchPredicateCompositionPolicy policy)
+    {
+        return translateKeywordCaseLike(session, expression, assignments, fullTextMode, policy, 0);
+    }
+
+    private static Optional<ElasticsearchPredicateTranslation<ConnectorExpression>> translateKeywordCaseLike(
+            ConnectorSession session,
+            ConnectorExpression expression,
+            Map<String, ColumnHandle> assignments,
+            FullTextPushdownMode fullTextMode,
+            ElasticsearchPredicateCompositionPolicy policy,
+            int depth)
+    {
+        if (fullTextMode != UNSAFE || depth > policy.maxBooleanDepth()) {
+            return Optional.empty();
+        }
+        if (expression instanceof Call booleanCall
+                && (AND_FUNCTION_NAME.equals(booleanCall.getFunctionName()) || OR_FUNCTION_NAME.equals(booleanCall.getFunctionName()))
+                && !booleanCall.getArguments().isEmpty()
+                && booleanCall.getArguments().size() <= policy.maxBooleanClauses()) {
+            var children = new ArrayList<ElasticsearchPredicateTranslation<ConnectorExpression>>();
+            boolean casePredicatePresent = false;
+            for (ConnectorExpression argument : booleanCall.getArguments()) {
+                var translated = translateKeywordCaseLike(session, argument, assignments, fullTextMode, policy, depth + 1);
+                casePredicatePresent |= translated.isPresent();
+                if (translated.isEmpty()) {
+                    // Decompose only when every sibling is native. A script-only sibling may be fallible,
+                    // and an independent native filter must not suppress its SQL error.
+                    translated = ElasticsearchScalarPredicateTranslator.translate(session, argument, assignments, policy, false);
+                }
+                if (translated.isEmpty()) {
+                    return Optional.empty();
+                }
+                children.add(translated.orElseThrow());
+            }
+            if (casePredicatePresent) {
+                return Optional.of(AND_FUNCTION_NAME.equals(booleanCall.getFunctionName())
+                        ? ElasticsearchPredicateComposer.and(expression, children, policy)
+                        : ElasticsearchPredicateComposer.or(expression, children, policy));
+            }
+            return Optional.empty();
+        }
+        if (!(expression instanceof Call call)
+                || !LIKE_FUNCTION_NAME.equals(call.getFunctionName())
+                || call.getArguments().size() < 2 || call.getArguments().size() > 3
+                || !(call.getArguments().getFirst() instanceof Call conversion)
+                || conversion.getFunctionName().getCatalogSchema().isPresent()
+                || !List.of("lower", "upper").contains(conversion.getFunctionName().getName())
+                || conversion.getArguments().size() != 1
+                || !(conversion.getArguments().getFirst() instanceof Variable variable)
+                || !(variable.getType() instanceof VarcharType)
+                || !(assignments.get(variable.getName()) instanceof ElasticsearchColumnHandle column)
+                || !column.type().equals(variable.getType())
+                || !column.supportsPredicates()
+                || !(column.elasticsearchType() instanceof PrimitiveType mapping)
+                || !mapping.name().equals("keyword")
+                || !mapping.indexed()) {
+            return Optional.empty();
+        }
+        List<ConnectorExpression> arguments = call.getArguments();
+        if (!(arguments.get(1) instanceof Constant constant) || !(constant.getValue() instanceof Slice pattern)) {
+            return Optional.empty();
+        }
+        Optional<Slice> escape = Optional.empty();
+        if (arguments.size() == 3) {
+            if (!(arguments.get(2) instanceof Constant escapeConstant) || !(escapeConstant.getValue() instanceof Slice escapeSlice)) {
+                return Optional.empty();
+            }
+            escape = Optional.of(escapeSlice);
+        }
+        // UNSAFE explicitly accepts Elasticsearch case matching in place of Trino's Unicode conversion.
+        // Read the keyword value itself, including when it has an analyzed text sub-field.
+        return Optional.of(ElasticsearchPredicateComposer.approximateWithinBudget(
+                expression,
+                new ElasticsearchRemotePredicate.Regexp(column.remoteName(), ElasticsearchMetadata.likeToRegexp(pattern, escape), true),
+                KEYWORD_CASE_UNSAFE_APPROXIMATE,
+                policy));
+    }
 
     static Optional<ElasticsearchPredicateTranslation<ConnectorExpression>> translateLike(
             ConnectorSession session,

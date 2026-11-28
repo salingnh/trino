@@ -755,6 +755,21 @@ when the column is eligible, but non-ASCII strings still require Trino's Unicode
 case conversion and LIKE check. LIMIT remains above this residual filter; a
 remote candidate count must not be mistaken for the requested SQL result count.
 
+With `full_text_pushdown_mode=UNSAFE`, scalar predicates of the form
+`lower(keyword_column) LIKE constant_pattern` or
+`upper(keyword_column) LIKE constant_pattern` instead use a native Elasticsearch
+`regexp` query with `case_insensitive=true`. Constant `ESCAPE` clauses are
+supported. This path requires an indexed, source-equivalent direct `keyword`
+mapping and is preferred even when scalar scripts are disabled. An analyzed
+text subfield does not change the target: the query reads the keyword parent.
+It requires Elasticsearch 7.10 or later.
+
+These predicates are marked `APPROXIMATE` and do not retain the SQL residual.
+Elasticsearch case matching can differ from Trino's `lower` or `upper`, including
+for Unicode and uppercase letters in the pattern. `SAFE` and `DISABLED` retain
+the existing scalar script or local evaluation behavior. Plain `column LIKE
+pattern` predicates retain their existing case-sensitive native translation.
+
 ### Prefix predicate push down
 
 Predicates that match a string prefix are pushed down as an Elasticsearch

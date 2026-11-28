@@ -101,6 +101,8 @@ public class TestElasticsearchRemotePredicateQueryBuilder
                 .isEqualTo("{\"prefix\":{\"name.keyword\":\"tri\"}}");
         assertThat(build(new ElasticsearchRemotePredicate.Regexp("name.keyword", "tr.*")).toString())
                 .isEqualTo("{\"regexp\":{\"name.keyword\":\"tr.*\"}}");
+        assertThat(build(new ElasticsearchRemotePredicate.Regexp("name", ".*NaM.*", true)).toString())
+                .isEqualTo("{\"regexp\":{\"name\":{\"value\":\".*NaM.*\",\"case_insensitive\":true}}}");
         assertThat(build(new ElasticsearchRemotePredicate.MatchPhrase("name", "apache trino")).toString())
                 .isEqualTo("{\"match_phrase\":{\"name\":\"apache trino\"}}");
         assertThat(build(new ElasticsearchRemotePredicate.MatchPhrasePrefix("name", "apache tri")).toString())

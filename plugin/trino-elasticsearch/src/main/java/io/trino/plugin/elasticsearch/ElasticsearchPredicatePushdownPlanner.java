@@ -212,6 +212,12 @@ final class ElasticsearchPredicatePushdownPlanner
             return ElasticsearchPredicateTranslation.noop(Reason.NOOP);
         }
 
+        Optional<ElasticsearchPredicateTranslation<ConnectorExpression>> keywordCase = ElasticsearchFullTextPredicateTranslator.translateKeywordCaseLike(
+                session, expression, assignments, fullTextMode, policy);
+        if (keywordCase.isPresent()) {
+            return keywordCase.orElseThrow();
+        }
+
         Optional<ElasticsearchPredicateTranslation<ConnectorExpression>> scalar = ElasticsearchScalarPredicateTranslator.translate(
                 session, expression, assignments, policy, scalarScriptPushdownEnabled);
         if (scalar.isPresent()) {

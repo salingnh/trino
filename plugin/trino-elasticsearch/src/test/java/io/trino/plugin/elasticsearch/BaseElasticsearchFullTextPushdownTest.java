@@ -51,6 +51,57 @@ public abstract class BaseElasticsearchFullTextPushdownTest
         this.client = server.getClient();
     }
 
+    @Test
+    public void testKeywordLowerAndUpperLikeUseCaseInsensitiveRegexp()
+            throws IOException
+    {
+        String indexName = "keyword_case_like_" + randomNameSuffix();
+        createIndex(indexName,
+                """
+                {"properties":{
+                  "word":{"type":"keyword","fields":{"text":{"type":"text"}}},
+                  "id":{"type":"keyword"}
+                }}
+                """);
+        try {
+            index(indexName, ImmutableMap.of("id", "1", "word", "NAM1"));
+            index(indexName, ImmutableMap.of("id", "2", "word", "Nam1"));
+            index(indexName, ImmutableMap.of("id", "3", "word", "nam1"));
+            index(indexName, ImmutableMap.of("id", "4", "word", "A11"));
+            index(indexName, ImmutableMap.of("id", "5"));
+            index(indexName, ImmutableMap.of("id", "6", "word", "Nam_1%"));
+            index(indexName, ImmutableMap.of("id", "7", "word", "ĐẶNG1"));
+            String catalog = getSession().getCatalog().orElseThrow();
+            for (boolean scripts : List.of(false, true)) {
+                Session unsafe = Session.builder(getSession())
+                        .setCatalogSessionProperty(catalog, "full_text_pushdown_mode", "UNSAFE")
+                        .setCatalogSessionProperty(catalog, "scalar_script_pushdown_enabled", Boolean.toString(scripts))
+                        .build();
+                // The pattern intentionally uses the opposite case. A retained SQL residual would reject these rows.
+                assertThat(query(unsafe, "SELECT id FROM " + indexName + " WHERE lower(word) LIKE '%NAM1%'"))
+                        .matches("VALUES VARCHAR '1', '2', '3'").isFullyPushedDown();
+                assertThat(query(unsafe, "SELECT id FROM " + indexName + " WHERE upper(word) LIKE '%nam1%'"))
+                        .matches("VALUES VARCHAR '1', '2', '3'").isFullyPushedDown();
+                assertThat(query(unsafe, "SELECT id FROM " + indexName + " WHERE lower(word) LIKE '%nam!_1!%%' ESCAPE '!'"))
+                        .matches("VALUES VARCHAR '6'").isFullyPushedDown();
+                assertThat(query(unsafe, "SELECT id FROM " + indexName + " WHERE upper(word) LIKE '%1%'"))
+                        .matches("VALUES VARCHAR '1', '2', '3', '4', '6', '7'").isFullyPushedDown();
+                assertThat(query(unsafe, "SELECT count(*) FROM (SELECT id FROM " + indexName + " WHERE lower(word) LIKE '%1%' LIMIT 2)"))
+                        .matches("VALUES BIGINT '2'");
+            }
+            for (String mode : List.of("SAFE", "DISABLED")) {
+                Session safe = Session.builder(getSession()).setCatalogSessionProperty(catalog, "full_text_pushdown_mode", mode).build();
+                assertThat(query(safe, "SELECT id FROM " + indexName + " WHERE lower(word) LIKE '%NAM1%'"))
+                        .matches("SELECT VARCHAR 'unused' WHERE false");
+                assertThat(query(safe, "SELECT id FROM " + indexName + " WHERE upper(word) LIKE '%nam1%'"))
+                        .matches("SELECT VARCHAR 'unused' WHERE false");
+            }
+        }
+        finally {
+            deleteIndex(indexName);
+        }
+    }
+
     @Override
     @Test
     public void testRegexpLikeIsNotPushedDown()
